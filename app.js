@@ -28,8 +28,10 @@
     templates: [],
     classes: [],
     infographics: [],
+    latestSyncLog: null,
     tState: { query: "", category: "all", filled: {} },
     igState: { query: "", tag: "all" },
+    cState: { showTest: false },
     router: "templates"
   };
 
@@ -163,11 +165,12 @@
   async function reloadAll() {
     showLoader(true);
     try {
-      const [cats, tpls, cls, igs] = await Promise.all([
+      const [cats, tpls, cls, igs, syncLog] = await Promise.all([
         sb.from("categories").select("*").order("sort_order", { ascending: true }),
         sb.from("templates").select("*").order("created_at", { ascending: true }),
         sb.from("classes").select("*").order("name", { ascending: true }),
-        sb.from("infographics").select("*").order("name", { ascending: true })
+        sb.from("infographics").select("*").order("name", { ascending: true }),
+        sb.from("sync_log").select("*").eq("source", "jackrabbit").eq("operation", "pull_openings").order("created_at", { ascending: false }).limit(1).maybeSingle()
       ]);
       if (cats.error) throw cats.error;
       if (tpls.error) throw tpls.error;
@@ -177,6 +180,7 @@
       state.templates   = tpls.data;
       state.classes     = cls.data;
       state.infographics = igs.data;
+      state.latestSyncLog = syncLog.data || null;
     } catch (e) {
       console.error(e);
       showToast("Failed to load: " + e.message, "error");
@@ -560,26 +564,97 @@
   let editingClassId = null;
 
   function renderClassesTab() {
+    renderSyncStatus();
+
+    const showTest = !!state.cState.showTest;
+    const visible = state.classes.filter((c) => showTest || !c.is_test);
+    const totalCount = state.classes.length;
+    const testCount  = state.classes.filter((c) => c.is_test).length;
     const el = $("#classTable");
-    $("#classMeta").textContent = state.classes.length + (state.classes.length === 1 ? " class" : " classes");
+    $("#classMeta").innerHTML = visible.length + (visible.length === 1 ? " class" : " classes") +
+      (testCount > 0 ? ` <span style="color:var(--ink-dim)">· ${testCount} test class${testCount === 1 ? "" : "es"} hidden</span>`.replace("hidden", showTest ? "shown" : "hidden") : "");
+
     const typeLabel = { weekly: "Weekly", camp: "Camp", workshop: "Workshop", contracted: "Contracted" };
-    const rows = state.classes.map((c) => `
-      <tr>
-        <td><b>${escapeHtml(c.name)}</b>${c.age_range ? `<div style="font-size:11.5px;color:var(--ink-dim)">Ages ${escapeHtml(c.age_range)}</div>` : ""}</td>
-        <td>${escapeHtml(c.day_time || "")}</td>
-        <td>${escapeHtml(c.location || "")}</td>
-        <td><span class="type-badge type-${escapeHtml(c.type || "weekly")}">${typeLabel[c.type] || c.type || "—"}</span>${c.active === false ? ' <span style="color:var(--ink-dim);font-size:11px">(inactive)</span>' : ""}</td>
-        <td>${c.registration_link ? `<a href="${escapeHtml(c.registration_link)}" target="_blank" rel="noopener" style="font-size:12px;color:var(--accent);">Link ↗</a>` : '<span style="color:var(--ink-dim);font-size:12px">—</span>'}</td>
-        <td class="row-actions"><button class="btn small ghost" data-act="edit-class" data-id="${escapeHtml(c.id)}">Edit</button></td>
-      </tr>
-    `).join("");
+    const fmtSync = (ts) => {
+      if (!ts) return '<span style="color:var(--ink-dim);font-size:11px">—</span>';
+      const d = new Date(ts);
+      const now = new Date();
+      const diffMin = Math.round((now - d) / 60000);
+      if (diffMin < 2) return '<span style="font-size:11px;color:var(--success)">just now</span>';
+      if (diffMin < 60) return `<span style="font-size:11px">${diffMin}m ago</span>`;
+      if (diffMin < 1440) return `<span style="font-size:11px">${Math.round(diffMin/60)}h ago</span>`;
+      return `<span style="font-size:11px">${Math.round(diffMin/1440)}d ago</span>`;
+    };
+
+    const rows = visible.map((c) => {
+      const sourceBadge = c.is_test
+        ? '<span class="source-badge source-test">TEST</span>'
+        : c.source === "jackrabbit"
+          ? '<span class="source-badge source-jackrabbit">JR</span>'
+          : '<span class="source-badge source-local">local</span>';
+      const stateTag = c.sync_state === "dropped_from_source"
+        ? ' <span class="sync-state-dropped_from_source">dropped from JR</span>'
+        : "";
+      return `
+        <tr${c.is_test ? ' style="opacity:.6"' : ""}>
+          <td><b>${escapeHtml(c.name)}</b>${sourceBadge}${stateTag}${c.age_range ? `<div style="font-size:11.5px;color:var(--ink-dim)">Ages ${escapeHtml(c.age_range)}</div>` : ""}</td>
+          <td>${escapeHtml(c.day_time || "")}</td>
+          <td>${escapeHtml(c.location || "")}</td>
+          <td><span class="type-badge type-${escapeHtml(c.type || "weekly")}">${typeLabel[c.type] || c.type || "—"}</span>${c.active === false ? ' <span style="color:var(--ink-dim);font-size:11px">(inactive)</span>' : ""}</td>
+          <td>${c.registration_link ? `<a href="${escapeHtml(c.registration_link)}" target="_blank" rel="noopener" style="font-size:12px;color:var(--accent);">Link ↗</a>` : '<span style="color:var(--ink-dim);font-size:12px">—</span>'}</td>
+          <td>${fmtSync(c.last_synced_at)}</td>
+          <td class="row-actions"><button class="btn small ghost" data-act="edit-class" data-id="${escapeHtml(c.id)}">Edit</button></td>
+        </tr>
+      `;
+    }).join("");
     el.innerHTML = `
       <table>
-        <thead><tr><th>Name</th><th>Day / Time</th><th>Location</th><th>Type</th><th>Reg. link</th><th></th></tr></thead>
-        <tbody>${rows || '<tr><td colspan="6" style="text-align:center;color:var(--ink-dim);padding:24px">No classes yet — click <b>＋ New class</b>.</td></tr>'}</tbody>
+        <thead><tr><th>Name</th><th>Day / Time</th><th>Location</th><th>Type</th><th>Reg. link</th><th>Synced</th><th></th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="7" style="text-align:center;color:var(--ink-dim);padding:24px">No classes to show. Click <b>⟳ Sync now</b> to pull from Jackrabbit, or <b>＋ New class</b>.</td></tr>'}</tbody>
       </table>
     `;
     $$('[data-act="edit-class"]', el).forEach((btn) => btn.onclick = () => openClassEditor(btn.dataset.id));
+  }
+
+  function renderSyncStatus() {
+    const el = $("#syncStatus");
+    const log = state.latestSyncLog;
+    if (!log) {
+      el.className = "sync-status";
+      el.innerHTML = "";
+      return;
+    }
+    const when = new Date(log.created_at);
+    const statusClass = log.status === "ok" ? "ok" : (log.status === "partial" ? "partial" : log.status === "error" ? "error" : "");
+    el.className = "sync-status visible " + statusClass;
+    el.innerHTML = `
+      <div><b>Last Jackrabbit sync:</b> ${escapeHtml(log.message || "")}</div>
+      <div class="timestamp">${escapeHtml(when.toLocaleString())}</div>
+    `;
+  }
+
+  async function syncJackrabbit() {
+    showLoader(true);
+    const t0 = Date.now();
+    try {
+      const { data, error } = await sb.functions.invoke("jackrabbit-sync", { body: {} });
+      if (error) throw error;
+      const ms = Date.now() - t0;
+      if (data && data.status === "skipped") {
+        showToast(`Sync skipped — ${data.reason || "not configured"}`, "error");
+      } else if (data && data.status === "ok") {
+        showToast(`Sync complete in ${ms}ms · pulled ${data.pulled} (+${data.inserted} new, ${data.updated} updated)`, "success");
+      } else if (data && data.status === "partial") {
+        showToast(`Sync partial — some errors. See sync log.`, "error");
+      } else {
+        showToast(`Sync returned: ${JSON.stringify(data).slice(0, 100)}`);
+      }
+    } catch (e) {
+      showToast("Sync failed: " + e.message, "error");
+    }
+    await reloadAll();
+    renderAll();
+    showLoader(false);
   }
 
   function openClassEditor(id) {
@@ -924,6 +999,12 @@
     $("#newClassBtn").onclick      = () => openClassEditor(null);
     $("#newCategoryBtn").onclick   = newCategory;
     $("#newInfographicBtn").onclick = () => openIgEditor(null);
+
+    // Jackrabbit sync + test toggle
+    const syncBtn = $("#syncJackrabbitBtn");
+    if (syncBtn) syncBtn.onclick = syncJackrabbit;
+    const testToggle = $("#showTestClasses");
+    if (testToggle) testToggle.onchange = (e) => { state.cState.showTest = e.target.checked; renderClassesTab(); };
 
     // Template modal
     $("#addImageRow").onclick      = () => addImageRow("", "");

@@ -89,8 +89,15 @@
         <div class="tab-panel" data-tab="classes" style="display:none">
           <div class="tab-head">
             <div class="results-meta" id="classMeta"></div>
-            <button class="btn primary small" id="newClassBtn">＋ New class</button>
+            <div style="display:flex; gap:8px; align-items:center;">
+              <label style="display:inline-flex; align-items:center; gap:6px; font-size:12px; color:var(--ink-dim); cursor:pointer;">
+                <input type="checkbox" id="showTestClasses" /> Show test classes
+              </label>
+              <button class="btn small" id="syncJackrabbitBtn" title="Pull the latest class list from Jackrabbit's Openings feed">⟳ Sync now</button>
+              <button class="btn primary small" id="newClassBtn">＋ New class</button>
+            </div>
           </div>
+          <div class="sync-status" id="syncStatus"></div>
           <div class="data-table" id="classTable"></div>
         </div>
 
