@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Drama Kids Response Console</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <!-- ═══════════════════════════ LOGIN SCREEN ═══════════════════════════ -->
+  <div id="loginScreen" class="login-screen">
+    <div class="login-card">
+      <div class="login-brand">
+        <img id="loginLogo" src="logo.png" alt="Drama Kids" onerror="this.style.display='none'" />
+        <div>
+          <div class="login-title">Drama Kids</div>
+          <div class="login-sub">Response Console</div>
+        </div>
+      </div>
+      <form id="loginForm" autocomplete="on">
+        <div class="field">
+          <label>Email</label>
+          <input type="email" id="loginEmail" required autocomplete="username" />
+        </div>
+        <div class="field">
+          <label>Password</label>
+          <input type="password" id="loginPassword" required autocomplete="current-password" />
+        </div>
+        <div class="login-error" id="loginError"></div>
+        <button class="btn primary" id="loginSubmit" type="submit" style="width:100%">Sign in</button>
+      </form>
+      <div class="login-footer">
+        Password issues? Contact your admin or reset via email on the Supabase project.
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════ MAIN APP ══════════════════════════════ -->
+  <div id="app" style="display:none">
+
+    <header>
+      <div class="header-top">
+        <div class="brand">
+          <img id="logo" src="logo.png" alt="Drama Kids" onerror="this.style.display='none'" />
+          <div class="brand-text">
+            <span class="name">Drama Kids</span>
+            <span class="sub">Response Console</span>
+          </div>
+        </div>
+        <div class="header-actions">
+          <span class="user-chip" id="userChip"></span>
+          <button class="btn ghost small" id="signOutBtn" title="Sign out">Sign out</button>
+          <button class="btn primary" id="newTemplateBtn">＋ New template</button>
+        </div>
+      </div>
+
+      <div class="tabs" role="tablist">
+        <button class="tab active" data-tab="templates">Templates</button>
+        <button class="tab" data-tab="classes">Classes</button>
+        <button class="tab" data-tab="categories">Categories</button>
+        <button class="tab" data-tab="infographics">Infographics</button>
+      </div>
+
+      <div class="sub-bar" id="subBarTemplates">
+        <input id="search" class="search" type="search" placeholder="Search templates… (title, body, tags, notes)" autocomplete="off" />
+        <div class="chips" id="categoryChips"></div>
+      </div>
+    </header>
+
+    <main class="layout">
+
+      <!-- Infographic sidebar -->
+      <aside class="sidebar">
+        <h2>Infographics <span class="count" id="igCount">0</span></h2>
+        <input class="sb-search" id="igSearch" type="search" placeholder="Search images…" />
+        <div class="sb-tag-row" id="igTagRow"></div>
+        <div class="infographics-grid" id="igGrid"></div>
+      </aside>
+
+      <!-- Main tab content -->
+      <section class="content">
+        <div class="results-meta" id="resultsMeta"></div>
+
+        <div class="tab-panel" data-tab="templates">
+          <div id="cards"></div>
+        </div>
+
+        <div class="tab-panel" data-tab="classes" style="display:none">
+          <div class="tab-head">
+            <div class="results-meta" id="classMeta"></div>
+            <button class="btn primary small" id="newClassBtn">＋ New class</button>
+          </div>
+          <div class="data-table" id="classTable"></div>
+        </div>
+
+        <div class="tab-panel" data-tab="categories" style="display:none">
+          <div class="tab-head">
+            <div class="results-meta">Edit labels inline. Categories in use can't be deleted until their templates are reassigned.</div>
+            <button class="btn primary small" id="newCategoryBtn">＋ New category</button>
+          </div>
+          <div class="category-list" id="categoryList"></div>
+        </div>
+
+        <div class="tab-panel" data-tab="infographics" style="display:none">
+          <div class="tab-head">
+            <div class="results-meta" id="igManageMeta"></div>
+            <button class="btn primary small" id="newInfographicBtn">＋ Upload / add image</button>
+          </div>
+          <div class="data-table" id="infographicsTable"></div>
+        </div>
+
+      </section>
+    </main>
+
+    <footer>
+      v3 · Cloud-backed via Supabase · Edits save instantly · Multi-device ready
+    </footer>
+  </div>
+
+  <!-- ═══════════════════════════ MODALS ════════════════════════════════ -->
+
+  <!-- Template editor -->
+  <div class="modal-overlay" id="templateModalOverlay">
+    <div class="modal">
+      <div class="modal-head">
+        <h3 id="templateModalTitle">New template</h3>
+        <button class="btn ghost small" id="templateModalClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="field">
+          <label>Title</label>
+          <input type="text" id="f_title" placeholder="e.g. Musical Theatre — classes for teens" />
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>Category</label>
+            <select id="f_category"></select>
+          </div>
+          <div class="field">
+            <label>Tags <span class="field-sub">(comma-separated)</span></label>
+            <input type="text" id="f_tags" placeholder="pricing, teens, summer" />
+          </div>
+        </div>
+        <div class="field">
+          <label>Body</label>
+          <textarea id="f_body" placeholder="Use {curly_braces} for variables. Any variable you reference will be detected automatically."></textarea>
+          <div class="field-hint">Detected variables: <span id="detectedVars">—</span></div>
+        </div>
+        <div class="field">
+          <label>Notes <span class="field-sub">(private — only shown below the template)</span></label>
+          <input type="text" id="f_notes" placeholder="e.g. Confirm pricing before sending." />
+        </div>
+        <div class="field">
+          <label>Images / attachments <span class="field-sub">(link-out URLs)</span></label>
+          <div class="image-rows" id="f_images"></div>
+          <button class="btn ghost small" id="addImageRow" style="margin-top:6px">＋ Add image link</button>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn danger small" id="deleteTemplateBtn" style="margin-right:auto;display:none">Delete template</button>
+        <button class="btn" id="templateCancel">Cancel</button>
+        <button class="btn primary" id="templateSave">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Class editor -->
+  <div class="modal-overlay" id="classModalOverlay">
+    <div class="modal">
+      <div class="modal-head">
+        <h3 id="classModalTitle">New class</h3>
+        <button class="btn ghost small" id="classModalClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="field">
+          <label>Class name</label>
+          <input type="text" id="c_name" placeholder="e.g. Little Stars Drama (ages 4–5)" />
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>Day & time</label>
+            <input type="text" id="c_day_time" placeholder="Tuesdays, 3:00–3:45 PM" />
+          </div>
+          <div class="field">
+            <label>Type</label>
+            <select id="c_type">
+              <option value="weekly">Weekly</option>
+              <option value="camp">Camp</option>
+              <option value="workshop">Workshop</option>
+              <option value="contracted">Contracted</option>
+            </select>
+          </div>
+        </div>
+        <div class="field">
+          <label>Location</label>
+          <input type="text" id="c_location" placeholder="e.g. Lambs Episcopal School" />
+        </div>
+        <div class="field">
+          <label>Registration link</label>
+          <input type="text" id="c_registration_link" placeholder="https://…" />
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>Age range</label>
+            <input type="text" id="c_age_range" placeholder="6–9" />
+          </div>
+          <div class="field">
+            <label>Active?</label>
+            <select id="c_active"><option value="true">Active</option><option value="false">Inactive</option></select>
+          </div>
+        </div>
+        <div class="field">
+          <label>Notes</label>
+          <input type="text" id="c_notes" />
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn danger small" id="deleteClassBtn" style="margin-right:auto;display:none">Delete class</button>
+        <button class="btn" id="classCancel">Cancel</button>
+        <button class="btn primary" id="classSave">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Infographic editor (with upload) -->
+  <div class="modal-overlay" id="igModalOverlay">
+    <div class="modal">
+      <div class="modal-head">
+        <h3 id="igModalTitle">Upload / add image</h3>
+        <button class="btn ghost small" id="igModalClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="field">
+          <label>Name</label>
+          <input type="text" id="i_name" placeholder="e.g. Summer Camp 2026 flyer" />
+        </div>
+        <div class="field">
+          <label>Tags <span class="field-sub">(comma-separated)</span></label>
+          <input type="text" id="i_tags" placeholder="camps, flyer, summer" />
+        </div>
+        <div class="field">
+          <label>Image source</label>
+          <div class="tab-toggle">
+            <button type="button" class="toggle-btn active" data-src="upload">Upload a file</button>
+            <button type="button" class="toggle-btn" data-src="external">External URL</button>
+          </div>
+        </div>
+        <div class="field" id="uploadField">
+          <label>File <span class="field-sub">(PNG / JPG / GIF / WebP / SVG, max 5 MB)</span></label>
+          <input type="file" id="i_file" accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml" />
+          <div class="field-hint" id="currentFileLabel"></div>
+          <div id="imagePreview" class="image-preview" style="display:none"></div>
+        </div>
+        <div class="field" id="externalField" style="display:none">
+          <label>URL (Drive / Dropbox / web)</label>
+          <input type="text" id="i_url" placeholder="https://…" />
+          <div class="field-hint">Click-to-copy will copy the URL and open the image in a new tab. Browsers can't copy image bytes across origins.</div>
+        </div>
+        <div class="field">
+          <label>Notes</label>
+          <input type="text" id="i_notes" />
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn danger small" id="deleteIgBtn" style="margin-right:auto;display:none">Delete image</button>
+        <button class="btn" id="igCancel">Cancel</button>
+        <button class="btn primary" id="igSave">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+  <div class="loader" id="loader"><div class="spinner"></div></div>
+
+  <!-- Supabase client -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
