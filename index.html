@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Drama Kids Response Console</title>
+  <title>PAR DK · Response Console</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -14,7 +14,7 @@
       <div class="login-brand">
         <img id="loginLogo" src="logo.png" alt="Drama Kids" onerror="this.style.display='none'" />
         <div>
-          <div class="login-title">Drama Kids</div>
+          <div class="login-title">PAR DK</div>
           <div class="login-sub">Response Console</div>
         </div>
       </div>
@@ -44,7 +44,7 @@
         <div class="brand">
           <img id="logo" src="logo.png" alt="Drama Kids" onerror="this.style.display='none'" />
           <div class="brand-text">
-            <span class="name">Drama Kids</span>
+            <span class="name">PAR DK</span>
             <span class="sub">Response Console</span>
           </div>
         </div>
@@ -58,6 +58,7 @@
       <div class="tabs" role="tablist">
         <button class="tab active" data-tab="templates">Templates</button>
         <button class="tab" data-tab="classes">Classes</button>
+        <button class="tab" data-tab="teachers">Teachers</button>
         <button class="tab" data-tab="categories">Categories</button>
         <button class="tab" data-tab="infographics">Infographics</button>
       </div>
@@ -101,6 +102,14 @@
           <div class="data-table" id="classTable"></div>
         </div>
 
+        <div class="tab-panel" data-tab="teachers" style="display:none">
+          <div class="tab-head">
+            <div class="results-meta" id="teacherMeta"></div>
+            <button class="btn primary small" id="newTeacherBtn">＋ New teacher</button>
+          </div>
+          <div class="data-table" id="teacherTable"></div>
+        </div>
+
         <div class="tab-panel" data-tab="categories" style="display:none">
           <div class="tab-head">
             <div class="results-meta">Edit labels inline. Categories in use can't be deleted until their templates are reassigned.</div>
@@ -121,7 +130,7 @@
     </main>
 
     <footer>
-      v3 · Cloud-backed via Supabase · Edits save instantly · Multi-device ready
+      PAR DK · Response Console · <code>v3.1</code> · Federating with PAR
     </footer>
   </div>
 
@@ -273,6 +282,59 @@
         <button class="btn danger small" id="deleteIgBtn" style="margin-right:auto;display:none">Delete image</button>
         <button class="btn" id="igCancel">Cancel</button>
         <button class="btn primary" id="igSave">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Teacher editor -->
+  <div class="modal-overlay" id="teacherModalOverlay">
+    <div class="modal">
+      <div class="modal-head">
+        <h3 id="teacherModalTitle">New teacher</h3>
+        <button class="btn ghost small" id="teacherModalClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="field">
+          <label>Full name</label>
+          <input type="text" id="t_name" placeholder="e.g. Katarina Fradenburg" />
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>Email</label>
+            <input type="email" id="t_email" placeholder="kat@…" />
+          </div>
+          <div class="field">
+            <label>Phone</label>
+            <input type="text" id="t_phone" placeholder="(843) …" />
+          </div>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>Pay rate <span class="field-sub">(free-form)</span></label>
+            <input type="text" id="t_pay_rate" placeholder="e.g. $35/class, $20/hour" />
+          </div>
+          <div class="field">
+            <label>Status</label>
+            <select id="t_status">
+              <option value="active">Active</option>
+              <option value="on_leave">On leave</option>
+              <option value="inactive">Inactive</option>
+            </select>
+          </div>
+        </div>
+        <div class="field">
+          <label>Hire date</label>
+          <input type="date" id="t_hire_date" />
+        </div>
+        <div class="field">
+          <label>Notes</label>
+          <input type="text" id="t_notes" />
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn danger small" id="deleteTeacherBtn" style="margin-right:auto;display:none">Delete teacher</button>
+        <button class="btn" id="teacherCancel">Cancel</button>
+        <button class="btn primary" id="teacherSave">Save</button>
       </div>
     </div>
   </div>

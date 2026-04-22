@@ -28,10 +28,13 @@
     templates: [],
     classes: [],
     infographics: [],
+    teachers: [],
+    classTeachers: [],      // rows { class_id, teacher_id, role, start_date, end_date, notes }
+    classInfographics: [],  // rows { class_id, infographic_id, sort_order, notes }
     latestSyncLog: null,
     tState: { query: "", category: "all", filled: {} },
     igState: { query: "", tag: "all" },
-    cState: { showTest: false },
+    cState: { showTest: false, openClassId: null },
     router: "templates"
   };
 
@@ -165,22 +168,25 @@
   async function reloadAll() {
     showLoader(true);
     try {
-      const [cats, tpls, cls, igs, syncLog] = await Promise.all([
+      const [cats, tpls, cls, igs, tch, ct, ci, syncLog] = await Promise.all([
         sb.from("categories").select("*").order("sort_order", { ascending: true }),
         sb.from("templates").select("*").order("created_at", { ascending: true }),
         sb.from("classes").select("*").order("name", { ascending: true }),
         sb.from("infographics").select("*").order("name", { ascending: true }),
+        sb.from("teachers").select("*").order("full_name", { ascending: true }),
+        sb.from("class_teachers").select("*"),
+        sb.from("class_infographics").select("*"),
         sb.from("sync_log").select("*").eq("source", "jackrabbit").eq("operation", "pull_openings").order("created_at", { ascending: false }).limit(1).maybeSingle()
       ]);
-      if (cats.error) throw cats.error;
-      if (tpls.error) throw tpls.error;
-      if (cls.error)  throw cls.error;
-      if (igs.error)  throw igs.error;
-      state.categories  = cats.data;
-      state.templates   = tpls.data;
-      state.classes     = cls.data;
-      state.infographics = igs.data;
-      state.latestSyncLog = syncLog.data || null;
+      for (const r of [cats, tpls, cls, igs, tch, ct, ci]) if (r.error) throw r.error;
+      state.categories       = cats.data;
+      state.templates        = tpls.data;
+      state.classes          = cls.data;
+      state.infographics     = igs.data;
+      state.teachers         = tch.data;
+      state.classTeachers    = ct.data;
+      state.classInfographics = ci.data;
+      state.latestSyncLog    = syncLog.data || null;
     } catch (e) {
       console.error(e);
       showToast("Failed to load: " + e.message, "error");
@@ -193,6 +199,7 @@
     renderCategoryChips();
     renderTemplates();
     renderClassesTab();
+    renderTeachersTab();
     renderCategoriesTab();
     renderInfographicsTab();
   }
@@ -331,6 +338,38 @@
         renderBody(card, tpl);
       };
       bodyEl.appendChild(panel);
+
+      // Suggested infographics for the currently-picked class
+      const pickedClassId = (state.tState.filled[tpl.id] || {}).__class;
+      if (pickedClassId) {
+        const linkedIgIds = state.classInfographics
+          .filter((ci) => ci.class_id === pickedClassId)
+          .map((ci) => ci.infographic_id);
+        const linkedIgs = linkedIgIds
+          .map((id) => state.infographics.find((ig) => ig.id === id))
+          .filter(Boolean);
+        if (linkedIgs.length) {
+          const row = document.createElement("div");
+          row.innerHTML = `
+            <div class="panel-label" style="margin-bottom:6px;margin-top:-4px">Suggested for this class</div>
+            <div class="suggested-ig-row"></div>
+          `;
+          const igRow = $(".suggested-ig-row", row);
+          linkedIgs.forEach((ig) => {
+            const chip = document.createElement("button");
+            chip.className = "ig-suggestion";
+            chip.type = "button";
+            chip.innerHTML = `🖼 ${escapeHtml(ig.name)}`;
+            chip.onclick = async () => {
+              await handleInfographicClick(ig, chip);
+              chip.classList.add("copied");
+              setTimeout(() => chip.classList.remove("copied"), 1500);
+            };
+            igRow.appendChild(chip);
+          });
+          bodyEl.appendChild(row);
+        }
+      }
     }
 
     /* Variables */
@@ -595,17 +634,27 @@
       const stateTag = c.sync_state === "dropped_from_source"
         ? ' <span class="sync-state-dropped_from_source">dropped from JR</span>'
         : "";
-      return `
-        <tr${c.is_test ? ' style="opacity:.6"' : ""}>
-          <td><b>${escapeHtml(c.name)}</b>${sourceBadge}${stateTag}${c.age_range ? `<div style="font-size:11.5px;color:var(--ink-dim)">Ages ${escapeHtml(c.age_range)}</div>` : ""}</td>
+      const isOpen = state.cState.openClassId === c.id;
+      const teacherCount = state.classTeachers.filter((ct) => ct.class_id === c.id).length;
+      const igCount = state.classInfographics.filter((ci) => ci.class_id === c.id).length;
+      const enrichSummary = (teacherCount || igCount)
+        ? ` <span style="font-size:10.5px;color:var(--ink-dim)">· ${teacherCount} teacher${teacherCount === 1 ? "" : "s"} · ${igCount} graphic${igCount === 1 ? "" : "s"}</span>`
+        : ' <span style="font-size:10.5px;color:var(--ink-dim)">· no enrichment yet</span>';
+      const mainRow = `
+        <tr class="class-row${isOpen ? " open" : ""}" data-id="${escapeHtml(c.id)}"${c.is_test ? ' style="opacity:.6"' : ""}>
+          <td><b>${escapeHtml(c.name)}</b>${sourceBadge}${stateTag}${enrichSummary}${c.age_range ? `<div style="font-size:11.5px;color:var(--ink-dim)">Ages ${escapeHtml(c.age_range)}</div>` : ""}</td>
           <td>${escapeHtml(c.day_time || "")}</td>
           <td>${escapeHtml(c.location || "")}</td>
           <td><span class="type-badge type-${escapeHtml(c.type || "weekly")}">${typeLabel[c.type] || c.type || "—"}</span>${c.active === false ? ' <span style="color:var(--ink-dim);font-size:11px">(inactive)</span>' : ""}</td>
-          <td>${c.registration_link ? `<a href="${escapeHtml(c.registration_link)}" target="_blank" rel="noopener" style="font-size:12px;color:var(--accent);">Link ↗</a>` : '<span style="color:var(--ink-dim);font-size:12px">—</span>'}</td>
+          <td>${c.registration_link ? `<a href="${escapeHtml(c.registration_link)}" target="_blank" rel="noopener" style="font-size:12px;color:var(--accent);" onclick="event.stopPropagation()">Link ↗</a>` : '<span style="color:var(--ink-dim);font-size:12px">—</span>'}</td>
           <td>${fmtSync(c.last_synced_at)}</td>
           <td class="row-actions"><button class="btn small ghost" data-act="edit-class" data-id="${escapeHtml(c.id)}">Edit</button></td>
         </tr>
+        <tr class="class-detail${isOpen ? " open" : ""}" data-detail-for="${escapeHtml(c.id)}">
+          <td colspan="7"><div class="class-detail-body" data-class-id="${escapeHtml(c.id)}"></div></td>
+        </tr>
       `;
+      return mainRow;
     }).join("");
     el.innerHTML = `
       <table>
@@ -613,7 +662,146 @@
         <tbody>${rows || '<tr><td colspan="7" style="text-align:center;color:var(--ink-dim);padding:24px">No classes to show. Click <b>⟳ Sync now</b> to pull from Jackrabbit, or <b>＋ New class</b>.</td></tr>'}</tbody>
       </table>
     `;
-    $$('[data-act="edit-class"]', el).forEach((btn) => btn.onclick = () => openClassEditor(btn.dataset.id));
+    $$('[data-act="edit-class"]', el).forEach((btn) => {
+      btn.onclick = (e) => { e.stopPropagation(); openClassEditor(btn.dataset.id); };
+    });
+    $$(".class-row", el).forEach((row) => {
+      row.onclick = () => {
+        const id = row.dataset.id;
+        state.cState.openClassId = (state.cState.openClassId === id) ? null : id;
+        renderClassesTab();
+      };
+    });
+    // Render detail body for the open class
+    if (state.cState.openClassId) {
+      const cls = state.classes.find((c) => c.id === state.cState.openClassId);
+      if (cls) {
+        const body = $(`.class-detail-body[data-class-id="${state.cState.openClassId}"]`, el);
+        if (body) renderClassDetail(body, cls);
+      }
+    }
+  }
+
+  /* Class detail panel rendering — teacher assignments + infographic links + JR meta */
+  function renderClassDetail(rootEl, cls) {
+    const teachers = state.classTeachers.filter((ct) => ct.class_id === cls.id)
+      .map((ct) => ({ ...ct, teacher: state.teachers.find((t) => t.id === ct.teacher_id) }))
+      .filter((x) => x.teacher);
+    const linkedIgIds = new Set(state.classInfographics.filter((ci) => ci.class_id === cls.id).map((ci) => ci.infographic_id));
+
+    rootEl.innerHTML = `
+      <div class="panels-grid">
+        <div>
+          <div class="section-title">Teachers</div>
+          <div class="teacher-list"></div>
+          <div class="add-assign">
+            <select class="select-teacher"><option value="">— Add teacher —</option></select>
+            <select class="select-role">
+              <option value="primary">Primary</option>
+              <option value="substitute">Substitute</option>
+              <option value="assistant">Assistant</option>
+              <option value="co-teacher">Co-teacher</option>
+            </select>
+            <button class="btn primary small" data-act="add-teacher">Add</button>
+          </div>
+        </div>
+        <div>
+          <div class="section-title">Linked infographics <span style="font-weight:400;color:var(--ink-dim);text-transform:none;letter-spacing:0">(click to toggle)</span></div>
+          <div class="ig-chip-grid"></div>
+        </div>
+      </div>
+      <div style="margin-top:16px">
+        <div class="section-title">Class details (from Jackrabbit)</div>
+        <div class="panels-grid">
+          <div>
+            <div class="info-pair"><span class="k">JR ID</span><span class="v">${escapeHtml(cls.jackrabbit_class_id || "—")}</span></div>
+            <div class="info-pair"><span class="k">Session</span><span class="v">${escapeHtml(cls.session || "—")}</span></div>
+            <div class="info-pair"><span class="k">Tuition</span><span class="v">${escapeHtml(cls.tuition || "—")}</span></div>
+            <div class="info-pair"><span class="k">Openings</span><span class="v">${cls.openings == null ? "—" : cls.openings}</span></div>
+            <div class="info-pair"><span class="k">Dates</span><span class="v">${escapeHtml(cls.start_date || "—")} → ${escapeHtml(cls.end_date || "—")}</span></div>
+          </div>
+          <div>
+            <div class="info-pair"><span class="k">Cat 1</span><span class="v">${escapeHtml(cls.cat1 || "—")}</span></div>
+            <div class="info-pair"><span class="k">Cat 2</span><span class="v">${escapeHtml(cls.cat2 || "—")}</span></div>
+            <div class="info-pair"><span class="k">Cat 3</span><span class="v">${escapeHtml(cls.cat3 || "—")}</span></div>
+            <div class="info-pair"><span class="k">Room</span><span class="v">${escapeHtml(cls.room || "—")}</span></div>
+            <div class="info-pair"><span class="k">JR instructors</span><span class="v">${escapeHtml(cls.instructors || "—")}</span></div>
+          </div>
+        </div>
+        ${cls.description ? `<div class="jr-description" style="margin-top:8px">${escapeHtml(cls.description)}</div>` : ""}
+      </div>
+    `;
+
+    // Teacher list
+    const tlist = $(".teacher-list", rootEl);
+    if (teachers.length === 0) {
+      tlist.innerHTML = '<div style="font-size:12.5px;color:var(--ink-dim);padding:8px 0">No teachers assigned yet.</div>';
+    } else {
+      teachers.forEach(({ teacher, role, class_id }) => {
+        const row = document.createElement("div");
+        row.className = "assign-row";
+        row.innerHTML = `
+          <span class="teacher-name">${escapeHtml(teacher.full_name)}${teacher.status !== 'active' ? ` <span style="font-size:11px;color:var(--ink-dim)">(${escapeHtml(teacher.status)})</span>` : ""}</span>
+          <span class="role-tag role-${escapeHtml(role)}">${escapeHtml(role)}</span>
+          <button class="btn small ghost danger" data-act="remove-teacher" data-teacher="${escapeHtml(teacher.id)}" data-role="${escapeHtml(role)}">✕</button>
+        `;
+        $('[data-act="remove-teacher"]', row).onclick = async (e) => {
+          e.stopPropagation();
+          const { error } = await sb.from("class_teachers").delete()
+            .eq("class_id", class_id).eq("teacher_id", teacher.id).eq("role", role);
+          if (error) { showToast(error.message, "error"); return; }
+          await reloadAll(); renderClassesTab();
+          showToast("Teacher removed", "success");
+        };
+        tlist.appendChild(row);
+      });
+    }
+    // Populate teacher select with active teachers not already in the same role
+    const sel = $(".select-teacher", rootEl);
+    const assignedTeacherIds = new Set(teachers.map((x) => x.teacher.id + ":" + x.role));
+    state.teachers.filter((t) => t.status !== 'inactive').forEach((t) => {
+      const opt = document.createElement("option");
+      opt.value = t.id;
+      opt.textContent = t.full_name;
+      sel.appendChild(opt);
+    });
+    $('[data-act="add-teacher"]', rootEl).onclick = async (e) => {
+      e.stopPropagation();
+      const teacherId = sel.value;
+      const role = $(".select-role", rootEl).value;
+      if (!teacherId) { showToast("Pick a teacher first", "error"); return; }
+      if (assignedTeacherIds.has(teacherId + ":" + role)) { showToast("Already assigned in that role", "error"); return; }
+      const { error } = await sb.from("class_teachers").insert({ class_id: cls.id, teacher_id: teacherId, role });
+      if (error) { showToast(error.message, "error"); return; }
+      await reloadAll(); renderClassesTab();
+      showToast("Teacher assigned", "success");
+    };
+
+    // Infographic chip grid
+    const grid = $(".ig-chip-grid", rootEl);
+    if (state.infographics.length === 0) {
+      grid.innerHTML = '<div style="font-size:12.5px;color:var(--ink-dim);padding:8px 0">No infographics yet. Add some on the Infographics tab.</div>';
+    } else {
+      state.infographics.forEach((ig) => {
+        const isLinked = linkedIgIds.has(ig.id);
+        const chip = document.createElement("div");
+        chip.className = "ig-chip" + (isLinked ? " linked" : "");
+        chip.innerHTML = `<span class="check">${isLinked ? "✓" : "+"}</span><span>${escapeHtml(ig.name)}</span>`;
+        chip.onclick = async (e) => {
+          e.stopPropagation();
+          if (isLinked) {
+            const { error } = await sb.from("class_infographics").delete()
+              .eq("class_id", cls.id).eq("infographic_id", ig.id);
+            if (error) { showToast(error.message, "error"); return; }
+          } else {
+            const { error } = await sb.from("class_infographics").insert({ class_id: cls.id, infographic_id: ig.id });
+            if (error) { showToast(error.message, "error"); return; }
+          }
+          await reloadAll(); renderClassesTab();
+        };
+        grid.appendChild(chip);
+      });
+    }
   }
 
   function renderSyncStatus() {
@@ -716,6 +904,102 @@
     renderAll();
     closeClassEditor();
     showToast("Class deleted", "success");
+  }
+
+  /* ═════════════ TEACHERS ═════════════ */
+
+  let editingTeacherId = null;
+
+  function renderTeachersTab() {
+    const el = $("#teacherTable");
+    const active = state.teachers.filter((t) => t.status === 'active').length;
+    $("#teacherMeta").innerHTML = state.teachers.length + (state.teachers.length === 1 ? " teacher" : " teachers") +
+      (state.teachers.length ? ` <span style="color:var(--ink-dim)">· ${active} active</span>` : "");
+    const rows = state.teachers.map((t) => {
+      const classCount = state.classTeachers.filter((ct) => ct.teacher_id === t.id).length;
+      const statusLabel = { active: "Active", on_leave: "On leave", inactive: "Inactive" };
+      return `
+        <tr>
+          <td><b>${escapeHtml(t.full_name)}</b>${t.email ? `<div style="font-size:11.5px;color:var(--ink-dim)">${escapeHtml(t.email)}</div>` : ""}</td>
+          <td>${escapeHtml(t.phone || "")}</td>
+          <td>${escapeHtml(t.pay_rate || "")}</td>
+          <td><span class="type-badge status-badge-${escapeHtml(t.status)}">${statusLabel[t.status] || t.status}</span></td>
+          <td style="font-size:12px">${classCount} class${classCount === 1 ? "" : "es"}</td>
+          <td class="row-actions"><button class="btn small ghost" data-act="edit-teacher" data-id="${escapeHtml(t.id)}">Edit</button></td>
+        </tr>
+      `;
+    }).join("");
+    el.innerHTML = `
+      <table>
+        <thead><tr><th>Name</th><th>Phone</th><th>Pay rate</th><th>Status</th><th>Assigned</th><th></th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="6" style="text-align:center;color:var(--ink-dim);padding:24px">No teachers yet — click <b>＋ New teacher</b>.</td></tr>'}</tbody>
+      </table>
+    `;
+    $$('[data-act="edit-teacher"]', el).forEach((btn) => btn.onclick = () => openTeacherEditor(btn.dataset.id));
+  }
+
+  function openTeacherEditor(id) {
+    editingTeacherId = id || null;
+    const t = id ? state.teachers.find((x) => x.id === id) : null;
+    $("#teacherModalTitle").textContent = t ? "Edit teacher" : "New teacher";
+    $("#t_name").value      = t ? t.full_name : "";
+    $("#t_email").value     = t ? (t.email || "") : "";
+    $("#t_phone").value     = t ? (t.phone || "") : "";
+    $("#t_pay_rate").value  = t ? (t.pay_rate || "") : "";
+    $("#t_status").value    = t ? (t.status || "active") : "active";
+    $("#t_hire_date").value = t ? (t.hire_date || "") : "";
+    $("#t_notes").value     = t ? (t.notes || "") : "";
+    $("#deleteTeacherBtn").style.display = t ? "" : "none";
+    $("#teacherModalOverlay").classList.add("open");
+    setTimeout(() => $("#t_name").focus(), 50);
+  }
+  function closeTeacherEditor() { $("#teacherModalOverlay").classList.remove("open"); editingTeacherId = null; }
+
+  async function saveTeacher() {
+    const name = $("#t_name").value.trim();
+    if (!name) { showToast("Name is required", "error"); return; }
+    const payload = {
+      full_name: name,
+      email: $("#t_email").value.trim() || null,
+      phone: $("#t_phone").value.trim() || null,
+      pay_rate: $("#t_pay_rate").value.trim() || null,
+      status: $("#t_status").value,
+      hire_date: $("#t_hire_date").value || null,
+      notes: $("#t_notes").value || null,
+    };
+    showLoader(true);
+    let resp;
+    if (editingTeacherId) {
+      resp = await sb.from("teachers").update(payload).eq("id", editingTeacherId).select().single();
+    } else {
+      const slugs = new Set(state.teachers.map((t) => t.slug));
+      payload.slug = uniqueSlug(slugify(name), slugs);
+      resp = await sb.from("teachers").insert(payload).select().single();
+    }
+    showLoader(false);
+    if (resp.error) { showToast(resp.error.message, "error"); return; }
+    await reloadAll();
+    renderAll();
+    closeTeacherEditor();
+    showToast(editingTeacherId ? "Teacher updated" : "Teacher added", "success");
+  }
+
+  async function deleteTeacher() {
+    if (!editingTeacherId) return;
+    const t = state.teachers.find((x) => x.id === editingTeacherId);
+    const assignments = state.classTeachers.filter((ct) => ct.teacher_id === editingTeacherId).length;
+    const confirmMsg = assignments > 0
+      ? `${t?.full_name || "This teacher"} is assigned to ${assignments} class${assignments === 1 ? "" : "es"}. Deleting will remove those assignments. Continue?`
+      : "Delete this teacher?";
+    if (!confirm(confirmMsg)) return;
+    showLoader(true);
+    const { error } = await sb.from("teachers").delete().eq("id", editingTeacherId);
+    showLoader(false);
+    if (error) { showToast(error.message, "error"); return; }
+    await reloadAll();
+    renderAll();
+    closeTeacherEditor();
+    showToast("Teacher deleted", "success");
   }
 
   /* ═════════════ CATEGORIES ═════════════ */
@@ -999,6 +1283,14 @@
     $("#newClassBtn").onclick      = () => openClassEditor(null);
     $("#newCategoryBtn").onclick   = newCategory;
     $("#newInfographicBtn").onclick = () => openIgEditor(null);
+    $("#newTeacherBtn").onclick    = () => openTeacherEditor(null);
+
+    // Teacher modal
+    $("#teacherCancel").onclick    = closeTeacherEditor;
+    $("#teacherModalClose").onclick = closeTeacherEditor;
+    $("#teacherModalOverlay").onclick = (e) => { if (e.target.id === "teacherModalOverlay") closeTeacherEditor(); };
+    $("#teacherSave").onclick      = saveTeacher;
+    $("#deleteTeacherBtn").onclick = deleteTeacher;
 
     // Jackrabbit sync + test toggle
     const syncBtn = $("#syncJackrabbitBtn");
