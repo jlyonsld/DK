@@ -193,6 +193,34 @@ header {
   background: var(--panel-raised);
   border-radius: var(--radius-chip);
   border: 1px solid var(--border);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.user-chip .par-linked-badge {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .06em;
+  padding: 2px 7px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius-chip);
+  cursor: help;
+}
+.user-chip .par-connect-cta {
+  font-size: 11px;
+  color: var(--ink-dim);
+  text-decoration: none;
+  padding: 2px 7px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-chip);
+  transition: all .15s;
+}
+.user-chip .par-connect-cta:hover {
+  color: var(--accent);
+  border-color: var(--accent-border);
+  border-style: solid;
 }
 
 .tabs { display: flex; padding: 0 22px; gap: 4px; overflow-x: auto; }

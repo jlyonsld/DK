@@ -31,6 +31,8 @@
     teachers: [],
     classTeachers: [],      // rows { class_id, teacher_id, role, start_date, end_date, notes }
     classInfographics: [],  // rows { class_id, infographic_id, sort_order, notes }
+    students: [],
+    enrollments: [],
     latestSyncLog: null,
     tState: { query: "", category: "all", filled: {} },
     igState: { query: "", tag: "all" },
@@ -133,7 +135,7 @@
     $("#loginScreen").style.display = "none";
     $("#app").style.display = "";
     await loadProfile();
-    $("#userChip").textContent = state.profile?.full_name || state.session.user.email;
+    renderUserChip();
     await reloadAll();
     wireEvents();
     renderAll();
@@ -143,6 +145,51 @@
     const { data, error } = await sb.from("profiles").select("*").eq("id", state.session.user.id).single();
     if (error) { console.warn("Profile load:", error); return; }
     state.profile = data;
+    // Fire-and-forget PAR identity sync — updates profile cache on the backend
+    refreshParIdentity().catch((e) => console.warn("PAR identity check failed:", e));
+  }
+
+  async function refreshParIdentity() {
+    try {
+      const { data, error } = await sb.functions.invoke("par-identity-proxy", { body: {} });
+      if (error) throw error;
+      // The Edge Function writes the cache to profiles directly; re-fetch locally.
+      const { data: fresh } = await sb.from("profiles").select("*").eq("id", state.session.user.id).single();
+      if (fresh) {
+        state.profile = fresh;
+        renderUserChip();
+      }
+      return data;
+    } catch (e) {
+      console.warn("PAR identity sync failed:", e);
+      return null;
+    }
+  }
+
+  function renderUserChip() {
+    const chip = $("#userChip");
+    if (!chip || !state.profile) return;
+    const displayName = state.profile.par_display_name || state.profile.full_name || state.session?.user?.email || "";
+    const parLinked = !!state.profile.par_person_id;
+    chip.innerHTML = "";
+    const name = document.createElement("span");
+    name.textContent = displayName;
+    chip.appendChild(name);
+    if (parLinked) {
+      const badge = document.createElement("span");
+      badge.className = "par-linked-badge";
+      badge.title = "Linked to PAR identity: " + (state.profile.par_primary_email || "");
+      badge.textContent = "PAR \u2713";
+      chip.appendChild(badge);
+    } else {
+      const cta = document.createElement("a");
+      cta.href = "https://par.app/settings/linked-accounts";
+      cta.target = "_blank";
+      cta.rel = "noopener";
+      cta.className = "par-connect-cta";
+      cta.textContent = "Connect to PAR";
+      chip.appendChild(cta);
+    }
   }
 
   $("#loginForm").addEventListener("submit", async (e) => {
@@ -168,7 +215,7 @@
   async function reloadAll() {
     showLoader(true);
     try {
-      const [cats, tpls, cls, igs, tch, ct, ci, syncLog] = await Promise.all([
+      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, syncLog] = await Promise.all([
         sb.from("categories").select("*").order("sort_order", { ascending: true }),
         sb.from("templates").select("*").order("created_at", { ascending: true }),
         sb.from("classes").select("*").order("name", { ascending: true }),
@@ -176,9 +223,11 @@
         sb.from("teachers").select("*").order("full_name", { ascending: true }),
         sb.from("class_teachers").select("*"),
         sb.from("class_infographics").select("*"),
+        sb.from("students").select("*").order("last_name", { ascending: true }),
+        sb.from("enrollments").select("*").order("enrolled_at", { ascending: false }),
         sb.from("sync_log").select("*").eq("source", "jackrabbit").eq("operation", "pull_openings").order("created_at", { ascending: false }).limit(1).maybeSingle()
       ]);
-      for (const r of [cats, tpls, cls, igs, tch, ct, ci]) if (r.error) throw r.error;
+      for (const r of [cats, tpls, cls, igs, tch, ct, ci, stu, enr]) if (r.error) throw r.error;
       state.categories       = cats.data;
       state.templates        = tpls.data;
       state.classes          = cls.data;
@@ -186,6 +235,8 @@
       state.teachers         = tch.data;
       state.classTeachers    = ct.data;
       state.classInfographics = ci.data;
+      state.students         = stu.data;
+      state.enrollments      = enr.data;
       state.latestSyncLog    = syncLog.data || null;
     } catch (e) {
       console.error(e);
@@ -637,8 +688,9 @@
       const isOpen = state.cState.openClassId === c.id;
       const teacherCount = state.classTeachers.filter((ct) => ct.class_id === c.id).length;
       const igCount = state.classInfographics.filter((ci) => ci.class_id === c.id).length;
-      const enrichSummary = (teacherCount || igCount)
-        ? ` <span style="font-size:10.5px;color:var(--ink-dim)">· ${teacherCount} teacher${teacherCount === 1 ? "" : "s"} · ${igCount} graphic${igCount === 1 ? "" : "s"}</span>`
+      const activeEnrollments = state.enrollments.filter((e) => e.class_id === c.id && e.status === "active").length;
+      const enrichSummary = (teacherCount || igCount || activeEnrollments)
+        ? ` <span style="font-size:10.5px;color:var(--ink-dim)">· ${activeEnrollments} enrolled · ${teacherCount} teacher${teacherCount === 1 ? "" : "s"} · ${igCount} graphic${igCount === 1 ? "" : "s"}</span>`
         : ' <span style="font-size:10.5px;color:var(--ink-dim)">· no enrichment yet</span>';
       const mainRow = `
         <tr class="class-row${isOpen ? " open" : ""}" data-id="${escapeHtml(c.id)}"${c.is_test ? ' style="opacity:.6"' : ""}>
@@ -682,12 +734,15 @@
     }
   }
 
-  /* Class detail panel rendering — teacher assignments + infographic links + JR meta */
+  /* Class detail panel rendering — teacher assignments + infographic links + JR meta + enrollments */
   function renderClassDetail(rootEl, cls) {
     const teachers = state.classTeachers.filter((ct) => ct.class_id === cls.id)
       .map((ct) => ({ ...ct, teacher: state.teachers.find((t) => t.id === ct.teacher_id) }))
       .filter((x) => x.teacher);
     const linkedIgIds = new Set(state.classInfographics.filter((ci) => ci.class_id === cls.id).map((ci) => ci.infographic_id));
+    const classEnrollments = state.enrollments.filter((e) => e.class_id === cls.id)
+      .map((e) => ({ ...e, student: state.students.find((s) => s.id === e.student_id) }))
+      .filter((x) => x.student);
 
     rootEl.innerHTML = `
       <div class="panels-grid">
@@ -709,6 +764,10 @@
           <div class="section-title">Linked infographics <span style="font-weight:400;color:var(--ink-dim);text-transform:none;letter-spacing:0">(click to toggle)</span></div>
           <div class="ig-chip-grid"></div>
         </div>
+      </div>
+      <div style="margin-top:16px">
+        <div class="section-title">Enrollments <span style="font-weight:400;color:var(--ink-dim);text-transform:none;letter-spacing:0">(${classEnrollments.filter(e => e.status === 'active').length} active${classEnrollments.length > classEnrollments.filter(e => e.status === 'active').length ? ' · ' + (classEnrollments.length - classEnrollments.filter(e => e.status === 'active').length) + ' inactive' : ''})</span></div>
+        <div class="enrollments-list"></div>
       </div>
       <div style="margin-top:16px">
         <div class="section-title">Class details (from Jackrabbit)</div>
@@ -776,6 +835,33 @@
       await reloadAll(); renderClassesTab();
       showToast("Teacher assigned", "success");
     };
+
+    // Enrollments list
+    const enrollList = $(".enrollments-list", rootEl);
+    if (enrollList) {
+      if (classEnrollments.length === 0) {
+        enrollList.innerHTML = '<div style="font-size:12.5px;color:var(--ink-dim);padding:8px 0">No enrollments yet. They\'ll appear here when Zapier sends them from Jackrabbit.</div>';
+      } else {
+        enrollList.innerHTML = "";
+        const activeFirst = [...classEnrollments].sort((a, b) => {
+          const aActive = a.status === "active" ? 0 : 1;
+          const bActive = b.status === "active" ? 0 : 1;
+          if (aActive !== bActive) return aActive - bActive;
+          return (a.student.last_name || "").localeCompare(b.student.last_name || "");
+        });
+        activeFirst.forEach(({ student, status, drop_reason, dropped_at, enrolled_at }) => {
+          const row = document.createElement("div");
+          row.className = "assign-row";
+          const statusClass = status === "active" ? "role-primary" : status === "waitlist" ? "role-substitute" : status === "dropped" ? "role-co-teacher" : "role-assistant";
+          row.innerHTML = `
+            <span class="teacher-name">${escapeHtml(student.first_name || "")} ${escapeHtml(student.last_name || "")}${student.dob ? ` <span style="font-size:11px;color:var(--ink-dim);font-weight:400">· DoB ${escapeHtml(student.dob)}</span>` : ""}</span>
+            <span class="role-tag ${statusClass}">${escapeHtml(status)}</span>
+            ${drop_reason ? `<span style="font-size:11px;color:var(--ink-dim)">· ${escapeHtml(drop_reason)}</span>` : ""}
+          `;
+          enrollList.appendChild(row);
+        });
+      }
+    }
 
     // Infographic chip grid
     const grid = $(".ig-chip-grid", rootEl);
