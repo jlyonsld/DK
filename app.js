@@ -183,7 +183,7 @@
       chip.appendChild(badge);
     } else {
       const cta = document.createElement("a");
-      cta.href = "https://par.app/settings/linked-accounts";
+      cta.href = "https://get-on-par.app/settings/linked-accounts";
       cta.target = "_blank";
       cta.rel = "noopener";
       cta.className = "par-connect-cta";
