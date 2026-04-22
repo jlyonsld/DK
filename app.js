@@ -183,11 +183,15 @@
       chip.appendChild(badge);
     } else {
       const cta = document.createElement("a");
-      cta.href = "https://get-on-par.app/settings/linked-accounts";
+      cta.href = "https://get-on-par.app/";
       cta.target = "_blank";
       cta.rel = "noopener";
       cta.className = "par-connect-cta";
+      cta.title = "Opens PAR in a new tab. Go to Settings \u2192 Linked Accounts to connect this email.";
       cta.textContent = "Connect to PAR";
+      cta.onclick = () => {
+        setTimeout(() => showToast("In PAR, open Settings \u2192 Linked Accounts to connect this email"), 300);
+      };
       chip.appendChild(cta);
     }
   }
