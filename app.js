@@ -1000,14 +1000,20 @@
   function renderTeachersTab() {
     const el = $("#teacherTable");
     const active = state.teachers.filter((t) => t.status === 'active').length;
+    const parLinked = state.teachers.filter((t) => t.par_person_id).length;
+    const resolvable = state.teachers.filter((t) => t.email && !t.par_person_id).length;
     $("#teacherMeta").innerHTML = state.teachers.length + (state.teachers.length === 1 ? " teacher" : " teachers") +
-      (state.teachers.length ? ` <span style="color:var(--ink-dim)">· ${active} active</span>` : "");
+      (state.teachers.length ? ` <span style="color:var(--ink-dim)">· ${active} active${parLinked ? ` · ${parLinked} PAR-linked` : ""}${resolvable ? ` · ${resolvable} pending PAR check` : ""}</span>` : "");
+
     const rows = state.teachers.map((t) => {
       const classCount = state.classTeachers.filter((ct) => ct.teacher_id === t.id).length;
       const statusLabel = { active: "Active", on_leave: "On leave", inactive: "Inactive" };
+      const parBadge = t.par_person_id
+        ? ` <span class="par-linked-badge" title="Linked to PAR person ${escapeHtml(t.par_person_id)}">PAR \u2713</span>`
+        : (t.email ? ` <span class="par-pending-badge" title="Email on file but not yet resolved against PAR">unresolved</span>` : "");
       return `
         <tr>
-          <td><b>${escapeHtml(t.full_name)}</b>${t.email ? `<div style="font-size:11.5px;color:var(--ink-dim)">${escapeHtml(t.email)}</div>` : ""}</td>
+          <td><b>${escapeHtml(t.full_name)}</b>${parBadge}${t.email ? `<div style="font-size:11.5px;color:var(--ink-dim)">${escapeHtml(t.email)}</div>` : `<div style="font-size:11.5px;color:var(--ink-mute);font-style:italic">no email \u2014 can't resolve PAR</div>`}</td>
           <td>${escapeHtml(t.phone || "")}</td>
           <td>${escapeHtml(t.pay_rate || "")}</td>
           <td><span class="type-badge status-badge-${escapeHtml(t.status)}">${statusLabel[t.status] || t.status}</span></td>
@@ -1065,10 +1071,67 @@
     }
     showLoader(false);
     if (resp.error) { showToast(resp.error.message, "error"); return; }
+    const savedTeacher = resp.data;
+
+    // Phase 3 — try to resolve this teacher's PAR identity if they have an email
+    if (savedTeacher?.email) {
+      resolveTeacherParIdentity(savedTeacher).catch((e) => console.warn("PAR teacher resolve:", e));
+    }
+
     await reloadAll();
     renderAll();
     closeTeacherEditor();
     showToast(editingTeacherId ? "Teacher updated" : "Teacher added", "success");
+  }
+
+  /* Resolve a single teacher's PAR identity via par-identity-proxy; cache on the teacher row. */
+  async function resolveTeacherParIdentity(teacher) {
+    if (!teacher?.email) return { resolved: false, reason: "no_email" };
+    try {
+      const { data, error } = await sb.functions.invoke("par-identity-proxy", {
+        body: { email: teacher.email },
+      });
+      if (error) return { resolved: false, reason: error.message };
+      if (!data || data.found !== true) return { resolved: false, reason: "not_found" };
+
+      const patch = {
+        par_person_id: data.person_id ?? null,
+      };
+      // Only update if it changed
+      if (patch.par_person_id && patch.par_person_id !== teacher.par_person_id) {
+        const { error: upErr } = await sb.from("teachers").update(patch).eq("id", teacher.id);
+        if (upErr) return { resolved: false, reason: upErr.message };
+        // Silently refresh state so the badge appears
+        const { data: fresh } = await sb.from("teachers").select("*").order("full_name");
+        if (fresh) state.teachers = fresh;
+        renderTeachersTab();
+        renderClassesTab();
+      }
+      return { resolved: true, person_id: data.person_id, display_name: data.display_name };
+    } catch (e) {
+      return { resolved: false, reason: (e instanceof Error ? e.message : String(e)) };
+    }
+  }
+
+  /* Bulk resolver — walks all teachers with an email and no par_person_id yet. */
+  async function refreshAllTeacherParLinks() {
+    const candidates = state.teachers.filter((t) => t.email && !t.par_person_id);
+    if (candidates.length === 0) {
+      showToast("All teachers with emails are already PAR-linked", "success");
+      return;
+    }
+    showLoader(true);
+    let linked = 0, not_found = 0, errors = 0;
+    for (const t of candidates) {
+      const r = await resolveTeacherParIdentity(t);
+      if (r.resolved) linked++;
+      else if (r.reason === "not_found") not_found++;
+      else errors++;
+    }
+    showLoader(false);
+    await reloadAll();
+    renderAll();
+    showToast(`PAR links: ${linked} linked · ${not_found} not on PAR${errors ? ` · ${errors} errors` : ""}`, linked > 0 ? "success" : "");
   }
 
   async function deleteTeacher() {
@@ -1371,6 +1434,8 @@
     $("#newCategoryBtn").onclick   = newCategory;
     $("#newInfographicBtn").onclick = () => openIgEditor(null);
     $("#newTeacherBtn").onclick    = () => openTeacherEditor(null);
+    const refreshParBtn = $("#refreshParLinksBtn");
+    if (refreshParBtn) refreshParBtn.onclick = refreshAllTeacherParLinks;
 
     // Teacher modal
     $("#teacherCancel").onclick    = closeTeacherEditor;
