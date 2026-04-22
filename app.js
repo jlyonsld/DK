@@ -687,9 +687,30 @@
         ? ' <span class="sync-state-dropped_from_source">dropped from JR</span>'
         : "";
       const isOpen = state.cState.openClassId === c.id;
-      const teacherCount = state.classTeachers.filter((ct) => ct.class_id === c.id).length;
+      const classTeacherRows = state.classTeachers.filter((ct) => ct.class_id === c.id)
+        .map((ct) => ({ ...ct, teacher: state.teachers.find((t) => t.id === ct.teacher_id) }))
+        .filter((x) => x.teacher);
+      const primary = classTeacherRows.find((x) => x.role === "primary");
+      const subs    = classTeacherRows.filter((x) => x.role !== "primary");
+      const teacherCount = classTeacherRows.length;
       const igCount = state.classInfographics.filter((ci) => ci.class_id === c.id).length;
       const activeEnrollments = state.enrollments.filter((e) => e.class_id === c.id && e.status === "active").length;
+
+      const teacherCell = (() => {
+        if (!classTeacherRows.length) {
+          return '<span style="font-size:11.5px;color:var(--ink-mute);font-style:italic">unassigned</span>';
+        }
+        const parts = [];
+        if (primary) parts.push(`<span style="font-size:12.5px;color:var(--ink)"><b>${escapeHtml(primary.teacher.full_name)}</b></span>`);
+        if (subs.length) {
+          parts.push(`<div style="font-size:11px;color:var(--ink-dim)">+ ${subs.length} ${subs.length === 1 ? "other" : "others"}</div>`);
+        }
+        if (!primary && classTeacherRows[0]) {
+          parts.push(`<span style="font-size:12.5px;color:var(--ink)">${escapeHtml(classTeacherRows[0].teacher.full_name)} <span style="font-size:10px;color:var(--ink-dim)">(${escapeHtml(classTeacherRows[0].role)})</span></span>`);
+        }
+        return parts.join("");
+      })();
+
       const enrichSummary = (teacherCount || igCount || activeEnrollments)
         ? ` <span style="font-size:10.5px;color:var(--ink-dim)">· ${activeEnrollments} enrolled · ${teacherCount} teacher${teacherCount === 1 ? "" : "s"} · ${igCount} graphic${igCount === 1 ? "" : "s"}</span>`
         : ' <span style="font-size:10.5px;color:var(--ink-dim)">· no enrichment yet</span>';
@@ -698,21 +719,22 @@
           <td><b>${escapeHtml(c.name)}</b>${sourceBadge}${stateTag}${enrichSummary}${c.age_range ? `<div style="font-size:11.5px;color:var(--ink-dim)">Ages ${escapeHtml(c.age_range)}</div>` : ""}</td>
           <td>${escapeHtml(c.day_time || "")}</td>
           <td>${escapeHtml(c.location || "")}</td>
+          <td>${teacherCell}</td>
           <td><span class="type-badge type-${escapeHtml(c.type || "weekly")}">${typeLabel[c.type] || c.type || "—"}</span>${c.active === false ? ' <span style="color:var(--ink-dim);font-size:11px">(inactive)</span>' : ""}</td>
           <td>${c.registration_link ? `<a href="${escapeHtml(c.registration_link)}" target="_blank" rel="noopener" style="font-size:12px;color:var(--accent);" onclick="event.stopPropagation()">Link ↗</a>` : '<span style="color:var(--ink-dim);font-size:12px">—</span>'}</td>
           <td>${fmtSync(c.last_synced_at)}</td>
           <td class="row-actions"><button class="btn small ghost" data-act="edit-class" data-id="${escapeHtml(c.id)}">Edit</button></td>
         </tr>
         <tr class="class-detail${isOpen ? " open" : ""}" data-detail-for="${escapeHtml(c.id)}">
-          <td colspan="7"><div class="class-detail-body" data-class-id="${escapeHtml(c.id)}"></div></td>
+          <td colspan="8"><div class="class-detail-body" data-class-id="${escapeHtml(c.id)}"></div></td>
         </tr>
       `;
       return mainRow;
     }).join("");
     el.innerHTML = `
       <table>
-        <thead><tr><th>Name</th><th>Day / Time</th><th>Location</th><th>Type</th><th>Reg. link</th><th>Synced</th><th></th></tr></thead>
-        <tbody>${rows || '<tr><td colspan="7" style="text-align:center;color:var(--ink-dim);padding:24px">No classes to show. Click <b>⟳ Sync now</b> to pull from Jackrabbit, or <b>＋ New class</b>.</td></tr>'}</tbody>
+        <thead><tr><th>Name</th><th>Day / Time</th><th>Location</th><th>Teacher</th><th>Type</th><th>Reg. link</th><th>Synced</th><th></th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="8" style="text-align:center;color:var(--ink-dim);padding:24px">No classes to show. Click <b>⟳ Sync now</b> to pull from Jackrabbit, or <b>＋ New class</b>.</td></tr>'}</tbody>
       </table>
     `;
     $$('[data-act="edit-class"]', el).forEach((btn) => {
