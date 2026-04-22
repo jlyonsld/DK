@@ -139,6 +139,51 @@
     await reloadAll();
     wireEvents();
     renderAll();
+    setupRealtime();
+  }
+
+  /* ═════════════ Realtime subscriptions ═════════════
+   * Any insert/update/delete on a watched table triggers a debounced
+   * reloadAll + renderAll. Covers:
+   *   - user actions from this browser (instant echo, harmless)
+   *   - user actions from another tab / device
+   *   - Zapier webhooks creating enrollments / students
+   *   - Scheduled jobs (nightly Jackrabbit sync) updating classes
+   *   - par-identity-proxy caching identity on profiles
+   * Debounce prevents N re-renders when a burst of events lands.
+   */
+  let realtimeChannel = null;
+  let realtimeReloadTimer = null;
+
+  function setupRealtime() {
+    if (realtimeChannel) return;
+    const tablesToWatch = [
+      "profiles", "categories", "templates", "classes", "infographics",
+      "teachers", "class_teachers", "class_infographics",
+      "students", "enrollments", "attendance", "sync_log"
+    ];
+    realtimeChannel = sb.channel("dk-realtime");
+    tablesToWatch.forEach((table) => {
+      realtimeChannel.on(
+        "postgres_changes",
+        { event: "*", schema: "public", table },
+        (_payload) => scheduleRealtimeReload()
+      );
+    });
+    realtimeChannel.subscribe((status) => {
+      if (status === "SUBSCRIBED") console.log("[realtime] subscribed to", tablesToWatch.length, "tables");
+      else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+        console.warn("[realtime] connection issue:", status, "— will rely on manual reloads until next boot");
+      }
+    });
+  }
+
+  function scheduleRealtimeReload() {
+    clearTimeout(realtimeReloadTimer);
+    realtimeReloadTimer = setTimeout(async () => {
+      await reloadAll();
+      renderAll();
+    }, 300);
   }
 
   async function loadProfile() {
@@ -832,7 +877,7 @@
           const { error } = await sb.from("class_teachers").delete()
             .eq("class_id", class_id).eq("teacher_id", teacher.id).eq("role", role);
           if (error) { showToast(error.message, "error"); return; }
-          await reloadAll(); renderClassesTab();
+          await reloadAll(); renderAll();
           showToast("Teacher removed", "success");
         };
         tlist.appendChild(row);
@@ -855,7 +900,7 @@
       if (assignedTeacherIds.has(teacherId + ":" + role)) { showToast("Already assigned in that role", "error"); return; }
       const { error } = await sb.from("class_teachers").insert({ class_id: cls.id, teacher_id: teacherId, role });
       if (error) { showToast(error.message, "error"); return; }
-      await reloadAll(); renderClassesTab();
+      await reloadAll(); renderAll();
       showToast("Teacher assigned", "success");
     };
 
@@ -906,7 +951,7 @@
             const { error } = await sb.from("class_infographics").insert({ class_id: cls.id, infographic_id: ig.id });
             if (error) { showToast(error.message, "error"); return; }
           }
-          await reloadAll(); renderClassesTab();
+          await reloadAll(); renderAll();
         };
         grid.appendChild(chip);
       });
@@ -1124,10 +1169,8 @@
         const { error: upErr } = await sb.from("teachers").update(patch).eq("id", teacher.id);
         if (upErr) return { resolved: false, reason: upErr.message };
         // Silently refresh state so the badge appears
-        const { data: fresh } = await sb.from("teachers").select("*").order("full_name");
-        if (fresh) state.teachers = fresh;
-        renderTeachersTab();
-        renderClassesTab();
+        await reloadAll();
+        renderAll();
       }
       return { resolved: true, person_id: data.person_id, display_name: data.display_name };
     } catch (e) {
@@ -1445,6 +1488,10 @@
 
     // Sign out
     $("#signOutBtn").onclick = async () => {
+      if (realtimeChannel) {
+        try { await sb.removeChannel(realtimeChannel); } catch (_) { /* ignore */ }
+        realtimeChannel = null;
+      }
       await sb.auth.signOut();
       state.session = null; state.profile = null;
       showLogin();
