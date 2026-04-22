@@ -37,7 +37,7 @@
     tState: { query: "", category: "all", filled: {} },
     igState: { query: "", tag: "all" },
     cState: { showTest: false, openClassId: null },
-    router: "templates"
+    router: "home"
   };
 
   /* ═════════════ Helpers ═════════════ */
@@ -292,6 +292,7 @@
   }
 
   function renderAll() {
+    renderHomeTab();
     renderInfographicsSidebar();
     renderCategoryChips();
     renderTemplates();
@@ -299,6 +300,403 @@
     renderTeachersTab();
     renderCategoriesTab();
     renderInfographicsTab();
+  }
+
+  /* ═════════════ HOME (Bento) ═════════════ */
+
+  // Day-of-week abbreviations as stored in classes.days (populated by the
+  // Jackrabbit sync: "Mon, Wed" style). Match regardless of order/spacing.
+  const DOW_SHORT = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const DOW_LONG  = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
+
+  function classRunsOnDay(cls, date) {
+    if (!cls || !cls.days) return false;
+    const sd = cls.start_date ? new Date(cls.start_date + "T00:00:00") : null;
+    const ed = cls.end_date   ? new Date(cls.end_date   + "T23:59:59") : null;
+    if (sd && date < sd) return false;
+    if (ed && date > ed) return false;
+    const dayShort = DOW_SHORT[date.getDay()];
+    const dayLong  = DOW_LONG[date.getDay()];
+    const src = String(cls.days).toLowerCase();
+    return src.includes(dayShort.toLowerCase()) || src.includes(dayLong.toLowerCase());
+  }
+
+  // Parse class.times ("3:44 PM - 4:45 PM") to a start-time Date anchored to `onDate`.
+  function classStartTimeOn(cls, onDate) {
+    if (!cls || !cls.times) return null;
+    const m = String(cls.times).match(/(\d{1,2}):(\d{2})\s*([AP]M)/i);
+    if (!m) return null;
+    let h = parseInt(m[1], 10);
+    const mm = parseInt(m[2], 10);
+    const isPm = m[3].toUpperCase() === "PM";
+    if (isPm && h < 12) h += 12;
+    if (!isPm && h === 12) h = 0;
+    const d = new Date(onDate);
+    d.setHours(h, mm, 0, 0);
+    return d;
+  }
+
+  function formatRelativeTimeUntil(target) {
+    const diffMs = target - new Date();
+    if (diffMs <= 0) return "now";
+    const min = Math.round(diffMs / 60000);
+    if (min < 60) return `in ${min}m`;
+    const hr = Math.floor(min / 60);
+    const rem = min - hr * 60;
+    if (hr < 12) return `in ${hr}h ${rem}m`;
+    return `in ${hr}h`;
+  }
+
+  function formatRelativePast(date) {
+    const diffMs = new Date() - date;
+    if (diffMs < 0) return "just now";
+    const sec = Math.round(diffMs / 1000);
+    if (sec < 60) return `${sec}s ago`;
+    const min = Math.round(sec / 60);
+    if (min < 60) return `${min}m ago`;
+    const hr = Math.round(min / 60);
+    if (hr < 24) return `${hr}h ago`;
+    const day = Math.round(hr / 24);
+    return `${day}d ago`;
+  }
+
+  function primaryTeacherOf(classId) {
+    const ct = state.classTeachers.find((x) => x.class_id === classId && x.role === "primary");
+    if (ct) return state.teachers.find((t) => t.id === ct.teacher_id);
+    const any = state.classTeachers.find((x) => x.class_id === classId);
+    return any ? state.teachers.find((t) => t.id === any.teacher_id) : null;
+  }
+
+  function renderHomeTab() {
+    const grid = $("#bentoGrid");
+    if (!grid) return;
+    const now = new Date();
+    const todayClasses = state.classes
+      .filter((c) => !c.is_test && c.active !== false && classRunsOnDay(c, now))
+      .map((c) => ({ cls: c, startAt: classStartTimeOn(c, now) }))
+      .sort((a, b) => (a.startAt?.getTime() || 0) - (b.startAt?.getTime() || 0));
+
+    const upcomingToday = todayClasses.filter((x) => x.startAt && x.startAt > now);
+    const nextClass = upcomingToday[0];
+
+    const activeClasses = state.classes.filter((c) => !c.is_test && c.active !== false).length;
+    const activeTeachers = state.teachers.filter((t) => t.status === "active").length;
+    const activeEnrollments = state.enrollments.filter((e) => e.status === "active").length;
+
+    grid.innerHTML = `
+      <div class="bento-card bento-span-8">${renderTodayCard(nextClass, todayClasses.length, now)}</div>
+      <div class="bento-card bento-span-4">${renderStatsCard(activeClasses, activeTeachers, activeEnrollments)}</div>
+      <div class="bento-card bento-span-5" id="bentoSchedule">${renderScheduleCard(todayClasses, now)}</div>
+      <div class="bento-card bento-span-4" id="bentoAttention">${renderAttentionCard()}</div>
+      <div class="bento-card bento-span-3">${renderWeekCard(now)}</div>
+      <div class="bento-card bento-span-5">${renderActivityCard()}</div>
+      <div class="bento-card bento-span-4" id="bentoQuickActions">${renderQuickActionsCard()}</div>
+      <div class="bento-card bento-span-3">${renderParBridgeCard()}</div>
+    `;
+
+    wireHomeCardEvents();
+  }
+
+  function renderTodayCard(nextClass, todayCount, now) {
+    if (!nextClass) {
+      if (todayCount > 0) {
+        return `
+          <div class="bento-label"><span>Today</span></div>
+          <div class="bento-today-headline">
+            <span class="bento-today-icon">🌙</span>
+            <div class="bento-today-body">
+              <p class="bento-today-title">Today's classes are wrapped</p>
+              <p class="bento-today-sub">${todayCount} class${todayCount === 1 ? "" : "es"} earlier today · none upcoming</p>
+            </div>
+          </div>
+        `;
+      }
+      const dowLong = DOW_LONG[now.getDay()];
+      return `
+        <div class="bento-label"><span>Today</span></div>
+        <div class="bento-today-headline">
+          <span class="bento-today-icon">☀️</span>
+          <div class="bento-today-body">
+            <p class="bento-today-title">No classes scheduled for ${dowLong}</p>
+            <p class="bento-today-sub">Enjoy the lighter day.</p>
+          </div>
+        </div>
+      `;
+    }
+    const { cls, startAt } = nextClass;
+    const teacher = primaryTeacherOf(cls.id);
+    const when = formatRelativeTimeUntil(startAt);
+    const timeStr = startAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    return `
+      <div class="bento-label">
+        <span>Next up</span>
+        <span class="live-pill">Live</span>
+      </div>
+      <div class="bento-today-headline">
+        <span class="bento-today-icon">🎭</span>
+        <div class="bento-today-body">
+          <p class="bento-today-title">${escapeHtml(cls.name)}</p>
+          <p class="bento-today-sub">${timeStr} · ${when}${cls.location ? ` · ${escapeHtml(cls.location)}` : ""}</p>
+          ${teacher
+            ? `<p class="bento-today-sub" style="margin-top:2px">Teacher: <b>${escapeHtml(teacher.full_name)}</b></p>`
+            : `<p class="bento-today-dim" style="margin-top:2px">No teacher assigned</p>`
+          }
+        </div>
+      </div>
+    `;
+  }
+
+  function renderStatsCard(classes, teachers, enrollments) {
+    return `
+      <div class="bento-label"><span>At a glance</span></div>
+      <div class="bento-stats">
+        <div class="bento-stat-row">
+          <span class="k"><span class="icon">🎭</span>Active classes</span>
+          <span class="v">${classes}</span>
+        </div>
+        <div class="bento-stat-row">
+          <span class="k"><span class="icon">🧑‍🏫</span>Teachers</span>
+          <span class="v">${teachers}</span>
+        </div>
+        <div class="bento-stat-row">
+          <span class="k"><span class="icon">👥</span>Active enrollments</span>
+          <span class="v">${enrollments}</span>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderScheduleCard(todayClasses, now) {
+    if (todayClasses.length === 0) {
+      return `
+        <div class="bento-label"><span>Today's schedule</span></div>
+        <div class="bento-attention-empty">Nothing on the books today.</div>
+      `;
+    }
+    const items = todayClasses.map(({ cls, startAt }, i) => {
+      const isPast = startAt && startAt < now;
+      const isNext = startAt && !isPast && i === todayClasses.findIndex((x) => x.startAt > now);
+      const dotClass = isNext ? "upcoming" : isPast ? "" : "active";
+      const teacher = primaryTeacherOf(cls.id);
+      const timeStr = startAt ? startAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "—";
+      const showLine = i < todayClasses.length - 1;
+      return `
+        <div class="bento-timeline-item" data-open-class="${escapeHtml(cls.id)}" ${isPast ? 'style="opacity:.55"' : ""}>
+          <div class="bento-timeline-spine">
+            <div class="bento-timeline-dot ${dotClass}"></div>
+            ${showLine ? '<div class="bento-timeline-line"></div>' : ""}
+          </div>
+          <div class="bento-timeline-body">
+            <div class="bento-timeline-time">${escapeHtml(timeStr)}</div>
+            <div class="bento-timeline-title">${escapeHtml(cls.name)}</div>
+            <div class="bento-timeline-sub">${cls.location ? escapeHtml(cls.location) : ""}${teacher ? ` · ${escapeHtml(teacher.full_name)}` : ""}</div>
+          </div>
+        </div>
+      `;
+    }).join("");
+    return `
+      <div class="bento-label"><span>Today's schedule</span><span style="font-weight:400;color:var(--ink-dim);text-transform:none;letter-spacing:0">${todayClasses.length} class${todayClasses.length === 1 ? "" : "es"}</span></div>
+      <div class="bento-timeline">${items}</div>
+    `;
+  }
+
+  function renderAttentionCard() {
+    const issues = [];
+    // Classes without a primary teacher
+    const noTeacher = state.classes.filter((c) =>
+      !c.is_test && c.active !== false &&
+      !state.classTeachers.some((ct) => ct.class_id === c.id && ct.role === "primary")
+    );
+    if (noTeacher.length > 0) {
+      issues.push({
+        label: `${noTeacher.length} class${noTeacher.length === 1 ? "" : "es"} without a primary teacher`,
+        hint: "Click to go to Classes and assign",
+        go: "classes",
+      });
+    }
+    // Classes without any linked infographics
+    const noGraphics = state.classes.filter((c) =>
+      !c.is_test && c.active !== false &&
+      !state.classInfographics.some((ci) => ci.class_id === c.id)
+    );
+    if (noGraphics.length > 0) {
+      issues.push({
+        label: `${noGraphics.length} class${noGraphics.length === 1 ? "" : "es"} missing linked graphics`,
+        hint: "Link templates ↔ class images for faster responses",
+        go: "classes",
+      });
+    }
+    // Classes dropped from JR
+    const dropped = state.classes.filter((c) => c.sync_state === "dropped_from_source");
+    if (dropped.length > 0) {
+      issues.push({
+        label: `${dropped.length} class${dropped.length === 1 ? "" : "es"} dropped from Jackrabbit`,
+        hint: "Review — may have ended or been removed",
+        go: "classes",
+      });
+    }
+    // Teachers with unresolved PAR
+    const unresolvedTeachers = state.teachers.filter((t) => t.email && !t.par_person_id && t.status !== "inactive");
+    if (unresolvedTeachers.length > 0) {
+      issues.push({
+        label: `${unresolvedTeachers.length} teacher${unresolvedTeachers.length === 1 ? "" : "s"} not linked to PAR`,
+        hint: "Teachers tab → Refresh PAR links",
+        go: "teachers",
+      });
+    }
+
+    if (issues.length === 0) {
+      return `
+        <div class="bento-label"><span>Needs your attention</span></div>
+        <div class="bento-attention-empty">All clear 🌱</div>
+      `;
+    }
+    const items = issues.map((i) => `
+      <div class="bento-attention-item" data-go-tab="${escapeHtml(i.go)}">
+        <div class="label">${escapeHtml(i.label)}</div>
+        <div class="hint">${escapeHtml(i.hint)}</div>
+      </div>
+    `).join("");
+    return `
+      <div class="bento-label"><span>Needs your attention</span></div>
+      <div class="bento-attention-list">${items}</div>
+    `;
+  }
+
+  function renderWeekCard(anchor) {
+    const days = [];
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(anchor);
+      d.setDate(d.getDate() + i);
+      d.setHours(0, 0, 0, 0);
+      const count = state.classes.filter((c) => !c.is_test && c.active !== false && classRunsOnDay(c, d)).length;
+      const isToday = i === 0;
+      days.push({ d, count, isToday, dow: DOW_SHORT[d.getDay()] });
+    }
+    const items = days.map((x) => `
+      <div class="bento-week-day${x.isToday ? " today" : ""}">
+        <div class="dow">${x.dow}</div>
+        <div class="count${x.count === 0 ? " zero" : ""}">${x.count}</div>
+      </div>
+    `).join("");
+    return `
+      <div class="bento-label"><span>Next 7 days</span></div>
+      <div class="bento-week">${items}</div>
+    `;
+  }
+
+  function renderActivityCard() {
+    // Pull the most recent sync_log-ish events we can derive locally.
+    // We don't keep full sync_log in state — derive what we can from classes/profile.
+    const events = [];
+    if (state.latestSyncLog) {
+      events.push({
+        status: state.latestSyncLog.status,
+        msg: `Jackrabbit sync — ${state.latestSyncLog.message}`,
+        when: new Date(state.latestSyncLog.created_at),
+      });
+    }
+    if (state.profile?.par_identity_last_synced) {
+      events.push({
+        status: state.profile.par_person_id ? "ok" : "skipped",
+        msg: state.profile.par_person_id
+          ? `PAR identity verified — linked as ${state.profile.par_display_name || "(no name)"}`
+          : "PAR identity checked — no match yet",
+        when: new Date(state.profile.par_identity_last_synced),
+      });
+    }
+    // Recent class changes (proxy: classes with last_synced_at)
+    state.classes
+      .filter((c) => c.last_synced_at)
+      .sort((a, b) => new Date(b.last_synced_at) - new Date(a.last_synced_at))
+      .slice(0, 3)
+      .forEach((c) => {
+        events.push({
+          status: "ok",
+          msg: `${escapeHtml(c.name)} last synced from Jackrabbit`,
+          when: new Date(c.last_synced_at),
+        });
+      });
+
+    events.sort((a, b) => b.when - a.when);
+    const top = events.slice(0, 6);
+
+    if (top.length === 0) {
+      return `
+        <div class="bento-label"><span>Recent activity</span></div>
+        <div class="bento-attention-empty">No activity yet.</div>
+      `;
+    }
+    const items = top.map((e) => `
+      <div class="bento-activity-item status-${escapeHtml(e.status || "ok")}">
+        <span class="msg">${e.msg}</span>
+        <span class="when">${formatRelativePast(e.when)}</span>
+      </div>
+    `).join("");
+    return `
+      <div class="bento-label"><span>Recent activity</span></div>
+      <div class="bento-activity-list">${items}</div>
+    `;
+  }
+
+  function renderQuickActionsCard() {
+    return `
+      <div class="bento-label"><span>Quick actions</span></div>
+      <div class="bento-qa-grid">
+        <button class="bento-qa-btn" data-qa="new-template"><span class="qa-icon">＋</span>New template</button>
+        <button class="bento-qa-btn" data-qa="sync-jr"><span class="qa-icon">⟳</span>Sync Jackrabbit</button>
+        <button class="bento-qa-btn" data-qa="new-teacher"><span class="qa-icon">🧑‍🏫</span>New teacher</button>
+        <button class="bento-qa-btn" data-qa="refresh-par"><span class="qa-icon">↻</span>Refresh PAR links</button>
+      </div>
+    `;
+  }
+
+  function renderParBridgeCard() {
+    const linked = !!state.profile?.par_person_id;
+    const body = linked
+      ? `
+        <a class="par-user" href="https://get-on-par.com/" target="_blank" rel="noopener" title="Open PAR in a new tab">
+          <span>👤</span>
+          <span class="par-name">${escapeHtml(state.profile.par_display_name || state.profile.par_primary_email || "Open PAR")}</span>
+          <span class="par-arrow">→</span>
+        </a>
+      `
+      : `
+        <a class="par-user" href="https://get-on-par.com/?view=settings&tab=linked-accounts" target="_blank" rel="noopener" title="Link this email on PAR to connect">
+          <span>🔗</span>
+          <span class="par-name">Connect to PAR</span>
+          <span class="par-arrow">→</span>
+        </a>
+      `;
+    return `
+      <div class="bento-label"><span>On PAR</span></div>
+      <div class="bento-par-bridge">${body}</div>
+    `;
+  }
+
+  function wireHomeCardEvents() {
+    // Clicking a timeline item opens that class detail in the Classes tab
+    $$("[data-open-class]", $("#bentoGrid")).forEach((el) => {
+      el.onclick = () => {
+        const classId = el.dataset.openClass;
+        state.cState.openClassId = classId;
+        go("classes");
+      };
+    });
+    // Clicking an attention card jumps to the relevant tab
+    $$("[data-go-tab]", $("#bentoGrid")).forEach((el) => {
+      el.onclick = () => go(el.dataset.goTab);
+    });
+    // Quick actions
+    $$("[data-qa]", $("#bentoGrid")).forEach((btn) => {
+      btn.onclick = () => {
+        const qa = btn.dataset.qa;
+        if (qa === "new-template")   { go("templates"); openTemplateEditor(null); }
+        else if (qa === "sync-jr")   { go("classes"); syncJackrabbit(); }
+        else if (qa === "new-teacher"){ go("teachers"); openTeacherEditor(null); }
+        else if (qa === "refresh-par"){ go("teachers"); refreshAllTeacherParLinks(); }
+      };
+    });
   }
 
   /* ═════════════ Router ═════════════ */
