@@ -139,6 +139,7 @@
     await reloadAll();
     wireEvents();
     renderAll();
+    go(state.router);   // applies tab + sidebar state to match the default
     setupRealtime();
   }
 
@@ -701,11 +702,19 @@
 
   /* ═════════════ Router ═════════════ */
 
+  // Sidebar visibility: only on the two tabs where infographic access is useful
+  const SIDEBAR_TABS = new Set(["templates", "infographics"]);
+
   function go(tab) {
     state.router = tab;
     $$(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === tab));
     $$(".tab-panel").forEach((p) => p.style.display = p.dataset.tab === tab ? "" : "none");
     $("#subBarTemplates").classList.toggle("hidden", tab !== "templates");
+    const layout = document.querySelector(".layout");
+    const sidebar = document.querySelector("aside.sidebar");
+    const show = SIDEBAR_TABS.has(tab);
+    if (layout)  layout.classList.toggle("no-sidebar", !show);
+    if (sidebar) sidebar.style.display = show ? "" : "none";
   }
 
   /* ═════════════ TEMPLATES ═════════════ */

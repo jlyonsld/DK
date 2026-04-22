@@ -348,9 +348,11 @@ button.btn:disabled { opacity: .45; cursor: not-allowed; }
   max-width: 1400px;
   margin: 22px auto;
   padding: 0 22px 64px;
+  transition: grid-template-columns .2s ease;
 }
+.layout.no-sidebar { grid-template-columns: 1fr; }
 @media (max-width: 900px) {
-  .layout { grid-template-columns: 1fr; }
+  .layout, .layout.no-sidebar { grid-template-columns: 1fr; }
   aside.sidebar { order: 2; }
 }
 
