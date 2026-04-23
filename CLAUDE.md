@@ -212,7 +212,9 @@ Classes carry `days: "Mon, Wed"` and `times: "3:00 PM - 3:45 PM"` strings, both 
 
 ### 4.11 Schedule Day/Week/Month views read from the same data
 
-`classesForDate(date)` is the one source of truth for "what classes run on this day" across all three schedule views. Week view positions blocks absolutely at `(hour - 8) * 42px` from the top of the day column, with height `(duration / 60) * 42px`. Month view counts classes per cell and collects unique primary teachers for up to 4 color dots. All three views honor the role filter: teachers see only classes they're assigned to, via email match between `session.user.email` and `teachers.email`.
+`classesForDate(date)` is the one source of truth for "what classes run on this day" across all three schedule views. Week view positions blocks absolutely at `(hour - 8) * 42px` from the top of the day column, with height `(duration / 60) * 42px`. Month view renders up to 3 inline class rows per cell (web) or 2 rows (≤720px) as `time · truncated-name · teacher-initials`; full name lives in the `title` tooltip; left-border color = primary teacher hue. `classInitialsString()` produces `"JL"` for primary-only and `"JL/MS"` when a sub is also assigned. Ultra-narrow (≤380px) hides the rows entirely and falls back to day number + count pill. Tapping a class row opens that class's detail panel; tapping empty cell space opens Day view for that date — this relies on `e.stopPropagation()` in `wireScheduleClassClicks`, don't remove it. All three views honor the role filter: teachers see only classes they're assigned to, via email match between `session.user.email` and `teachers.email`.
+
+**Closure color hooks.** The month cell emits `.closed-full` today (red 45° hatch) for every closure. `.closed-short` (yellow hatch) is wired in CSS but not emitted — when the academic-calendar schema grows a `closures.type` column distinguishing full-day vs. short-day, flip the one-line conditional in `renderScheduleMonthView` to choose between them. No redesign needed.
 
 ### 4.12 Magic-link + password login both live
 
@@ -297,6 +299,10 @@ Sharon and future teachers don't want to manage DK passwords. The login screen e
 - **Teacher bento matches via email.** See §5. Fragile if a teacher has an alternate email on file; ignored case-insensitively in lookups.
 
 - **The class `times` regex parser is strict.** See §5. Non-JR classes entered manually with unusual time formats may break the Week view (they'd silently not render blocks).
+
+- **Closures are global, not per-school.** A closure on a given date flags EVERY class on the month grid that day, regardless of `classes.location`. Fine for single-location franchises; wrong for multi-school franchises where e.g. Mt Pleasant ES is closed but West Ashley ES isn't. Before loading real academic-calendar data, this needs a schema decision — either a `closures.location_filter` column (nullable = all schools) or a separate `school_calendars` table keyed by the school name/id used in `classes.location`.
+
+- **Month-view `+N more` is calibrated to the web row cap.** The renderer computes overflow as `classes.length - 3`. On ≤720px CSS hides the 3rd row, so a cell with 4 classes visually shows 2 rows + "+1 more" even though 2 are hidden. Tap opens Day view where all render, so it's mild — but if it matters, move the overflow computation into CSS via `:nth-child` counters or re-render on viewport change.
 
 - **Sharon's setup is still pending.** As of last session: DK code is complete, both Vercel frontends are deployed (needs one more push for schedule views + responsive pass), PAR's `SPOKE_INSTALL_SIGNING_SECRET` is set on both Supabase projects. What remains: Sharon creates her PAR account with personal email, creates her franchise org, adds her work email via PAR's Linked Accounts UI, clicks Install Drama Kids, signs into DK with her work email via magic-link. Walkthrough doc at `SHARON_ONBOARDING_WALKTHROUGH.md`.
 
