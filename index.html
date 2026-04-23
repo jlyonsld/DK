@@ -132,6 +132,7 @@
           <div class="tab-head">
             <div class="results-meta" id="teacherMeta"></div>
             <div style="display:flex; gap:8px; align-items:center;">
+              <button class="btn small" id="inviteUserBtn" title="Invite anyone (teacher, manager, admin, super_admin) to PAR DK">✉ Invite user</button>
               <button class="btn small" id="refreshParLinksBtn" title="Check each teacher's email against PAR and cache any found identities">⟳ Refresh PAR links</button>
               <button class="btn primary small" id="newTeacherBtn">＋ New teacher</button>
             </div>
@@ -364,6 +365,42 @@
         <button class="btn danger small" id="deleteTeacherBtn" style="margin-right:auto;display:none">Delete teacher</button>
         <button class="btn" id="teacherCancel">Cancel</button>
         <button class="btn primary" id="teacherSave">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Invitation editor (compose a new invite) -->
+  <div class="modal-overlay" id="inviteEditorOverlay">
+    <div class="modal" style="max-width:520px">
+      <div class="modal-head">
+        <h3 id="inviteEditorTitle">Invite a user to PAR DK</h3>
+        <button class="btn ghost small" id="inviteEditorClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="field">
+          <label>Email</label>
+          <input type="email" id="invEmail" placeholder="person@example.com" autocomplete="off" />
+          <div class="field-hint" id="invEmailHint"></div>
+        </div>
+        <div class="field">
+          <label>Role <span class="field-sub">(what they'll be inside PAR DK)</span></label>
+          <select id="invRole">
+            <option value="teacher">Teacher — see own schedule + attendance (landing in T3)</option>
+            <option value="manager">Manager — edit templates / respond to leads, read-only elsewhere</option>
+            <option value="admin">Admin — full console access except role management</option>
+            <option value="super_admin">Super admin — franchise owner, can delegate anything</option>
+            <option value="viewer">Viewer — read-only across all tabs</option>
+          </select>
+          <div class="field-hint" id="invRoleMapHint"></div>
+        </div>
+        <div class="field">
+          <label>Notes <span class="field-sub">(optional — for your own records)</span></label>
+          <input type="text" id="invNotes" placeholder="e.g. Sharon — franchise owner" />
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" id="invCancel">Cancel</button>
+        <button class="btn primary" id="invSend">Send invitation</button>
       </div>
     </div>
   </div>

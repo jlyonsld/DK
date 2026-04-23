@@ -1100,6 +1100,10 @@
     if (refreshParBtn)     refreshParBtn.style.display     = hasPerm("edit_teachers")     && canMutate() ? "" : "none";
     if (newCategoryBtn)    newCategoryBtn.style.display    = hasPerm("edit_categories")   && canMutate() ? "" : "none";
     if (newInfographicBtn) newInfographicBtn.style.display = hasPerm("edit_infographics") && canMutate() ? "" : "none";
+
+    // "Invite user" is admin+ only (manager/viewer/teacher never see it)
+    const inviteUserBtn = $("#inviteUserBtn");
+    if (inviteUserBtn) inviteUserBtn.style.display = canMutate() ? "" : "none";
   }
 
   /* ═════════════ TEMPLATES ═════════════ */
@@ -1864,6 +1868,7 @@
   /* ═════════════ TEACHERS ═════════════ */
 
   let editingTeacherId = null;
+  let inviteEditorTeacherId = null;
 
   function renderTeachersTab() {
     const el = $("#teacherTable");
@@ -1949,9 +1954,10 @@
     return ` <span class="invite-badge pending" title="Invitation sent ${new Date(inv.sent_at).toLocaleDateString()}${inv.expires_at ? " · expires " + new Date(inv.expires_at).toLocaleDateString() : ""}">${label}</span>`;
   }
 
-  /* On-click handler: either re-show an existing pending invite's modal,
-   * or fire a new invitation via the Edge Function. */
-  async function onInviteTeacherClick(teacherId, email) {
+  /* On-click handler for a per-row Invite button: either re-show an
+   * existing pending invite's result modal, or open the editor pre-filled
+   * with the teacher's email + role=teacher. */
+  function onInviteTeacherClick(teacherId, email) {
     if (!email) { showToast("Teacher has no email to invite", "error"); return; }
     const existing = state.teacherInvitations.find(
       (inv) => (inv.email || "").toLowerCase() === email.toLowerCase()
@@ -1959,7 +1965,6 @@
                && !isInviteExpired(inv)
     );
     if (existing) {
-      // Re-open the modal for the existing pending invite (don't create a new one)
       openInviteResultModal({
         accept_url: existing.par_accept_url,
         expires_at: existing.expires_at,
@@ -1970,7 +1975,85 @@
       });
       return;
     }
-    await fireInvite({ teacher_id: teacherId, email, dk_role: "teacher" });
+    openInviteEditor({ email, teacher_id: teacherId, dk_role: "teacher" });
+  }
+
+  /* Open the invite editor, optionally with prefilled fields. */
+  function openInviteEditor(prefill) {
+    const p = prefill || {};
+    inviteEditorTeacherId = p.teacher_id || null;
+    $("#invEmail").value = p.email || "";
+    $("#invRole").value  = p.dk_role || "teacher";
+    $("#invNotes").value = p.notes || "";
+    $("#invEmailHint").textContent = p.teacher_id
+      ? "Inviting this existing teacher — they'll be linked to their teacher row on acceptance."
+      : "This email will be invited as a standalone DK user. If you also want them in the teachers list, add them first via + New teacher.";
+    updateInviteRoleMapHint();
+    $("#inviteEditorOverlay").classList.add("open");
+    setTimeout(() => $("#invEmail").focus(), 40);
+  }
+
+  function closeInviteEditor() {
+    $("#inviteEditorOverlay").classList.remove("open");
+    inviteEditorTeacherId = null;
+  }
+
+  /* Updates the "PAR-side role" hint below the role select so it's clear
+   * what happens in PAR when this invitation is created. */
+  function updateInviteRoleMapHint() {
+    const dkRole = $("#invRole").value;
+    const parMap = {
+      super_admin: "owner", admin: "admin", manager: "member",
+      teacher: "member", viewer: "member"
+    };
+    const parRole = parMap[dkRole] || "member";
+    $("#invRoleMapHint").innerHTML =
+      `In PAR they'll be an <b>${escapeHtml(parRole)}</b> of the franchise org. ` +
+      (dkRole === "super_admin"
+        ? "Use this for the franchise owner."
+        : dkRole === "admin"
+          ? "Full console access; can invite teachers and managers but not other admins."
+          : dkRole === "manager"
+            ? "Can respond to leads and edit templates; read-only on structural data."
+            : dkRole === "teacher"
+              ? "Sees only their own schedule and home bento. Full teacher features land in Phase T3."
+              : "Read-only across every tab.");
+  }
+
+  /* Send the invitation from the editor form. */
+  async function submitInviteEditor() {
+    const email = $("#invEmail").value.trim().toLowerCase();
+    const dkRole = $("#invRole").value;
+    const notes = $("#invNotes").value.trim() || null;
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      showToast("Enter a valid email address", "error"); return;
+    }
+    // Reuse existing pending invitation if one exists for this email
+    const existing = state.teacherInvitations.find(
+      (inv) => (inv.email || "").toLowerCase() === email
+               && !inv.accepted_at
+               && !isInviteExpired(inv)
+    );
+    if (existing) {
+      closeInviteEditor();
+      openInviteResultModal({
+        accept_url: existing.par_accept_url,
+        expires_at: existing.expires_at,
+        email_sent: existing.email_status === "sent",
+        email_error: existing.email_error,
+        email,
+        reused: true,
+      });
+      return;
+    }
+    const payload = {
+      email,
+      dk_role: dkRole,
+      teacher_id: inviteEditorTeacherId || undefined,
+      notes,
+    };
+    closeInviteEditor();
+    await fireInvite(payload);
   }
 
   async function fireInvite(payload) {
@@ -2457,6 +2540,15 @@
     $("#classModalOverlay").onclick = (e) => { if (e.target.id === "classModalOverlay") closeClassEditor(); };
     $("#classSave").onclick        = saveClass;
     $("#deleteClassBtn").onclick   = deleteClass;
+
+    // Invitation editor modal
+    const inviteUserBtn = $("#inviteUserBtn");
+    if (inviteUserBtn) inviteUserBtn.onclick = () => openInviteEditor({});
+    $("#invCancel").onclick         = closeInviteEditor;
+    $("#inviteEditorClose").onclick = closeInviteEditor;
+    $("#inviteEditorOverlay").onclick = (e) => { if (e.target.id === "inviteEditorOverlay") closeInviteEditor(); };
+    $("#invRole").addEventListener("change", updateInviteRoleMapHint);
+    $("#invSend").onclick           = submitInviteEditor;
 
     // Invitation result modal
     $("#inviteResultClose").onclick = closeInviteResultModal;
