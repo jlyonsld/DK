@@ -45,23 +45,27 @@
   </div>
 
   <!-- ══════════════════════════ NO-ROLE SCREEN ═════════════════════════ -->
-  <!-- Shown when the signed-in user's profile.role is null (new signup
-       that hasn't been granted a role yet). -->
+  <!-- Shown when the signed-in user's profile.role is null.
+       Two variants depending on whether par_person_id is set:
+       - Linked but no role: "waiting for admin to assign"
+       - Not linked: "go link this email on PAR first" -->
   <div id="noRoleScreen" class="login-screen" style="display:none">
     <div class="login-card">
       <div class="login-brand">
         <img src="logo.png" alt="Drama Kids" onerror="this.style.display='none'" />
         <div>
-          <div class="login-title">PAR DK</div>
-          <div class="login-sub">Waiting for access</div>
+          <div class="login-title" id="noRoleTitle">Waiting for access</div>
+          <div class="login-sub" id="noRoleSub">Role not yet assigned</div>
         </div>
       </div>
       <div class="login-footer" style="font-size:13px;line-height:1.5;color:var(--ink);margin-top:12px">
-        <p style="margin:0 0 10px 0">Your account is signed in, but hasn't been granted a role yet.</p>
         <p style="margin:0 0 10px 0" id="noRoleUserLine"></p>
-        <p style="margin:0;color:var(--ink-dim)">Ask your franchise admin to assign you a role. Once they do, refresh this page.</p>
+        <p style="margin:0;color:var(--ink-dim)" id="noRoleFootnote"></p>
       </div>
-      <button class="btn ghost" id="noRoleSignOut" style="width:100%;margin-top:16px">Sign out</button>
+      <a id="noRolePrimaryCta" class="btn primary"
+         style="display:none;width:100%;margin-top:16px;text-align:center;text-decoration:none"
+         target="_blank" rel="noopener"></a>
+      <button class="btn ghost" id="noRoleSignOut" style="width:100%;margin-top:10px">Sign out</button>
     </div>
   </div>
 

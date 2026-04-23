@@ -235,10 +235,20 @@
     $("#app").style.display = "";
     await loadProfile();
 
-    // If the signed-in user hasn't been granted a role yet, show the
-    // "waiting for access" screen instead of the app. This happens for
-    // brand-new signups — handle_new_user() inserts profiles with role=null
-    // on purpose, so an admin must explicitly promote them.
+    // If the user doesn't yet have a role, give par-identity-proxy a chance
+    // to auto-promote them synchronously (it might — if this email is linked
+    // to a PAR identity that owns the configured franchise org). We await
+    // the refresh so the no-role screen isn't shown for a user who was just
+    // about to be auto-promoted.
+    if (!currentRole()) {
+      try { await refreshParIdentity(); } catch (_) { /* swallow — fall through */ }
+      // Re-pull profile so we see any role change the Edge Function wrote.
+      try {
+        const { data: refreshed } = await sb.from("profiles").select("*").eq("id", state.session.user.id).single();
+        if (refreshed) state.profile = refreshed;
+      } catch (_) { /* ignore */ }
+    }
+
     if (!currentRole()) {
       showNoRoleScreen();
       return;
@@ -255,15 +265,55 @@
     setupRealtime();
   }
 
+  /* No-role screen.
+   *
+   * Two distinct states fold into role=null:
+   *   (a) Email IS linked to a PAR identity (par_person_id populated), but
+   *       the PAR identity doesn't own or admin the configured franchise
+   *       org. Real case: invited teachers/managers waiting for their admin
+   *       to complete the promotion, or a DK profile that pre-existed the
+   *       install flow. Message: "waiting for admin to assign a role."
+   *   (b) Email is NOT linked to PAR at all (par_person_id is null). Most
+   *       common case when someone (Sharon) signs into DK with a work email
+   *       they never linked to their PAR identity. The fix: link it on PAR.
+   *       Message: deep-link to PAR's linked-accounts UI.
+   */
   function showNoRoleScreen() {
     $("#app").style.display = "none";
     $("#loginScreen").style.display = "none";
     $("#noRoleScreen").style.display = "";
     const user = state.session?.user;
-    const line = $("#noRoleUserLine");
+    const parLinked = !!state.profile?.par_person_id;
+    const titleEl = $("#noRoleTitle");
+    const subEl   = $("#noRoleSub");
+    const line    = $("#noRoleUserLine");
+    const ctaEl   = $("#noRolePrimaryCta");
+    const footEl  = $("#noRoleFootnote");
+
+    if (titleEl) {
+      titleEl.textContent = parLinked ? "Waiting for access" : "One more setup step";
+    }
+    if (subEl) {
+      subEl.textContent = parLinked ? "Role not yet assigned" : "Link this email to your PAR identity";
+    }
     if (line && user) {
       line.innerHTML = `Signed in as <b>${escapeHtml(user.email || "")}</b>.`;
     }
+    if (footEl) {
+      footEl.innerHTML = parLinked
+        ? "Your account is linked to PAR, but hasn't been granted a role in this franchise yet. Ask your franchise admin to assign you a role, then refresh this page."
+        : "This email isn't linked to your PAR identity yet. Open PAR's Linked Accounts settings (below), add this email there, verify the link PAR sends, then come back here and refresh.";
+    }
+    if (ctaEl) {
+      if (parLinked) {
+        ctaEl.style.display = "none";
+      } else {
+        ctaEl.style.display = "";
+        ctaEl.href = "https://get-on-par.com/?view=settings&tab=linked-accounts";
+        ctaEl.textContent = "Open PAR Linked Accounts →";
+      }
+    }
+
     const btn = $("#noRoleSignOut");
     if (btn) {
       btn.onclick = async () => {
