@@ -34,13 +34,26 @@
     students: [],
     enrollments: [],
     teacherInvitations: [],
+    closures: [],
     dkConfig: null,
     latestSyncLog: null,
     tState: { query: "", category: "all", filled: {} },
     igState: { query: "", tag: "all" },
     cState: { showTest: false, openClassId: null },
+    // Schedule state: `anchor` is the currently-focused date (ISO); mode is
+    // day/week/month; onlyMine filters to the signed-in teacher's assignments.
+    sState: { mode: "day", anchor: isoDate(new Date()), onlyMine: false },
     router: "home"
   };
+
+  // Need to compute isoDate BEFORE the state initializer references it;
+  // hoist via function declaration.
+  function isoDate(d) {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  }
 
   /* ═════════════ Role + permissions (client-side UI gating) ═════════════
    *
@@ -105,11 +118,11 @@
   // Which tabs each role is allowed to see. (Role Management tab doesn't
   // exist in T1 — it lands in T6.)
   const ROLE_TAB_VISIBILITY = {
-    super_admin: new Set(["home","templates","classes","teachers","categories","infographics"]),
-    admin:       new Set(["home","templates","classes","teachers","categories","infographics"]),
-    manager:     new Set(["home","templates","classes","teachers","categories","infographics"]),
-    teacher:     new Set(["home"]),
-    viewer:      new Set(["home","templates","classes","teachers","categories","infographics"])
+    super_admin: new Set(["home","schedule","templates","classes","teachers","categories","infographics"]),
+    admin:       new Set(["home","schedule","templates","classes","teachers","categories","infographics"]),
+    manager:     new Set(["home","schedule","templates","classes","teachers","categories","infographics"]),
+    teacher:     new Set(["home","schedule"]),
+    viewer:      new Set(["home","schedule","templates","classes","teachers","categories","infographics"])
   };
   function canSeeTab(tab) {
     const role = currentRole();
@@ -344,7 +357,7 @@
       "profiles", "categories", "templates", "classes", "infographics",
       "teachers", "class_teachers", "class_infographics",
       "students", "enrollments", "attendance", "sync_log",
-      "teacher_invitations", "dk_config"
+      "teacher_invitations", "dk_config", "closures"
     ];
     realtimeChannel = sb.channel("dk-realtime");
     tablesToWatch.forEach((table) => {
@@ -495,7 +508,7 @@
   async function reloadAll() {
     showLoader(true);
     try {
-      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, syncLog] = await Promise.all([
+      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog] = await Promise.all([
         sb.from("categories").select("*").order("sort_order", { ascending: true }),
         sb.from("templates").select("*").order("created_at", { ascending: true }),
         sb.from("classes").select("*").order("name", { ascending: true }),
@@ -507,6 +520,7 @@
         sb.from("enrollments").select("*").order("enrolled_at", { ascending: false }),
         sb.from("teacher_invitations").select("*").order("sent_at", { ascending: false }),
         sb.from("dk_config").select("*").eq("id", 1).maybeSingle(),
+        sb.from("closures").select("*").order("date", { ascending: true }),
         sb.from("sync_log").select("*").eq("source", "jackrabbit").eq("operation", "pull_openings").order("created_at", { ascending: false }).limit(1).maybeSingle()
       ]);
       for (const r of [cats, tpls, cls, igs, tch, ct, ci, stu, enr]) if (r.error) throw r.error;
@@ -523,6 +537,7 @@
       state.enrollments      = enr.data;
       state.teacherInvitations = (invites && !invites.error) ? invites.data : [];
       state.dkConfig         = (cfg && !cfg.error) ? cfg.data : null;
+      state.closures         = (closures && !closures.error) ? closures.data : [];
       state.latestSyncLog    = syncLog.data || null;
     } catch (e) {
       console.error(e);
@@ -533,6 +548,7 @@
 
   function renderAll() {
     renderHomeTab();
+    renderScheduleTab();
     renderInfographicsSidebar();
     renderCategoryChips();
     renderTemplates();
@@ -1202,6 +1218,438 @@
     // "Invite user" is admin+ only (manager/viewer/teacher never see it)
     const inviteUserBtn = $("#inviteUserBtn");
     if (inviteUserBtn) inviteUserBtn.style.display = canMutate() ? "" : "none";
+
+    // Closures are admin+ only (manager/viewer can see the Schedule view but
+    // can't manage closures — only add/remove via the modal)
+    const schedManageClosures = $("#schedManageClosures");
+    if (schedManageClosures) schedManageClosures.style.display = canMutate() ? "" : "none";
+  }
+
+  /* ═════════════ SCHEDULE (Day / Week / Month) ═════════════
+   *
+   * Dedicated tab with a mode toggle. Renders classes + teacher overlays +
+   * closures across Day, Week, and Month projections.
+   *
+   * - Admin+ sees everything; teacher sees only classes they're assigned to.
+   * - "Only my classes" toggle lets admins filter to their own assignments too.
+   * - Teacher color assignment is a deterministic hash of teacher.id -> hue.
+   * - Closures overlay visually mute a day; don't remove class blocks (we want
+   *   admins to see what was supposed to run so they can communicate cancellation).
+   */
+
+  const SCHED_HOUR_START = 8;    // earliest rendered hour on week view
+  const SCHED_HOUR_END   = 21;   // latest (exclusive — renders up to 20:xx)
+  const SCHED_HOUR_PX    = 42;   // pixels per hour on week view
+
+  function isoDateFromString(s) {
+    // s is "YYYY-MM-DD" — return a Date at local midnight
+    const [y, m, d] = s.split("-").map((x) => parseInt(x, 10));
+    return new Date(y, m - 1, d);
+  }
+  function addDays(d, n) { const r = new Date(d); r.setDate(r.getDate() + n); return r; }
+  function startOfWeek(d) {
+    // Sunday-start week
+    const r = new Date(d); r.setHours(0,0,0,0);
+    r.setDate(r.getDate() - r.getDay());
+    return r;
+  }
+  function startOfMonth(d) {
+    const r = new Date(d); r.setHours(0,0,0,0); r.setDate(1); return r;
+  }
+  function endOfMonth(d) {
+    const r = new Date(d.getFullYear(), d.getMonth() + 1, 0);
+    r.setHours(23,59,59,999); return r;
+  }
+
+  // Deterministic hue-per-teacher from teacher_id. Produces HSL colors
+  // spread evenly-ish across the wheel, at constant saturation/luma so
+  // overlays read consistently on a dark background.
+  function teacherHue(teacherId) {
+    if (!teacherId) return 210;
+    let h = 0;
+    for (let i = 0; i < teacherId.length; i++) h = (h * 31 + teacherId.charCodeAt(i)) >>> 0;
+    return h % 360;
+  }
+  function teacherColor(teacherId, alpha) {
+    const hue = teacherHue(teacherId);
+    return `hsla(${hue}, 62%, 58%, ${alpha == null ? 1 : alpha})`;
+  }
+
+  // Return the teacher row (or null) primary-assigned to a class.
+  function primaryTeacherObj(classId) {
+    const ct = state.classTeachers.find((x) => x.class_id === classId && x.role === "primary");
+    if (ct) return state.teachers.find((t) => t.id === ct.teacher_id);
+    const any = state.classTeachers.find((x) => x.class_id === classId);
+    return any ? state.teachers.find((t) => t.id === any.teacher_id) : null;
+  }
+
+  // Return classes that should appear on a given date after applying
+  // filters: test-excluded, active-only, onlyMine filter, teacher role
+  // always filters to their own assignments.
+  function classesForDate(date) {
+    const role = currentRole();
+    const isTeacher = role === "teacher";
+    const email = (state.session?.user?.email || "").toLowerCase();
+    const me = isTeacher && email
+      ? state.teachers.find((t) => (t.email || "").toLowerCase() === email)
+      : null;
+    const myId = me?.id || null;
+
+    const onlyMine = state.sState.onlyMine || isTeacher;
+    const myAssignedClassIds = onlyMine
+      ? new Set(state.classTeachers.filter((ct) => ct.teacher_id === myId).map((ct) => ct.class_id))
+      : null;
+
+    return state.classes.filter((c) => {
+      if (c.is_test) return false;
+      if (c.active === false) return false;
+      if (!classRunsOnDay(c, date)) return false;
+      if (myAssignedClassIds && !myAssignedClassIds.has(c.id)) return false;
+      return true;
+    });
+  }
+
+  function closuresForDate(date) {
+    const iso = isoDate(date);
+    return state.closures.filter((c) => c.date === iso);
+  }
+
+  function renderScheduleTab() {
+    const view = $("#schedView");
+    const label = $("#schedLabel");
+    if (!view || !label) return;
+
+    const anchor = isoDateFromString(state.sState.anchor);
+    const mode = state.sState.mode;
+
+    // Mode toggle active state
+    $$(".sched-mode").forEach((b) => {
+      b.classList.toggle("active", b.dataset.schedMode === mode);
+    });
+
+    // Only-mine toggle: reflect current state; force-on and disable for teachers
+    const onlyMineEl = $("#schedOnlyMine");
+    if (onlyMineEl) {
+      if (isRole("teacher")) {
+        onlyMineEl.checked = true;
+        onlyMineEl.disabled = true;
+      } else {
+        onlyMineEl.checked = !!state.sState.onlyMine;
+        onlyMineEl.disabled = false;
+      }
+    }
+
+    // Header label + body rendering
+    if (mode === "day") {
+      label.textContent = anchor.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric", year: "numeric" });
+      renderScheduleDayView(view, anchor);
+    } else if (mode === "week") {
+      const weekStart = startOfWeek(anchor);
+      const weekEnd   = addDays(weekStart, 6);
+      label.textContent = `${weekStart.toLocaleDateString(undefined, { month: "short", day: "numeric" })} – ${weekEnd.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}`;
+      renderScheduleWeekView(view, weekStart);
+    } else if (mode === "month") {
+      label.textContent = anchor.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+      renderScheduleMonthView(view, anchor);
+    }
+  }
+
+  function renderScheduleDayView(view, date) {
+    const classes = classesForDate(date)
+      .map((c) => ({ cls: c, startAt: classStartTimeOn(c, date), teacher: primaryTeacherObj(c.id) }))
+      .sort((a, b) => (a.startAt?.getTime() || 0) - (b.startAt?.getTime() || 0));
+    const closures = closuresForDate(date);
+
+    if (!classes.length && !closures.length) {
+      view.innerHTML = `
+        <div class="sched-empty">
+          <p>Nothing scheduled on ${escapeHtml(date.toLocaleDateString(undefined, { weekday: "long" }))}.</p>
+          <p class="sched-empty-sub">Use the navigation arrows to browse other days.</p>
+        </div>
+      `;
+      return;
+    }
+
+    const closureHtml = closures.map((cl) => `
+      <div class="sched-closure-card">
+        <div class="sched-closure-label">🗓 ${escapeHtml(cl.label)}</div>
+        ${cl.note ? `<div class="sched-closure-note">${escapeHtml(cl.note)}</div>` : ""}
+      </div>
+    `).join("");
+
+    const now = new Date();
+    const isToday = isoDate(date) === isoDate(now);
+    const itemsHtml = classes.map(({ cls, startAt, teacher }, i) => {
+      const isPast = isToday && startAt && startAt < now;
+      const isNext = isToday && startAt && !isPast && i === classes.findIndex((x) => x.startAt && x.startAt > now);
+      const dotClass = isNext ? "upcoming" : isPast ? "" : "active";
+      const timeStr = startAt ? startAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : (cls.times || "—");
+      const showLine = i < classes.length - 1;
+      const hue = teacher ? teacherHue(teacher.id) : 210;
+      return `
+        <div class="sched-day-item" data-open-class="${escapeHtml(cls.id)}" ${isPast ? 'style="opacity:.55"' : ""}>
+          <div class="sched-day-spine">
+            <div class="sched-day-dot ${dotClass}" style="background:hsl(${hue}, 62%, 58%)"></div>
+            ${showLine ? '<div class="sched-day-line"></div>' : ""}
+          </div>
+          <div class="sched-day-body" style="border-left:3px solid hsla(${hue}, 62%, 58%, .55)">
+            <div class="sched-day-time">${escapeHtml(timeStr)}</div>
+            <div class="sched-day-title">${escapeHtml(cls.name)}</div>
+            <div class="sched-day-sub">
+              ${cls.location ? escapeHtml(cls.location) : ""}
+              ${teacher ? `${cls.location ? " · " : ""}<span style="color:hsl(${hue}, 62%, 68%)">${escapeHtml(teacher.full_name)}</span>` : ""}
+            </div>
+          </div>
+        </div>
+      `;
+    }).join("");
+
+    view.innerHTML = `
+      ${closureHtml}
+      <div class="sched-day-list">${itemsHtml}</div>
+    `;
+    wireScheduleClassClicks();
+  }
+
+  function renderScheduleWeekView(view, weekStart) {
+    // Build a 7-day slice; for each day, gather class+time+teacher tuples.
+    const days = [];
+    for (let i = 0; i < 7; i++) {
+      const d = addDays(weekStart, i);
+      const classes = classesForDate(d)
+        .map((c) => ({ cls: c, startAt: classStartTimeOn(c, d), teacher: primaryTeacherObj(c.id) }))
+        .filter((x) => x.startAt)  // drop classes with unparseable times
+        .sort((a, b) => a.startAt.getTime() - b.startAt.getTime());
+      days.push({ date: d, classes, closures: closuresForDate(d) });
+    }
+
+    const hourRows = [];
+    for (let h = SCHED_HOUR_START; h < SCHED_HOUR_END; h++) {
+      const label = h === 12 ? "12 PM" : h < 12 ? `${h} AM` : `${h - 12} PM`;
+      hourRows.push(`<div class="sched-week-hour"><span>${label}</span></div>`);
+    }
+
+    const dowHeaders = [];
+    const todayIso = isoDate(new Date());
+    for (let i = 0; i < 7; i++) {
+      const d = addDays(weekStart, i);
+      const iso = isoDate(d);
+      const isToday = iso === todayIso;
+      const dow = d.toLocaleDateString(undefined, { weekday: "short" });
+      const dn  = d.getDate();
+      dowHeaders.push(`
+        <div class="sched-week-daycol-head${isToday ? " today" : ""}" data-open-day="${iso}">
+          <span class="dow">${escapeHtml(dow)}</span>
+          <span class="dn">${dn}</span>
+        </div>
+      `);
+    }
+
+    const dayColumns = days.map((d) => {
+      const iso = isoDate(d.date);
+      const isToday = iso === todayIso;
+      const isClosed = d.closures.length > 0;
+      const closureLabel = isClosed
+        ? `<div class="sched-week-closure-pill" title="${escapeHtml(d.closures.map(c => c.label).join(" · "))}">🗓 ${escapeHtml(d.closures[0].label)}${d.closures.length > 1 ? ` +${d.closures.length - 1}` : ""}</div>`
+        : "";
+
+      const totalHeight = (SCHED_HOUR_END - SCHED_HOUR_START) * SCHED_HOUR_PX;
+      const blocks = d.classes.map(({ cls, startAt, teacher }) => {
+        const hoursFromStart = startAt.getHours() + startAt.getMinutes() / 60 - SCHED_HOUR_START;
+        if (hoursFromStart < 0 || hoursFromStart >= (SCHED_HOUR_END - SCHED_HOUR_START)) return "";
+        const topPx = Math.max(0, hoursFromStart * SCHED_HOUR_PX);
+        const durationMin = parseClassDurationMinutes(cls);
+        const heightPx = Math.max(24, (durationMin / 60) * SCHED_HOUR_PX);
+        const hue = teacher ? teacherHue(teacher.id) : 210;
+        const timeStr = startAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+        return `
+          <div class="sched-week-block" data-open-class="${escapeHtml(cls.id)}"
+               style="top:${topPx}px;height:${heightPx}px;
+                      background:hsla(${hue},62%,58%,.22);
+                      border-left:3px solid hsl(${hue},62%,58%);">
+            <div class="sched-week-block-time">${escapeHtml(timeStr)}</div>
+            <div class="sched-week-block-title">${escapeHtml(cls.name)}</div>
+            ${teacher ? `<div class="sched-week-block-sub">${escapeHtml(teacher.full_name.split(/\s+/)[0])}</div>` : ""}
+          </div>
+        `;
+      }).join("");
+
+      return `
+        <div class="sched-week-daycol${isToday ? " today" : ""}${isClosed ? " closed" : ""}"
+             style="height:${totalHeight}px">
+          ${closureLabel}
+          ${blocks}
+        </div>
+      `;
+    }).join("");
+
+    view.innerHTML = `
+      <div class="sched-week">
+        <div class="sched-week-headrow">
+          <div class="sched-week-timecol-head"></div>
+          ${dowHeaders.join("")}
+        </div>
+        <div class="sched-week-body">
+          <div class="sched-week-timecol">${hourRows.join("")}</div>
+          <div class="sched-week-grid">${dayColumns}</div>
+        </div>
+      </div>
+    `;
+    wireScheduleClassClicks();
+  }
+
+  // Parse a class's duration (in minutes) from the `times` field like
+  // "3:00 PM - 3:45 PM". Falls back to 60 min.
+  function parseClassDurationMinutes(cls) {
+    if (!cls?.times) return 60;
+    const m = String(cls.times).match(/(\d{1,2}):(\d{2})\s*([AP]M)\s*[-–]\s*(\d{1,2}):(\d{2})\s*([AP]M)/i);
+    if (!m) return 60;
+    const toMin = (h, mm, ap) => {
+      let hh = parseInt(h, 10) % 12;
+      if (ap.toUpperCase() === "PM") hh += 12;
+      return hh * 60 + parseInt(mm, 10);
+    };
+    const s = toMin(m[1], m[2], m[3]);
+    const e = toMin(m[4], m[5], m[6]);
+    return Math.max(15, e - s);
+  }
+
+  function renderScheduleMonthView(view, anchor) {
+    const monthStart = startOfMonth(anchor);
+    const monthEnd   = endOfMonth(anchor);
+    // Grid starts on the Sunday on-or-before the 1st
+    const gridStart = startOfWeek(monthStart);
+    // Always render 6 rows of 7 cells = 42 cells for a stable layout.
+    const todayIso = isoDate(new Date());
+
+    const dowHeaders = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].map(
+      (d) => `<div class="sched-month-dow">${d}</div>`
+    ).join("");
+
+    const cells = [];
+    for (let i = 0; i < 42; i++) {
+      const d = addDays(gridStart, i);
+      const iso = isoDate(d);
+      const inMonth = d.getMonth() === anchor.getMonth();
+      const isToday = iso === todayIso;
+      const closures = closuresForDate(d);
+      const classes = classesForDate(d);
+      const teacherIds = new Set();
+      classes.forEach((c) => {
+        const t = primaryTeacherObj(c.id);
+        if (t) teacherIds.add(t.id);
+      });
+      const teacherDots = Array.from(teacherIds).slice(0, 4).map((tid) => `
+        <span class="sched-month-dot" style="background:${teacherColor(tid)}"></span>
+      `).join("");
+      const overflow = teacherIds.size > 4 ? `<span class="sched-month-dot-more">+${teacherIds.size - 4}</span>` : "";
+
+      cells.push(`
+        <div class="sched-month-cell${inMonth ? "" : " off"}${isToday ? " today" : ""}${closures.length ? " closed" : ""}"
+             data-open-day="${iso}">
+          <div class="sched-month-dn">${d.getDate()}</div>
+          ${classes.length
+            ? `<div class="sched-month-count">${classes.length}</div>`
+            : ""}
+          ${closures.length
+            ? `<div class="sched-month-closure" title="${escapeHtml(closures.map(c => c.label).join(" · "))}">${escapeHtml(closures[0].label)}</div>`
+            : ""}
+          <div class="sched-month-dots">${teacherDots}${overflow}</div>
+        </div>
+      `);
+    }
+
+    view.innerHTML = `
+      <div class="sched-month">
+        <div class="sched-month-dows">${dowHeaders}</div>
+        <div class="sched-month-grid">${cells.join("")}</div>
+        <div class="sched-month-legend">
+          Click any day to open its details. Colored dots represent the primary teacher assigned to each class.
+        </div>
+      </div>
+    `;
+    wireScheduleClassClicks();
+  }
+
+  /* ═════════════ Closures management ═════════════ */
+
+  function openClosuresModal() {
+    renderClosuresList();
+    // Default date to the current anchor for convenience
+    const d = $("#closureDate");
+    if (d && !d.value) d.value = state.sState.anchor;
+    $("#closuresOverlay").classList.add("open");
+    setTimeout(() => $("#closureLabel").focus(), 40);
+  }
+  function closeClosuresModal() { $("#closuresOverlay").classList.remove("open"); }
+
+  function renderClosuresList() {
+    const wrap = $("#closureList");
+    if (!wrap) return;
+    if (!state.closures.length) {
+      wrap.innerHTML = `<div class="closure-empty">No closures yet.</div>`;
+      return;
+    }
+    wrap.innerHTML = state.closures
+      .slice()
+      .sort((a, b) => a.date.localeCompare(b.date))
+      .map((c) => `
+        <div class="closure-row" data-id="${escapeHtml(c.id)}">
+          <div class="closure-row-date">${escapeHtml(c.date)}</div>
+          <div class="closure-row-label">${escapeHtml(c.label)}</div>
+          <button class="btn ghost small" data-act="del-closure" data-id="${escapeHtml(c.id)}" title="Remove">✕</button>
+        </div>
+      `).join("");
+    $$('[data-act="del-closure"]', wrap).forEach((b) => {
+      b.onclick = async () => {
+        const id = b.dataset.id;
+        const { error } = await sb.from("closures").delete().eq("id", id);
+        if (error) return showToast(error.message, "error");
+        await reloadAll(); renderAll(); renderClosuresList();
+        showToast("Closure removed", "success");
+      };
+    });
+  }
+
+  async function addClosure() {
+    const date = $("#closureDate").value;
+    const label = $("#closureLabel").value.trim();
+    if (!date || !label) { showToast("Date and label are required", "error"); return; }
+    const { error } = await sb.from("closures").insert({ date, label });
+    if (error) { showToast(error.message, "error"); return; }
+    $("#closureLabel").value = "";
+    await reloadAll(); renderAll(); renderClosuresList();
+    showToast("Closure added", "success");
+  }
+
+  /* ═════════════ Schedule nav + wiring ═════════════ */
+
+  function schedNav(offset) {
+    const d = isoDateFromString(state.sState.anchor);
+    if (state.sState.mode === "day") state.sState.anchor = isoDate(addDays(d, offset));
+    else if (state.sState.mode === "week") state.sState.anchor = isoDate(addDays(d, offset * 7));
+    else if (state.sState.mode === "month") {
+      const r = new Date(d.getFullYear(), d.getMonth() + offset, 1);
+      state.sState.anchor = isoDate(r);
+    }
+    renderScheduleTab();
+  }
+
+  function wireScheduleClassClicks() {
+    $$("[data-open-class]", $("#schedView")).forEach((el) => {
+      el.onclick = () => {
+        const id = el.dataset.openClass;
+        state.cState.openClassId = id;
+        go("classes");
+      };
+    });
+    $$("[data-open-day]", $("#schedView")).forEach((el) => {
+      el.onclick = () => {
+        state.sState.anchor = el.dataset.openDay;
+        state.sState.mode = "day";
+        renderScheduleTab();
+      };
+    });
   }
 
   /* ═════════════ TEMPLATES ═════════════ */
@@ -2638,6 +3086,32 @@
     $("#classModalOverlay").onclick = (e) => { if (e.target.id === "classModalOverlay") closeClassEditor(); };
     $("#classSave").onclick        = saveClass;
     $("#deleteClassBtn").onclick   = deleteClass;
+
+    // Schedule toolbar
+    $$(".sched-mode").forEach((b) => {
+      b.onclick = () => {
+        state.sState.mode = b.dataset.schedMode;
+        renderScheduleTab();
+      };
+    });
+    const schedPrev = $("#schedPrev");
+    const schedNext = $("#schedNext");
+    const schedToday = $("#schedToday");
+    const schedOnlyMine = $("#schedOnlyMine");
+    const schedManageClosures = $("#schedManageClosures");
+    if (schedPrev)  schedPrev.onclick  = () => schedNav(-1);
+    if (schedNext)  schedNext.onclick  = () => schedNav(+1);
+    if (schedToday) schedToday.onclick = () => { state.sState.anchor = isoDate(new Date()); renderScheduleTab(); };
+    if (schedOnlyMine) schedOnlyMine.onchange = (e) => { state.sState.onlyMine = !!e.target.checked; renderScheduleTab(); };
+    if (schedManageClosures) schedManageClosures.onclick = openClosuresModal;
+
+    // Closures modal
+    const cloClose = $("#closuresClose");
+    const cloAdd   = $("#closureAdd");
+    const cloOverlay = $("#closuresOverlay");
+    if (cloClose) cloClose.onclick = closeClosuresModal;
+    if (cloAdd)   cloAdd.onclick   = addClosure;
+    if (cloOverlay) cloOverlay.onclick = (e) => { if (e.target.id === "closuresOverlay") closeClosuresModal(); };
 
     // Invitation editor modal
     const inviteUserBtn = $("#inviteUserBtn");

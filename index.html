@@ -90,6 +90,7 @@
 
       <div class="tabs" role="tablist">
         <button class="tab active" data-tab="home">Home</button>
+        <button class="tab" data-tab="schedule">Schedule</button>
         <button class="tab" data-tab="templates">Templates</button>
         <button class="tab" data-tab="classes">Classes</button>
         <button class="tab" data-tab="teachers">Teachers</button>
@@ -119,6 +120,32 @@
 
         <div class="tab-panel" data-tab="home">
           <div class="bento-grid" id="bentoGrid"></div>
+        </div>
+
+        <div class="tab-panel" data-tab="schedule" style="display:none">
+          <div class="sched-toolbar">
+            <div class="sched-toolbar-left">
+              <div class="sched-mode-toggle" role="tablist" aria-label="Schedule view">
+                <button class="sched-mode active" data-sched-mode="day">Day</button>
+                <button class="sched-mode" data-sched-mode="week">Week</button>
+                <button class="sched-mode" data-sched-mode="month">Month</button>
+              </div>
+            </div>
+            <div class="sched-toolbar-center">
+              <button class="btn ghost small" id="schedPrev" aria-label="Previous">‹</button>
+              <button class="btn ghost small" id="schedToday">Today</button>
+              <button class="btn ghost small" id="schedNext" aria-label="Next">›</button>
+              <span id="schedLabel" class="sched-label"></span>
+            </div>
+            <div class="sched-toolbar-right">
+              <label class="sched-filter" title="Only show classes you're assigned to">
+                <input type="checkbox" id="schedOnlyMine" />
+                <span>Only my classes</span>
+              </label>
+              <button class="btn ghost small" id="schedManageClosures" title="Add or remove closures / holidays">🗓 Closures</button>
+            </div>
+          </div>
+          <div class="sched-view" id="schedView"></div>
         </div>
 
         <div class="tab-panel" data-tab="templates" style="display:none">
@@ -377,6 +404,31 @@
         <button class="btn danger small" id="deleteTeacherBtn" style="margin-right:auto;display:none">Delete teacher</button>
         <button class="btn" id="teacherCancel">Cancel</button>
         <button class="btn primary" id="teacherSave">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Closures manager (add/remove holidays / non-class days) -->
+  <div class="modal-overlay" id="closuresOverlay">
+    <div class="modal" style="max-width:460px">
+      <div class="modal-head">
+        <h3>Closures &amp; holidays</h3>
+        <button class="btn ghost small" id="closuresClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="field">
+          <label>Add a closure</label>
+          <div style="display:flex;gap:6px;align-items:center">
+            <input type="date" id="closureDate" style="flex:0 0 160px" />
+            <input type="text" id="closureLabel" placeholder="e.g. Winter break" style="flex:1" />
+            <button class="btn primary small" id="closureAdd">Add</button>
+          </div>
+          <div class="field-hint">Classes scheduled on this date will be visually flagged on the Schedule views.</div>
+        </div>
+        <div class="field">
+          <label>Existing closures</label>
+          <div id="closureList" class="closure-list"></div>
+        </div>
       </div>
     </div>
   </div>
