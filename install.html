@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PAR DK · Installing…</title>
+  <link rel="stylesheet" href="styles.css" />
+  <style>
+    .install-screen {
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .install-card {
+      max-width: 440px;
+      width: 100%;
+      padding: 32px;
+      background: var(--panel, #0f1420);
+      border: 1px solid var(--border, #1f2a3e);
+      border-radius: 20px;
+      color: var(--ink, #e8edf5);
+    }
+    .install-title {
+      font-size: 22px;
+      font-weight: 600;
+      margin: 0 0 6px 0;
+    }
+    .install-sub {
+      font-size: 13.5px;
+      color: var(--ink-dim, #8a96ad);
+      margin: 0 0 24px 0;
+    }
+    .install-state {
+      padding: 16px;
+      border-radius: 12px;
+      border: 1px solid var(--border, #1f2a3e);
+      background: var(--panel-raised, #141b2c);
+      font-size: 13.5px;
+      line-height: 1.5;
+    }
+    .install-state.error {
+      border-color: rgba(239, 68, 68, .4);
+      color: #fca5a5;
+    }
+    .install-state.success {
+      border-color: var(--accent-border, rgba(16, 185, 129, .35));
+      color: var(--accent, #10b981);
+    }
+    .install-foot {
+      margin-top: 20px;
+      text-align: center;
+    }
+    .install-org {
+      margin: 18px 0 0 0;
+      padding: 12px;
+      background: var(--panel-raised, #141b2c);
+      border-radius: 10px;
+      font-size: 13px;
+      color: var(--ink, #e8edf5);
+    }
+    .install-org b { color: var(--accent, #10b981); }
+    .spinner {
+      display: inline-block;
+      width: 18px;
+      height: 18px;
+      border: 2px solid rgba(255,255,255,.2);
+      border-top-color: var(--accent, #10b981);
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      vertical-align: middle;
+      margin-right: 8px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="install-screen">
+    <div class="install-card">
+      <div class="install-brand" style="display:flex;gap:12px;align-items:center;margin-bottom:20px">
+        <img src="logo.png" alt="Drama Kids" style="width:36px;height:36px;border-radius:8px" onerror="this.style.display='none'" />
+        <div>
+          <div class="install-title">PAR DK</div>
+          <div class="install-sub">Installing for your franchise…</div>
+        </div>
+      </div>
+
+      <div id="installState" class="install-state">
+        <span class="spinner"></span>Verifying your installation token…
+      </div>
+
+      <div id="installOrg" class="install-org" style="display:none"></div>
+
+      <div id="installFoot" class="install-foot" style="display:none">
+        <a id="continueLink" class="btn primary" style="display:inline-block;padding:10px 20px;text-decoration:none;border-radius:10px" href="/">Continue to sign in →</a>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    (async function () {
+      const stateEl = document.getElementById("installState");
+      const orgEl   = document.getElementById("installOrg");
+      const footEl  = document.getElementById("installFoot");
+      const linkEl  = document.getElementById("continueLink");
+
+      function setError(msg) {
+        stateEl.className = "install-state error";
+        stateEl.innerHTML = msg;
+      }
+      function setSuccess(msg) {
+        stateEl.className = "install-state success";
+        stateEl.innerHTML = msg;
+      }
+
+      // Extract ?token=... from the URL
+      const params = new URLSearchParams(window.location.search);
+      const token = params.get("token");
+      if (!token) {
+        setError("No install token was provided. This page should only be opened via PAR's 'Install PAR DK' action.");
+        return;
+      }
+
+      // Call the DK Edge Function that verifies the HMAC and writes dk_config
+      const DK_URL = "https://ybolygqdbjqowfoqvnsz.supabase.co/functions/v1/dk-install-callback";
+      // The dk-install-callback verify_jwt is false, but Supabase's Edge
+      // Runtime still requires an apikey header (the publishable/anon key)
+      // for billing/routing purposes. The key doesn't grant any extra
+      // permission; the real auth is the HMAC-signed token in the body.
+      const ANON_KEY = "sb_publishable_rDgEjg8yIHWO9Oq1hjbDfA_sdGdMptA";
+
+      try {
+        const res = await fetch(DK_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "apikey": ANON_KEY,
+            "Authorization": "Bearer " + ANON_KEY,
+          },
+          body: JSON.stringify({ token }),
+        });
+        const data = await res.json().catch(() => ({}));
+
+        if (!res.ok || !data.ok) {
+          const errMsg = data.error || ("HTTP " + res.status);
+          setError(
+            "<b>Install failed.</b><br><br>" +
+            "<div style='font-size:12px;color:var(--ink-dim);margin-top:6px'>" + escape(errMsg) + "</div>" +
+            "<div style='font-size:11.5px;margin-top:10px'>If this keeps happening, have the person who sent you the link try again — the token expires after 5 minutes.</div>"
+          );
+          return;
+        }
+
+        setSuccess(
+          "<b>PAR DK is installed for your organization.</b> " +
+          "Sign in with the same email you used to install to get started."
+        );
+
+        orgEl.style.display = "";
+        orgEl.innerHTML =
+          "Linked to <b>" + escape(data.org_name || "(unnamed org)") + "</b>" +
+          (data.installing_user_email
+            ? "<div style='font-size:11.5px;color:var(--ink-dim);margin-top:4px'>Installed by " + escape(data.installing_user_email) + "</div>"
+            : "");
+
+        linkEl.href = data.continue_url || "/";
+        footEl.style.display = "";
+      } catch (e) {
+        setError("Network error: " + escape(e.message || String(e)));
+      }
+    })();
+
+    function escape(s) {
+      return String(s).replace(/[&<>"']/g, function (c) {
+        return { "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c];
+      });
+    }
+  </script>
+</body>
+</html>
