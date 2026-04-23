@@ -24,14 +24,22 @@
           <input type="email" id="loginEmail" required autocomplete="username" />
         </div>
         <div class="field">
-          <label>Password</label>
-          <input type="password" id="loginPassword" required autocomplete="current-password" />
+          <label>Password <span class="field-sub">(leave blank to use a magic link)</span></label>
+          <input type="password" id="loginPassword" autocomplete="current-password" />
         </div>
         <div class="login-error" id="loginError"></div>
-        <button class="btn primary" id="loginSubmit" type="submit" style="width:100%">Sign in</button>
+        <button class="btn primary" id="loginSubmit" type="submit" style="width:100%">Sign in with password</button>
       </form>
+
+      <div class="login-divider"><span>or</span></div>
+
+      <button class="btn" id="loginMagicLink" type="button" style="width:100%">
+        ✉ Email me a sign-in link
+      </button>
+      <div class="login-magic-status" id="loginMagicStatus"></div>
+
       <div class="login-footer">
-        Password issues? Contact your admin or reset via email on the Supabase project.
+        First time here? Just enter your email and hit the magic-link button — we'll create your account the moment you click the link we send.
       </div>
     </div>
   </div>

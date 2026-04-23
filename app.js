@@ -209,11 +209,18 @@
     } else {
       showLogin();
     }
-    sb.auth.onAuthStateChange((event, session) => {
+    sb.auth.onAuthStateChange(async (event, session) => {
       state.session = session || null;
       if (!session) {
         // Signed out
         showLogin();
+        return;
+      }
+      // We have a session. If the login screen is still the visible one,
+      // that means a session just arrived from elsewhere — likely the
+      // magic-link redirect finishing its hash handoff. Boot the app.
+      if ($("#loginScreen").style.display !== "none") {
+        await bootApp();
       }
     });
   }
@@ -379,7 +386,14 @@
     const email = $("#loginEmail").value.trim();
     const password = $("#loginPassword").value;
     const errEl = $("#loginError");
+    const magicStatusEl = $("#loginMagicStatus");
     errEl.classList.remove("visible");
+    if (magicStatusEl) { magicStatusEl.textContent = ""; magicStatusEl.className = "login-magic-status"; }
+    if (!password) {
+      errEl.textContent = "Enter a password, or use the magic-link button below instead.";
+      errEl.classList.add("visible");
+      return;
+    }
     showLoader(true);
     const { data, error } = await sb.auth.signInWithPassword({ email, password });
     showLoader(false);
@@ -390,6 +404,40 @@
     }
     state.session = data.session;
     await bootApp();
+  });
+
+  // Magic-link / OTP sign-in. Works for both first-time users (auto-creates
+  // the auth.users row on first click) and returning users who don't want to
+  // type a password. The link email Supabase sends points back at this
+  // origin; the SDK's detectSessionInUrl picks up the hash and establishes
+  // a session, which onAuthStateChange routes through bootApp().
+  $("#loginMagicLink").addEventListener("click", async () => {
+    const email = $("#loginEmail").value.trim();
+    const errEl = $("#loginError");
+    const statusEl = $("#loginMagicStatus");
+    errEl.classList.remove("visible");
+    statusEl.textContent = "";
+    statusEl.className = "login-magic-status";
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      errEl.textContent = "Enter your email first, then click the magic-link button.";
+      errEl.classList.add("visible");
+      return;
+    }
+    showLoader(true);
+    const { error } = await sb.auth.signInWithOtp({
+      email,
+      options: { emailRedirectTo: window.location.origin },
+    });
+    showLoader(false);
+    if (error) {
+      errEl.textContent = error.message || "Couldn't send the link. Try again in a minute.";
+      errEl.classList.add("visible");
+      return;
+    }
+    statusEl.className = "login-magic-status success";
+    statusEl.innerHTML =
+      "Sent. Check <b>" + escapeHtml(email) + "</b> for a link from Supabase. " +
+      "Click it to finish signing in — this tab will pick up the session automatically.";
   });
 
   /* ═════════════ Data loading ═════════════ */
