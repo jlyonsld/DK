@@ -1283,6 +1283,31 @@
     return any ? state.teachers.find((t) => t.id === any.teacher_id) : null;
   }
 
+  // Two-letter initials from a teacher row. First+last for 2+ word names,
+  // first two letters otherwise. Empty string if no name.
+  function teacherInitials(teacher) {
+    const name = (teacher?.full_name || "").trim();
+    if (!name) return "";
+    const parts = name.split(/\s+/);
+    if (parts.length >= 2) return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+    return name.slice(0, 2).toUpperCase();
+  }
+
+  // All teachers assigned to a class, primary first then subs/others.
+  function teachersForClass(classId) {
+    const assignments = state.classTeachers
+      .filter((x) => x.class_id === classId)
+      .sort((a, b) => (a.role === "primary" ? -1 : b.role === "primary" ? 1 : 0));
+    return assignments
+      .map((a) => state.teachers.find((t) => t.id === a.teacher_id))
+      .filter(Boolean);
+  }
+
+  // "JL" for a primary-only class; "JL/MS" when a sub is also assigned.
+  function classInitialsString(classId) {
+    return teachersForClass(classId).map(teacherInitials).filter(Boolean).join("/");
+  }
+
   // Return classes that should appear on a given date after applying
   // filters: test-excluded, active-only, onlyMine filter, teacher role
   // always filters to their own assignments.
@@ -1527,34 +1552,66 @@
     ).join("");
 
     const cells = [];
+    const MAX_ROWS = 3;
     for (let i = 0; i < 42; i++) {
       const d = addDays(gridStart, i);
       const iso = isoDate(d);
       const inMonth = d.getMonth() === anchor.getMonth();
       const isToday = iso === todayIso;
       const closures = closuresForDate(d);
-      const classes = classesForDate(d);
-      const teacherIds = new Set();
-      classes.forEach((c) => {
-        const t = primaryTeacherObj(c.id);
-        if (t) teacherIds.add(t.id);
-      });
-      const teacherDots = Array.from(teacherIds).slice(0, 4).map((tid) => `
-        <span class="sched-month-dot" style="background:${teacherColor(tid)}"></span>
-      `).join("");
-      const overflow = teacherIds.size > 4 ? `<span class="sched-month-dot-more">+${teacherIds.size - 4}</span>` : "";
+      const classes = classesForDate(d)
+        .map((c) => ({ cls: c, startAt: classStartTimeOn(c, d), teacher: primaryTeacherObj(c.id) }))
+        .sort((a, b) => (a.startAt?.getTime() || 0) - (b.startAt?.getTime() || 0));
+
+      const visible = classes.slice(0, MAX_ROWS);
+      const overflow = Math.max(0, classes.length - MAX_ROWS);
+
+      const rowsHtml = visible.map(({ cls, startAt, teacher }) => {
+        const hue = teacher ? teacherHue(teacher.id) : 210;
+        const timeStr = startAt
+          ? startAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }).replace(" ", "")
+          : "";
+        const initials = classInitialsString(cls.id);
+        const titleTxt = [
+          cls.name,
+          initials ? "— " + initials : "",
+          timeStr ? "at " + timeStr : "",
+        ].filter(Boolean).join(" ");
+        return `
+          <div class="sched-month-row" data-open-class="${escapeHtml(cls.id)}"
+               style="border-left-color:hsl(${hue}, 62%, 58%)"
+               title="${escapeHtml(titleTxt)}">
+            ${timeStr ? `<span class="sched-month-row-time">${escapeHtml(timeStr)}</span>` : ""}
+            <span class="sched-month-row-name">${escapeHtml(cls.name)}</span>
+            ${initials ? `<span class="sched-month-row-initials">${escapeHtml(initials)}</span>` : ""}
+          </div>
+        `;
+      }).join("");
+
+      const overflowHtml = overflow > 0
+        ? `<div class="sched-month-row-more">+${overflow} more</div>`
+        : "";
+
+      // Closure treatment: red for full-day closures. When the academic-
+      // calendar schema adds a short-day type, emit `closed-short` instead
+      // of `closed-full` to get the yellow hatch.
+      const closureClass = closures.length ? " closed-full" : "";
+      const closureHtml = closures.length
+        ? `<div class="sched-month-closure" title="${escapeHtml(closures.map(c => c.label).join(" · "))}">${escapeHtml(closures[0].label)}</div>`
+        : "";
 
       cells.push(`
-        <div class="sched-month-cell${inMonth ? "" : " off"}${isToday ? " today" : ""}${closures.length ? " closed" : ""}"
+        <div class="sched-month-cell${inMonth ? "" : " off"}${isToday ? " today" : ""}${closureClass}"
              data-open-day="${iso}">
-          <div class="sched-month-dn">${d.getDate()}</div>
-          ${classes.length
-            ? `<div class="sched-month-count">${classes.length}</div>`
-            : ""}
-          ${closures.length
-            ? `<div class="sched-month-closure" title="${escapeHtml(closures.map(c => c.label).join(" · "))}">${escapeHtml(closures[0].label)}</div>`
-            : ""}
-          <div class="sched-month-dots">${teacherDots}${overflow}</div>
+          <div class="sched-month-head">
+            <div class="sched-month-dn">${d.getDate()}</div>
+            ${classes.length ? `<div class="sched-month-count">${classes.length}</div>` : ""}
+          </div>
+          ${closureHtml}
+          <div class="sched-month-rows">
+            ${rowsHtml}
+            ${overflowHtml}
+          </div>
         </div>
       `);
     }
@@ -1564,7 +1621,7 @@
         <div class="sched-month-dows">${dowHeaders}</div>
         <div class="sched-month-grid">${cells.join("")}</div>
         <div class="sched-month-legend">
-          Click any day to open its details. Colored dots represent the primary teacher assigned to each class.
+          Tap a class to open it, or tap a day to see its full schedule. The colored stripe on each row is the primary teacher.
         </div>
       </div>
     `;
@@ -1637,7 +1694,10 @@
 
   function wireScheduleClassClicks() {
     $$("[data-open-class]", $("#schedView")).forEach((el) => {
-      el.onclick = () => {
+      el.onclick = (e) => {
+        // Month cells carry data-open-day and class rows sit inside them;
+        // stop propagation so the cell handler doesn't also fire.
+        e.stopPropagation();
         const id = el.dataset.openClass;
         state.cState.openClassId = id;
         go("classes");

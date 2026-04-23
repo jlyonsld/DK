@@ -1790,7 +1790,7 @@ footer code {
 .sched-month-grid {
   display: grid;
   grid-template-columns: repeat(7, 1fr);
-  grid-auto-rows: minmax(96px, 1fr);
+  grid-auto-rows: minmax(120px, 1fr);
   gap: 1px;
   background: var(--border);
   border: 1px solid var(--border);
@@ -1799,12 +1799,13 @@ footer code {
 }
 .sched-month-cell {
   background: var(--panel);
-  padding: 6px 8px;
+  padding: 5px 6px 6px;
   position: relative;
   display: flex;
   flex-direction: column;
   cursor: pointer;
-  min-height: 96px;
+  min-height: 120px;
+  min-width: 0;
   transition: background .12s;
 }
 .sched-month-cell:hover { background: var(--panel-raised); }
@@ -1812,59 +1813,112 @@ footer code {
 .sched-month-cell.today {
   box-shadow: inset 0 0 0 2px var(--accent);
 }
-.sched-month-cell.closed {
+.sched-month-cell.closed-full {
   background-image: repeating-linear-gradient(
     45deg,
-    var(--panel-raised) 0 5px,
+    rgba(239, 68, 68, .18) 0 5px,
     transparent 5px 10px
   );
+}
+.sched-month-cell.closed-short {
+  background-image: repeating-linear-gradient(
+    45deg,
+    rgba(250, 204, 21, .20) 0 5px,
+    transparent 5px 10px
+  );
+}
+.sched-month-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  min-height: 16px;
 }
 .sched-month-dn {
   font-size: 13px;
   font-weight: 600;
   color: var(--ink);
+  line-height: 1;
 }
 .sched-month-cell.today .sched-month-dn { color: var(--accent); }
 .sched-month-count {
-  position: absolute;
-  top: 6px;
-  right: 8px;
-  font-size: 10.5px;
+  font-size: 10px;
   font-weight: 700;
   color: var(--ink-dim);
   background: var(--panel-raised);
-  padding: 1px 6px;
+  padding: 0 6px;
   border-radius: 99px;
   border: 1px solid var(--border);
+  line-height: 1.5;
 }
 .sched-month-closure {
-  font-size: 10.5px;
+  font-size: 10px;
   color: var(--ink);
   background: var(--panel-raised);
   border: 1px dashed var(--border-strong);
   padding: 1px 5px;
   border-radius: 4px;
-  margin-top: 4px;
+  margin-top: 3px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.sched-month-dots {
+.sched-month-cell.closed-full .sched-month-closure {
+  border-color: rgba(239, 68, 68, .55);
+  color: #fecaca;
+}
+.sched-month-cell.closed-short .sched-month-closure {
+  border-color: rgba(250, 204, 21, .6);
+  color: #fde68a;
+}
+.sched-month-rows {
   display: flex;
-  gap: 3px;
-  margin-top: auto;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 4px;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
 }
-.sched-month-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  display: inline-block;
+.sched-month-row {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 2px 5px;
+  border-left: 3px solid var(--ink-dim);
+  border-radius: 3px;
+  background: var(--panel-raised);
+  font-size: 10.5px;
+  min-width: 0;
+  cursor: pointer;
+  line-height: 1.2;
 }
-.sched-month-dot-more {
+.sched-month-row:hover { filter: brightness(1.15); }
+.sched-month-row-time {
+  color: var(--ink-dim);
+  font-variant-numeric: tabular-nums;
+  font-size: 9.5px;
+  flex: 0 0 auto;
+}
+.sched-month-row-name {
+  color: var(--ink);
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sched-month-row-initials {
+  color: var(--ink-dim);
+  font-size: 9px;
+  font-weight: 700;
+  flex: 0 0 auto;
+  letter-spacing: .03em;
+}
+.sched-month-row-more {
   font-size: 9.5px;
   color: var(--ink-dim);
-  margin-left: 2px;
+  padding: 1px 5px;
 }
 .sched-month-legend {
   font-size: 11.5px;
@@ -2035,21 +2089,26 @@ footer code {
   .sched-week-block-sub { display: none; }
   .sched-week-block-title { font-size: 10px; }
 
-  /* Month view: smaller cells, hide overflow dots */
+  /* Month view: tighter cells, 2 rows, hide initials to save room */
   .sched-month-grid {
-    grid-auto-rows: minmax(64px, 1fr);
+    grid-auto-rows: minmax(82px, 1fr);
   }
   .sched-month-cell {
-    min-height: 64px;
-    padding: 4px 5px;
+    min-height: 82px;
+    padding: 3px 4px 4px;
   }
   .sched-month-dn { font-size: 12px; }
   .sched-month-count {
-    font-size: 9.5px;
+    font-size: 9px;
     padding: 0 4px;
   }
   .sched-month-closure { display: none; }
-  .sched-month-dot { width: 6px; height: 6px; }
+  .sched-month-rows > .sched-month-row:nth-child(n+3),
+  .sched-month-rows > .sched-month-row-more { display: none; }
+  .sched-month-row { padding: 1px 4px; gap: 3px; border-left-width: 2px; }
+  .sched-month-row-time { font-size: 9px; }
+  .sched-month-row-name { font-size: 10px; }
+  .sched-month-row-initials { display: none; }
 
   /* Closures modal rows stack more compactly */
   .closure-row {
@@ -2064,6 +2123,12 @@ footer code {
   .sched-week-headrow { grid-template-columns: 32px repeat(7, 1fr); }
   .sched-week-hour span { font-size: 9px; right: 3px; }
   .sched-week-daycol-head .dow { display: none; }
+
+  /* Month view: genuinely no room for class rows — fall back to the
+     count pill + today highlight. Tap cell to open Day view. */
+  .sched-month-grid { grid-auto-rows: minmax(58px, 1fr); }
+  .sched-month-cell { min-height: 58px; padding: 3px 4px; }
+  .sched-month-rows { display: none; }
 
   .bento-card { padding: 14px !important; }
 
