@@ -238,6 +238,69 @@ header {
   border-color: var(--accent-border);
   border-style: solid;
 }
+.user-chip .role-badge {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: var(--radius-chip);
+  display: inline-block;
+  margin-left: 2px;
+}
+.user-chip .role-badge.role-super_admin {
+  background: rgba(99, 102, 241, .15);
+  color: #a5b4fc;
+  border: 1px solid rgba(99, 102, 241, .35);
+}
+.user-chip .role-badge.role-admin {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border: 1px solid var(--accent-border);
+}
+.user-chip .role-badge.role-manager {
+  background: rgba(245, 158, 11, .15);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, .35);
+}
+.user-chip .role-badge.role-teacher {
+  background: rgba(56, 189, 248, .15);
+  color: #7dd3fc;
+  border: 1px solid rgba(56, 189, 248, .35);
+}
+.user-chip .role-badge.role-viewer {
+  background: var(--panel-raised);
+  color: var(--ink-dim);
+  border: 1px dashed var(--border-strong);
+}
+
+/* Invitation status badges (Teachers tab) */
+.invite-badge {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  border-radius: var(--radius-chip);
+  cursor: help;
+}
+.invite-badge.pending {
+  background: rgba(245, 158, 11, .15);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, .35);
+}
+.invite-badge.accepted {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border: 1px solid var(--accent-border);
+}
+.invite-badge.expired {
+  background: rgba(239, 68, 68, .12);
+  color: #fca5a5;
+  border: 1px dashed rgba(239, 68, 68, .35);
+}
 
 .tabs { display: flex; padding: 0 22px; gap: 4px; overflow-x: auto; }
 .tab {

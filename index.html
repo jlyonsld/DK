@@ -36,6 +36,27 @@
     </div>
   </div>
 
+  <!-- ══════════════════════════ NO-ROLE SCREEN ═════════════════════════ -->
+  <!-- Shown when the signed-in user's profile.role is null (new signup
+       that hasn't been granted a role yet). -->
+  <div id="noRoleScreen" class="login-screen" style="display:none">
+    <div class="login-card">
+      <div class="login-brand">
+        <img src="logo.png" alt="Drama Kids" onerror="this.style.display='none'" />
+        <div>
+          <div class="login-title">PAR DK</div>
+          <div class="login-sub">Waiting for access</div>
+        </div>
+      </div>
+      <div class="login-footer" style="font-size:13px;line-height:1.5;color:var(--ink);margin-top:12px">
+        <p style="margin:0 0 10px 0">Your account is signed in, but hasn't been granted a role yet.</p>
+        <p style="margin:0 0 10px 0" id="noRoleUserLine"></p>
+        <p style="margin:0;color:var(--ink-dim)">Ask your franchise admin to assign you a role. Once they do, refresh this page.</p>
+      </div>
+      <button class="btn ghost" id="noRoleSignOut" style="width:100%;margin-top:16px">Sign out</button>
+    </div>
+  </div>
+
   <!-- ═══════════════════════════ MAIN APP ══════════════════════════════ -->
   <div id="app" style="display:none">
 
@@ -343,6 +364,31 @@
         <button class="btn danger small" id="deleteTeacherBtn" style="margin-right:auto;display:none">Delete teacher</button>
         <button class="btn" id="teacherCancel">Cancel</button>
         <button class="btn primary" id="teacherSave">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Invitation result modal -->
+  <div class="modal-overlay" id="inviteResultOverlay">
+    <div class="modal" style="max-width:520px">
+      <div class="modal-head">
+        <h3>Invitation ready</h3>
+        <button class="btn ghost small" id="inviteResultClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <p id="inviteResultSub" style="margin:0 0 10px 0"></p>
+        <div id="inviteResultEmailStatus" style="margin:0 0 16px 0;font-size:13px"></div>
+        <div class="field">
+          <label>Acceptance link <span class="field-sub">(send to the invitee)</span></label>
+          <div style="display:flex;gap:6px">
+            <input type="text" id="inviteResultUrl" readonly style="flex:1" />
+            <button class="btn small" id="inviteResultCopy">Copy</button>
+          </div>
+        </div>
+        <div id="inviteResultExpires" style="font-size:12px;color:var(--ink-dim);margin-top:8px"></div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn primary" id="inviteResultDone">Done</button>
       </div>
     </div>
   </div>

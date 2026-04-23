@@ -33,12 +33,104 @@
     classInfographics: [],  // rows { class_id, infographic_id, sort_order, notes }
     students: [],
     enrollments: [],
+    teacherInvitations: [],
+    dkConfig: null,
     latestSyncLog: null,
     tState: { query: "", category: "all", filled: {} },
     igState: { query: "", tag: "all" },
     cState: { showTest: false, openClassId: null },
     router: "home"
   };
+
+  /* ═════════════ Role + permissions (client-side UI gating) ═════════════
+   *
+   * These helpers mirror the SQL `has_permission(perm)` function exactly,
+   * so UI gating and RLS enforcement agree. Client-side checks never grant
+   * anything — they only hide UI that would fail RLS anyway. All real
+   * enforcement happens server-side via RLS on Supabase.
+   *
+   * T1 scope: UI gating only. The RLS policies on templates/categories/
+   * infographics still require is_admin() for writes, so manager +
+   * viewer are effectively read-only in the console. Extending RLS for
+   * manager write access is deferred to T1.5 or T6.
+   */
+
+  const PERM_BUNDLES = {
+    super_admin: [
+      "manage_billing","manage_super_admins","manage_admins",
+      "manage_org","hard_delete","manage_users",
+      "edit_classes","edit_teachers","edit_students","edit_enrollments","edit_attendance",
+      "edit_templates","edit_categories","edit_infographics",
+      "view_pay_rates","view_billing_status","view_parent_contact",
+      "run_jackrabbit_sync","respond_to_leads"
+    ],
+    admin: [
+      "manage_users",
+      "edit_classes","edit_teachers","edit_students","edit_enrollments","edit_attendance",
+      "edit_templates","edit_categories","edit_infographics",
+      "view_pay_rates","view_billing_status","view_parent_contact",
+      "run_jackrabbit_sync","respond_to_leads"
+    ],
+    manager: [
+      "edit_templates","edit_categories","edit_infographics",
+      "respond_to_leads",
+      "view_classes_readonly","view_teachers_readonly",
+      "view_students_readonly","view_enrollments_readonly"
+    ],
+    teacher: [
+      "view_own_schedule","take_own_attendance","clock_in_out",
+      "view_own_curriculum","view_own_pay_history","request_sub"
+    ],
+    viewer: [
+      "view_classes_readonly","view_teachers_readonly","view_students_readonly",
+      "view_enrollments_readonly","view_attendance_readonly","view_billing_status_readonly"
+    ]
+  };
+
+  function currentRole() { return state.profile ? state.profile.role : null; }
+  function isRole(r) { return currentRole() === r; }
+  function isSuperAdmin() { return isRole("super_admin"); }
+  function isAdminOrAbove() { return isRole("super_admin") || isRole("admin"); }
+
+  function hasPerm(perm) {
+    const role = currentRole();
+    if (!role) return false;
+    const granted = (state.profile.granted_permissions || []);
+    const revoked = (state.profile.revoked_permissions || []);
+    if (revoked.includes(perm)) return false;
+    if (granted.includes(perm)) return true;
+    return (PERM_BUNDLES[role] || []).includes(perm);
+  }
+
+  // Which tabs each role is allowed to see. (Role Management tab doesn't
+  // exist in T1 — it lands in T6.)
+  const ROLE_TAB_VISIBILITY = {
+    super_admin: new Set(["home","templates","classes","teachers","categories","infographics"]),
+    admin:       new Set(["home","templates","classes","teachers","categories","infographics"]),
+    manager:     new Set(["home","templates","classes","teachers","categories","infographics"]),
+    teacher:     new Set(["home"]),
+    viewer:      new Set(["home","templates","classes","teachers","categories","infographics"])
+  };
+  function canSeeTab(tab) {
+    const role = currentRole();
+    if (!role) return false;
+    return (ROLE_TAB_VISIBILITY[role] || new Set()).has(tab);
+  }
+
+  // True for admin+super_admin: can mutate classes/teachers/templates/etc.
+  // via RLS. In T1, manager and viewer can't mutate anything server-side.
+  function canMutate() { return isAdminOrAbove(); }
+
+  // Friendly role label
+  function roleLabel(r) {
+    return ({
+      super_admin: "Super admin",
+      admin: "Admin",
+      manager: "Manager",
+      teacher: "Teacher",
+      viewer: "Viewer"
+    })[r] || (r || "No role");
+  }
 
   /* ═════════════ Helpers ═════════════ */
 
@@ -135,12 +227,45 @@
     $("#loginScreen").style.display = "none";
     $("#app").style.display = "";
     await loadProfile();
+
+    // If the signed-in user hasn't been granted a role yet, show the
+    // "waiting for access" screen instead of the app. This happens for
+    // brand-new signups — handle_new_user() inserts profiles with role=null
+    // on purpose, so an admin must explicitly promote them.
+    if (!currentRole()) {
+      showNoRoleScreen();
+      return;
+    }
+
     renderUserChip();
     await reloadAll();
     wireEvents();
+    applyRoleVisibility();
     renderAll();
-    go(state.router);   // applies tab + sidebar state to match the default
+    // Default router may be a tab this role can't see — fall back to home.
+    const startTab = canSeeTab(state.router) ? state.router : "home";
+    go(startTab);
     setupRealtime();
+  }
+
+  function showNoRoleScreen() {
+    $("#app").style.display = "none";
+    $("#loginScreen").style.display = "none";
+    $("#noRoleScreen").style.display = "";
+    const user = state.session?.user;
+    const line = $("#noRoleUserLine");
+    if (line && user) {
+      line.innerHTML = `Signed in as <b>${escapeHtml(user.email || "")}</b>.`;
+    }
+    const btn = $("#noRoleSignOut");
+    if (btn) {
+      btn.onclick = async () => {
+        await sb.auth.signOut();
+        state.session = null; state.profile = null;
+        $("#noRoleScreen").style.display = "none";
+        showLogin();
+      };
+    }
   }
 
   /* ═════════════ Realtime subscriptions ═════════════
@@ -161,7 +286,8 @@
     const tablesToWatch = [
       "profiles", "categories", "templates", "classes", "infographics",
       "teachers", "class_teachers", "class_infographics",
-      "students", "enrollments", "attendance", "sync_log"
+      "students", "enrollments", "attendance", "sync_log",
+      "teacher_invitations", "dk_config"
     ];
     realtimeChannel = sb.channel("dk-realtime");
     tablesToWatch.forEach((table) => {
@@ -221,6 +347,15 @@
     const name = document.createElement("span");
     name.textContent = displayName;
     chip.appendChild(name);
+    // Role badge — visible at a glance which view the user is in
+    const role = currentRole();
+    if (role) {
+      const rb = document.createElement("span");
+      rb.className = "role-badge role-" + role;
+      rb.textContent = roleLabel(role);
+      rb.title = "Your role in this DK franchise";
+      chip.appendChild(rb);
+    }
     if (parLinked) {
       const badge = document.createElement("span");
       badge.className = "par-linked-badge";
@@ -262,7 +397,7 @@
   async function reloadAll() {
     showLoader(true);
     try {
-      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, syncLog] = await Promise.all([
+      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, syncLog] = await Promise.all([
         sb.from("categories").select("*").order("sort_order", { ascending: true }),
         sb.from("templates").select("*").order("created_at", { ascending: true }),
         sb.from("classes").select("*").order("name", { ascending: true }),
@@ -272,9 +407,13 @@
         sb.from("class_infographics").select("*"),
         sb.from("students").select("*").order("last_name", { ascending: true }),
         sb.from("enrollments").select("*").order("enrolled_at", { ascending: false }),
+        sb.from("teacher_invitations").select("*").order("sent_at", { ascending: false }),
+        sb.from("dk_config").select("*").eq("id", 1).maybeSingle(),
         sb.from("sync_log").select("*").eq("source", "jackrabbit").eq("operation", "pull_openings").order("created_at", { ascending: false }).limit(1).maybeSingle()
       ]);
       for (const r of [cats, tpls, cls, igs, tch, ct, ci, stu, enr]) if (r.error) throw r.error;
+      // Non-admin roles may not have SELECT access to teacher_invitations /
+      // dk_config (self-read RLS); swallow those errors so reloadAll doesn't fail.
       state.categories       = cats.data;
       state.templates        = tpls.data;
       state.classes          = cls.data;
@@ -284,6 +423,8 @@
       state.classInfographics = ci.data;
       state.students         = stu.data;
       state.enrollments      = enr.data;
+      state.teacherInvitations = (invites && !invites.error) ? invites.data : [];
+      state.dkConfig         = (cfg && !cfg.error) ? cfg.data : null;
       state.latestSyncLog    = syncLog.data || null;
     } catch (e) {
       console.error(e);
@@ -371,6 +512,15 @@
   function renderHomeTab() {
     const grid = $("#bentoGrid");
     if (!grid) return;
+
+    // Teachers get their own scoped bento. Admins/managers/viewers share the
+    // existing admin bento; quick actions and pay-rate fields are gated
+    // inside their own renderers.
+    if (isRole("teacher")) {
+      renderTeacherHome(grid);
+      return;
+    }
+
     const now = new Date();
     const todayClasses = state.classes
       .filter((c) => !c.is_test && c.active !== false && classRunsOnDay(c, now))
@@ -396,6 +546,197 @@
     `;
 
     wireHomeCardEvents();
+  }
+
+  /* ═════════════ TEACHER HOME (bento) ═════════════
+   *
+   * Teacher-scoped home view. Pulls the teacher's own assignments via
+   * email match (state.session.user.email → teachers.email). Once Phase
+   * T2 lands, profiles will carry an explicit teacher_id link instead of
+   * an email join.
+   *
+   * T1 cards: Welcome, Your next class, This week, Coming soon (T3+),
+   * On PAR. Anything that needs attendance/clock-in/curriculum data is
+   * stubbed honestly as "coming in Phase T3+" rather than faked.
+   */
+  function renderTeacherHome(grid) {
+    const myEmail = (state.session?.user?.email || "").toLowerCase();
+    const me = myEmail
+      ? state.teachers.find((t) => (t.email || "").toLowerCase() === myEmail)
+      : null;
+
+    // If we can't find a teachers row for this user yet, show a "not yet
+    // linked" welcome card and skip the schedule sections.
+    if (!me) {
+      grid.innerHTML = `
+        <div class="bento-card bento-span-12">
+          ${renderTeacherWelcomeCard(null)}
+        </div>
+        <div class="bento-card bento-span-6">
+          ${renderTeacherComingSoonCard()}
+        </div>
+        <div class="bento-card bento-span-6">
+          ${renderParBridgeCard()}
+        </div>
+      `;
+      return;
+    }
+
+    const now = new Date();
+    const myAssignments = state.classTeachers.filter((ct) => ct.teacher_id === me.id);
+    const myClasses = myAssignments
+      .map((ct) => state.classes.find((c) => c.id === ct.class_id))
+      .filter((c) => c && !c.is_test && c.active !== false);
+
+    // Today's classes I'm assigned to
+    const todayClasses = myClasses
+      .filter((c) => classRunsOnDay(c, now))
+      .map((c) => ({ cls: c, startAt: classStartTimeOn(c, now) }))
+      .sort((a, b) => (a.startAt?.getTime() || 0) - (b.startAt?.getTime() || 0));
+    const nextClass = todayClasses.find((x) => x.startAt && x.startAt > now);
+
+    // Next 7 days I have classes
+    let weekCount = 0;
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(now);
+      d.setDate(d.getDate() + i);
+      d.setHours(0, 0, 0, 0);
+      weekCount += myClasses.filter((c) => classRunsOnDay(c, d)).length;
+    }
+
+    grid.innerHTML = `
+      <div class="bento-card bento-span-8">${renderTeacherTodayCard(nextClass, todayClasses.length, now)}</div>
+      <div class="bento-card bento-span-4">${renderTeacherWeekStatsCard(myClasses.length, weekCount)}</div>
+      <div class="bento-card bento-span-8">${renderTeacherScheduleCard(todayClasses, now)}</div>
+      <div class="bento-card bento-span-4">${renderTeacherComingSoonCard()}</div>
+      <div class="bento-card bento-span-8">${renderTeacherWelcomeCard(me)}</div>
+      <div class="bento-card bento-span-4">${renderParBridgeCard()}</div>
+    `;
+
+    wireHomeCardEvents();
+  }
+
+  function renderTeacherTodayCard(nextClass, todayCount, now) {
+    if (!nextClass) {
+      if (todayCount > 0) {
+        return `
+          <div class="bento-label"><span>Today</span></div>
+          <div class="bento-today-headline">
+            <span class="bento-today-icon">🌙</span>
+            <div class="bento-today-body">
+              <p class="bento-today-title">Today's classes are wrapped</p>
+              <p class="bento-today-sub">${todayCount} class${todayCount === 1 ? "" : "es"} earlier today · none upcoming</p>
+            </div>
+          </div>
+        `;
+      }
+      const dowLong = DOW_LONG[now.getDay()];
+      return `
+        <div class="bento-label"><span>Today</span></div>
+        <div class="bento-today-headline">
+          <span class="bento-today-icon">☀️</span>
+          <div class="bento-today-body">
+            <p class="bento-today-title">No classes for you on ${dowLong}</p>
+            <p class="bento-today-sub">Enjoy the day off.</p>
+          </div>
+        </div>
+      `;
+    }
+    const { cls, startAt } = nextClass;
+    const when = formatRelativeTimeUntil(startAt);
+    const timeStr = startAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    return `
+      <div class="bento-label">
+        <span>Your next class</span>
+        <span class="live-pill">Live</span>
+      </div>
+      <div class="bento-today-headline">
+        <span class="bento-today-icon">🎭</span>
+        <div class="bento-today-body">
+          <p class="bento-today-title">${escapeHtml(cls.name)}</p>
+          <p class="bento-today-sub">${timeStr} · ${when}${cls.location ? ` · ${escapeHtml(cls.location)}` : ""}</p>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderTeacherWeekStatsCard(myClassCount, weekSessionCount) {
+    return `
+      <div class="bento-label"><span>Your week</span></div>
+      <div class="bento-stats">
+        <div class="bento-stat-row">
+          <span class="k"><span class="icon">🎭</span>Classes assigned</span>
+          <span class="v">${myClassCount}</span>
+        </div>
+        <div class="bento-stat-row">
+          <span class="k"><span class="icon">📅</span>Sessions this week</span>
+          <span class="v">${weekSessionCount}</span>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderTeacherScheduleCard(todayClasses, now) {
+    if (todayClasses.length === 0) {
+      return `
+        <div class="bento-label"><span>Today's schedule</span></div>
+        <div class="bento-attention-empty">Nothing scheduled today.</div>
+      `;
+    }
+    const items = todayClasses.map(({ cls, startAt }, i) => {
+      const isPast = startAt && startAt < now;
+      const isNext = startAt && !isPast && i === todayClasses.findIndex((x) => x.startAt > now);
+      const dotClass = isNext ? "upcoming" : isPast ? "" : "active";
+      const timeStr = startAt ? startAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "—";
+      const showLine = i < todayClasses.length - 1;
+      return `
+        <div class="bento-timeline-item" ${isPast ? 'style="opacity:.55"' : ""}>
+          <div class="bento-timeline-spine">
+            <div class="bento-timeline-dot ${dotClass}"></div>
+            ${showLine ? '<div class="bento-timeline-line"></div>' : ""}
+          </div>
+          <div class="bento-timeline-body">
+            <div class="bento-timeline-time">${escapeHtml(timeStr)}</div>
+            <div class="bento-timeline-title">${escapeHtml(cls.name)}</div>
+            <div class="bento-timeline-sub">${cls.location ? escapeHtml(cls.location) : ""}</div>
+          </div>
+        </div>
+      `;
+    }).join("");
+    return `
+      <div class="bento-label"><span>Today's schedule</span><span style="font-weight:400;color:var(--ink-dim);text-transform:none;letter-spacing:0">${todayClasses.length} class${todayClasses.length === 1 ? "" : "es"}</span></div>
+      <div class="bento-timeline">${items}</div>
+    `;
+  }
+
+  function renderTeacherComingSoonCard() {
+    return `
+      <div class="bento-label"><span>Coming soon</span></div>
+      <div class="bento-attention-empty" style="text-align:left;padding:8px 0">
+        <p style="margin:0 0 6px 0;color:var(--ink)">Attendance, clock-in/out, and shift trades land in the next build phase.</p>
+        <p style="margin:0;color:var(--ink-dim);font-size:11.5px">For now, your schedule view is read-only. Contact Sharon for any sub or schedule changes.</p>
+      </div>
+    `;
+  }
+
+  function renderTeacherWelcomeCard(teacherRow) {
+    if (!teacherRow) {
+      return `
+        <div class="bento-label"><span>Welcome to PAR DK</span></div>
+        <div class="bento-attention-empty" style="text-align:left;padding:8px 0">
+          <p style="margin:0 0 6px 0;color:var(--ink)">You're signed in as a teacher, but we couldn't find your teacher record yet.</p>
+          <p style="margin:0;color:var(--ink-dim);font-size:11.5px">Ask Sharon to add your email (${escapeHtml(state.session?.user?.email || "")}) to your teacher profile.</p>
+        </div>
+      `;
+    }
+    const myAssignments = state.classTeachers.filter((ct) => ct.teacher_id === teacherRow.id);
+    return `
+      <div class="bento-label"><span>Welcome, ${escapeHtml(teacherRow.full_name.split(/\s+/)[0])}</span></div>
+      <div class="bento-attention-empty" style="text-align:left;padding:8px 0">
+        <p style="margin:0 0 6px 0;color:var(--ink)">You're assigned to ${myAssignments.length} class${myAssignments.length === 1 ? "" : "es"}.</p>
+        <p style="margin:0;color:var(--ink-dim);font-size:11.5px">Status: ${escapeHtml(teacherRow.status || "active")}${teacherRow.par_person_id ? " · linked to PAR" : ""}</p>
+      </div>
+    `;
   }
 
   function renderTodayCard(nextClass, todayCount, now) {
@@ -641,13 +982,25 @@
   }
 
   function renderQuickActionsCard() {
+    // Only show actions the current role can actually perform server-side.
+    const actions = [];
+    if (hasPerm("edit_templates")     && canMutate()) actions.push({ key: "new-template",  icon: "＋",   label: "New template" });
+    if (hasPerm("run_jackrabbit_sync") && canMutate()) actions.push({ key: "sync-jr",      icon: "⟳",   label: "Sync Jackrabbit" });
+    if (hasPerm("edit_teachers")      && canMutate()) actions.push({ key: "new-teacher",   icon: "🧑‍🏫", label: "New teacher" });
+    if (hasPerm("edit_teachers")      && canMutate()) actions.push({ key: "refresh-par",   icon: "↻",   label: "Refresh PAR links" });
+
+    if (actions.length === 0) {
+      return `
+        <div class="bento-label"><span>Quick actions</span></div>
+        <div class="bento-attention-empty">No quick actions available for your role.</div>
+      `;
+    }
     return `
       <div class="bento-label"><span>Quick actions</span></div>
       <div class="bento-qa-grid">
-        <button class="bento-qa-btn" data-qa="new-template"><span class="qa-icon">＋</span>New template</button>
-        <button class="bento-qa-btn" data-qa="sync-jr"><span class="qa-icon">⟳</span>Sync Jackrabbit</button>
-        <button class="bento-qa-btn" data-qa="new-teacher"><span class="qa-icon">🧑‍🏫</span>New teacher</button>
-        <button class="bento-qa-btn" data-qa="refresh-par"><span class="qa-icon">↻</span>Refresh PAR links</button>
+        ${actions.map((a) => `
+          <button class="bento-qa-btn" data-qa="${a.key}"><span class="qa-icon">${a.icon}</span>${a.label}</button>
+        `).join("")}
       </div>
     `;
   }
@@ -706,6 +1059,8 @@
   const SIDEBAR_TABS = new Set(["templates", "infographics"]);
 
   function go(tab) {
+    // Route guard: if the role can't see this tab, fall back to home.
+    if (!canSeeTab(tab)) tab = "home";
     state.router = tab;
     $$(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === tab));
     $$(".tab-panel").forEach((p) => p.style.display = p.dataset.tab === tab ? "" : "none");
@@ -715,6 +1070,36 @@
     const show = SIDEBAR_TABS.has(tab);
     if (layout)  layout.classList.toggle("no-sidebar", !show);
     if (sidebar) sidebar.style.display = show ? "" : "none";
+  }
+
+  /* ═════════════ Role visibility ═════════════
+   * Apply role-based visibility to tabs and the top header buttons. Called
+   * once on boot. Re-render of tab/page content lives in renderAll().
+   */
+  function applyRoleVisibility() {
+    // Tab buttons
+    $$(".tab").forEach((t) => {
+      t.style.display = canSeeTab(t.dataset.tab) ? "" : "none";
+    });
+
+    // Top-right "New template" header button — only when we can actually edit
+    const newTplBtn = $("#newTemplateBtn");
+    if (newTplBtn) newTplBtn.style.display = hasPerm("edit_templates") && canMutate() ? "" : "none";
+
+    // Per-tab header action buttons
+    const newClassBtn      = $("#newClassBtn");
+    const syncJrBtn        = $("#syncJackrabbitBtn");
+    const newTeacherBtn    = $("#newTeacherBtn");
+    const refreshParBtn    = $("#refreshParLinksBtn");
+    const newCategoryBtn   = $("#newCategoryBtn");
+    const newInfographicBtn = $("#newInfographicBtn");
+
+    if (newClassBtn)       newClassBtn.style.display       = hasPerm("edit_classes")      && canMutate() ? "" : "none";
+    if (syncJrBtn)         syncJrBtn.style.display         = hasPerm("run_jackrabbit_sync") && canMutate() ? "" : "none";
+    if (newTeacherBtn)     newTeacherBtn.style.display     = hasPerm("edit_teachers")     && canMutate() ? "" : "none";
+    if (refreshParBtn)     refreshParBtn.style.display     = hasPerm("edit_teachers")     && canMutate() ? "" : "none";
+    if (newCategoryBtn)    newCategoryBtn.style.display    = hasPerm("edit_categories")   && canMutate() ? "" : "none";
+    if (newInfographicBtn) newInfographicBtn.style.display = hasPerm("edit_infographics") && canMutate() ? "" : "none";
   }
 
   /* ═════════════ TEMPLATES ═════════════ */
@@ -766,6 +1151,7 @@
     const categoryLabel = (state.categories.find((c) => c.id === tpl.category_id) || {}).label || "—";
     const tagLine = (tpl.tags || []).slice(0, 4).map((t) => "#" + t).join(" ");
 
+    const showEditBtns = hasPerm("edit_templates") && canMutate();
     card.innerHTML = `
       <div class="card-head">
         <div style="flex:1">
@@ -776,8 +1162,10 @@
           </div>
         </div>
         <div class="card-actions-head">
-          <button class="btn small ghost" data-act="edit" title="Edit template">✎</button>
-          <button class="btn small ghost" data-act="dup" title="Duplicate template">⎘</button>
+          ${showEditBtns ? `
+            <button class="btn small ghost" data-act="edit" title="Edit template">✎</button>
+            <button class="btn small ghost" data-act="dup" title="Duplicate template">⎘</button>
+          ` : ""}
           <div class="expand-arrow">▸</div>
         </div>
       </div>
@@ -787,8 +1175,10 @@
     $(".badge", card).textContent = categoryLabel;
     $(".tag-line", card).textContent = tagLine;
 
-    $('[data-act="edit"]', card).onclick = (e) => { e.stopPropagation(); openTemplateEditor(tpl.id); };
-    $('[data-act="dup"]',  card).onclick = (e) => { e.stopPropagation(); duplicateTemplate(tpl.id); };
+    if (showEditBtns) {
+      $('[data-act="edit"]', card).onclick = (e) => { e.stopPropagation(); openTemplateEditor(tpl.id); };
+      $('[data-act="dup"]',  card).onclick = (e) => { e.stopPropagation(); duplicateTemplate(tpl.id); };
+    }
     $(".card-head", card).onclick = () => {
       const willOpen = !card.classList.contains("open");
       card.classList.toggle("open");
@@ -1117,6 +1507,7 @@
     $("#classMeta").innerHTML = visible.length + (visible.length === 1 ? " class" : " classes") +
       (testCount > 0 ? ` <span style="color:var(--ink-dim)">· ${testCount} test class${testCount === 1 ? "" : "es"} hidden</span>`.replace("hidden", showTest ? "shown" : "hidden") : "");
 
+    const showClassEdit = hasPerm("edit_classes") && canMutate();
     const typeLabel = { weekly: "Weekly", camp: "Camp", workshop: "Workshop", contracted: "Contracted" };
     const fmtSync = (ts) => {
       if (!ts) return '<span style="color:var(--ink-dim);font-size:11px">—</span>';
@@ -1175,23 +1566,26 @@
           <td><span class="type-badge type-${escapeHtml(c.type || "weekly")}">${typeLabel[c.type] || c.type || "—"}</span>${c.active === false ? ' <span style="color:var(--ink-dim);font-size:11px">(inactive)</span>' : ""}</td>
           <td>${c.registration_link ? `<a href="${escapeHtml(c.registration_link)}" target="_blank" rel="noopener" style="font-size:12px;color:var(--accent);" onclick="event.stopPropagation()">Link ↗</a>` : '<span style="color:var(--ink-dim);font-size:12px">—</span>'}</td>
           <td>${fmtSync(c.last_synced_at)}</td>
-          <td class="row-actions"><button class="btn small ghost" data-act="edit-class" data-id="${escapeHtml(c.id)}">Edit</button></td>
+          ${showClassEdit ? `<td class="row-actions"><button class="btn small ghost" data-act="edit-class" data-id="${escapeHtml(c.id)}">Edit</button></td>` : ""}
         </tr>
         <tr class="class-detail${isOpen ? " open" : ""}" data-detail-for="${escapeHtml(c.id)}">
-          <td colspan="8"><div class="class-detail-body" data-class-id="${escapeHtml(c.id)}"></div></td>
+          <td colspan="${showClassEdit ? 8 : 7}"><div class="class-detail-body" data-class-id="${escapeHtml(c.id)}"></div></td>
         </tr>
       `;
       return mainRow;
     }).join("");
+    const colSpan = showClassEdit ? 8 : 7;
     el.innerHTML = `
       <table>
-        <thead><tr><th>Name</th><th>Day / Time</th><th>Location</th><th>Teacher</th><th>Type</th><th>Reg. link</th><th>Synced</th><th></th></tr></thead>
-        <tbody>${rows || '<tr><td colspan="8" style="text-align:center;color:var(--ink-dim);padding:24px">No classes to show. Click <b>⟳ Sync now</b> to pull from Jackrabbit, or <b>＋ New class</b>.</td></tr>'}</tbody>
+        <thead><tr><th>Name</th><th>Day / Time</th><th>Location</th><th>Teacher</th><th>Type</th><th>Reg. link</th><th>Synced</th>${showClassEdit ? "<th></th>" : ""}</tr></thead>
+        <tbody>${rows || `<tr><td colspan="${colSpan}" style="text-align:center;color:var(--ink-dim);padding:24px">No classes to show.${showClassEdit ? " Click <b>⟳ Sync now</b> to pull from Jackrabbit, or <b>＋ New class</b>." : ""}</td></tr>`}</tbody>
       </table>
     `;
-    $$('[data-act="edit-class"]', el).forEach((btn) => {
-      btn.onclick = (e) => { e.stopPropagation(); openClassEditor(btn.dataset.id); };
-    });
+    if (showClassEdit) {
+      $$('[data-act="edit-class"]', el).forEach((btn) => {
+        btn.onclick = (e) => { e.stopPropagation(); openClassEditor(btn.dataset.id); };
+      });
+    }
     $$(".class-row", el).forEach((row) => {
       row.onclick = () => {
         const id = row.dataset.id;
@@ -1479,30 +1873,144 @@
     $("#teacherMeta").innerHTML = state.teachers.length + (state.teachers.length === 1 ? " teacher" : " teachers") +
       (state.teachers.length ? ` <span style="color:var(--ink-dim)">· ${active} active${parLinked ? ` · ${parLinked} PAR-linked` : ""}${resolvable ? ` · ${resolvable} pending PAR check` : ""}</span>` : "");
 
+    const showPay    = hasPerm("view_pay_rates");
+    const showEdit   = hasPerm("edit_teachers") && canMutate();
+    const showInvite = canMutate();
+    const colCount = 4 + (showPay ? 1 : 0) + (showEdit || showInvite ? 1 : 0);
+
     const rows = state.teachers.map((t) => {
       const classCount = state.classTeachers.filter((ct) => ct.teacher_id === t.id).length;
       const statusLabel = { active: "Active", on_leave: "On leave", inactive: "Inactive" };
       const parBadge = t.par_person_id
         ? ` <span class="par-linked-badge" title="Linked to PAR person ${escapeHtml(t.par_person_id)}">PAR \u2713</span>`
         : (t.email ? ` <span class="par-pending-badge" title="Email on file but not yet resolved against PAR">unresolved</span>` : "");
+
+      // Most-recent invitation for this teacher's email (if any)
+      const myEmail = (t.email || "").toLowerCase();
+      const latestInvite = myEmail
+        ? state.teacherInvitations.find((inv) => (inv.email || "").toLowerCase() === myEmail)
+        : null;
+      const inviteBadge = renderInviteBadge(latestInvite);
+
+      // Action cell — Invite + Edit depending on state
+      const actions = [];
+      if (showInvite && t.email && !t.par_person_id) {
+        const label = latestInvite && !latestInvite.accepted_at && isInviteExpired(latestInvite) ? "Re-invite"
+                     : latestInvite && !latestInvite.accepted_at ? "Copy link"
+                     : "Invite";
+        actions.push(`<button class="btn small ${label === "Invite" || label === "Re-invite" ? "primary" : ""}" data-act="invite-teacher" data-id="${escapeHtml(t.id)}" data-email="${escapeHtml(t.email)}">${label}</button>`);
+      }
+      if (showEdit) {
+        actions.push(`<button class="btn small ghost" data-act="edit-teacher" data-id="${escapeHtml(t.id)}">Edit</button>`);
+      }
+      const actionCell = (showEdit || showInvite) ? `<td class="row-actions" style="white-space:nowrap">${actions.join(" ")}</td>` : "";
+
       return `
         <tr>
-          <td><b>${escapeHtml(t.full_name)}</b>${parBadge}${t.email ? `<div style="font-size:11.5px;color:var(--ink-dim)">${escapeHtml(t.email)}</div>` : `<div style="font-size:11.5px;color:var(--ink-mute);font-style:italic">no email \u2014 can't resolve PAR</div>`}</td>
+          <td><b>${escapeHtml(t.full_name)}</b>${parBadge}${inviteBadge}${t.email ? `<div style="font-size:11.5px;color:var(--ink-dim)">${escapeHtml(t.email)}</div>` : `<div style="font-size:11.5px;color:var(--ink-mute);font-style:italic">no email \u2014 can't resolve PAR</div>`}</td>
           <td>${escapeHtml(t.phone || "")}</td>
-          <td>${escapeHtml(t.pay_rate || "")}</td>
+          ${showPay  ? `<td>${escapeHtml(t.pay_rate || "")}</td>` : ""}
           <td><span class="type-badge status-badge-${escapeHtml(t.status)}">${statusLabel[t.status] || t.status}</span></td>
           <td style="font-size:12px">${classCount} class${classCount === 1 ? "" : "es"}</td>
-          <td class="row-actions"><button class="btn small ghost" data-act="edit-teacher" data-id="${escapeHtml(t.id)}">Edit</button></td>
+          ${actionCell}
         </tr>
       `;
     }).join("");
     el.innerHTML = `
       <table>
-        <thead><tr><th>Name</th><th>Phone</th><th>Pay rate</th><th>Status</th><th>Assigned</th><th></th></tr></thead>
-        <tbody>${rows || '<tr><td colspan="6" style="text-align:center;color:var(--ink-dim);padding:24px">No teachers yet — click <b>＋ New teacher</b>.</td></tr>'}</tbody>
+        <thead><tr><th>Name</th><th>Phone</th>${showPay ? "<th>Pay rate</th>" : ""}<th>Status</th><th>Assigned</th>${showEdit || showInvite ? "<th></th>" : ""}</tr></thead>
+        <tbody>${rows || `<tr><td colspan="${colCount}" style="text-align:center;color:var(--ink-dim);padding:24px">No teachers yet${showEdit ? " — click <b>＋ New teacher</b>." : "."}</td></tr>`}</tbody>
       </table>
     `;
-    $$('[data-act="edit-teacher"]', el).forEach((btn) => btn.onclick = () => openTeacherEditor(btn.dataset.id));
+    if (showEdit) {
+      $$('[data-act="edit-teacher"]', el).forEach((btn) => btn.onclick = () => openTeacherEditor(btn.dataset.id));
+    }
+    if (showInvite) {
+      $$('[data-act="invite-teacher"]', el).forEach((btn) => btn.onclick = () => onInviteTeacherClick(btn.dataset.id, btn.dataset.email));
+    }
+  }
+
+  /* Invitation status badge + helpers */
+  function isInviteExpired(inv) {
+    return !!(inv && inv.expires_at && new Date(inv.expires_at) < new Date());
+  }
+  function renderInviteBadge(inv) {
+    if (!inv) return "";
+    if (inv.accepted_at) {
+      return ` <span class="invite-badge accepted" title="Accepted ${new Date(inv.accepted_at).toLocaleDateString()}">accepted</span>`;
+    }
+    if (isInviteExpired(inv)) {
+      return ` <span class="invite-badge expired" title="Expired on ${new Date(inv.expires_at).toLocaleDateString()} — re-send">expired</span>`;
+    }
+    const label = inv.email_status === "sent" ? "invited"
+                 : inv.email_status === "failed" ? "link ready"
+                 : inv.email_status === "skipped" ? "link ready"
+                 : "invited";
+    return ` <span class="invite-badge pending" title="Invitation sent ${new Date(inv.sent_at).toLocaleDateString()}${inv.expires_at ? " · expires " + new Date(inv.expires_at).toLocaleDateString() : ""}">${label}</span>`;
+  }
+
+  /* On-click handler: either re-show an existing pending invite's modal,
+   * or fire a new invitation via the Edge Function. */
+  async function onInviteTeacherClick(teacherId, email) {
+    if (!email) { showToast("Teacher has no email to invite", "error"); return; }
+    const existing = state.teacherInvitations.find(
+      (inv) => (inv.email || "").toLowerCase() === email.toLowerCase()
+               && !inv.accepted_at
+               && !isInviteExpired(inv)
+    );
+    if (existing) {
+      // Re-open the modal for the existing pending invite (don't create a new one)
+      openInviteResultModal({
+        accept_url: existing.par_accept_url,
+        expires_at: existing.expires_at,
+        email_sent: existing.email_status === "sent",
+        email_error: existing.email_error,
+        email,
+        reused: true,
+      });
+      return;
+    }
+    await fireInvite({ teacher_id: teacherId, email, dk_role: "teacher" });
+  }
+
+  async function fireInvite(payload) {
+    showLoader(true);
+    try {
+      const { data, error } = await sb.functions.invoke("dk-invite-teacher", { body: payload });
+      if (error) {
+        showToast(`Invite failed: ${error.message || String(error)}`, "error");
+        return;
+      }
+      if (data?.error) {
+        showToast(`Invite failed: ${data.error}`, "error");
+        return;
+      }
+      await reloadAll();
+      renderAll();
+      openInviteResultModal({ ...data, email: payload.email, reused: false });
+    } finally {
+      showLoader(false);
+    }
+  }
+
+  function openInviteResultModal(result) {
+    const overlay = $("#inviteResultOverlay");
+    if (!overlay) return;
+    const { accept_url, expires_at, email_sent, email_error, email, reused } = result;
+    $("#inviteResultSub").innerHTML = reused
+      ? `Pending invitation for <b>${escapeHtml(email)}</b> — reusing the existing link.`
+      : `Invitation created for <b>${escapeHtml(email)}</b>.`;
+    $("#inviteResultEmailStatus").innerHTML = email_sent
+      ? `<span class="invite-badge accepted">Email sent via Resend</span>`
+      : `<span class="invite-badge pending">Email not sent (${escapeHtml(email_error || "—")})</span> &middot; copy the link below and send it manually.`;
+    $("#inviteResultUrl").value = accept_url || "";
+    $("#inviteResultExpires").textContent = expires_at
+      ? `Expires ${new Date(expires_at).toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" })}`
+      : "";
+    overlay.classList.add("open");
+  }
+  function closeInviteResultModal() {
+    $("#inviteResultOverlay").classList.remove("open");
   }
 
   function openTeacherEditor(id) {
@@ -1629,33 +2137,37 @@
   function renderCategoriesTab() {
     const wrap = $("#categoryList");
     wrap.innerHTML = "";
+    const showEdit = hasPerm("edit_categories") && canMutate();
     state.categories.forEach((cat) => {
       const used = state.templates.filter((t) => t.category_id === cat.id).length;
       const row = document.createElement("div");
       row.className = "category-item";
       row.innerHTML = `
-        <input class="label-input" type="text" value="${escapeHtml(cat.label)}" />
+        <input class="label-input" type="text" value="${escapeHtml(cat.label)}" ${showEdit ? "" : "readonly"} />
         <span class="cat-id">${escapeHtml(cat.slug)}</span>
         <span class="use-count">${used} used</span>
-        <button class="btn small danger" ${used > 0 ? "disabled title=\"In use — reassign templates first\"" : ""}>Delete</button>
+        ${showEdit ? `<button class="btn small danger" ${used > 0 ? "disabled title=\"In use — reassign templates first\"" : ""}>Delete</button>` : ""}
       `;
-      const [input, , , del] = row.children;
-      input.onchange = async () => {
-        const newLabel = input.value.trim();
-        if (!newLabel || newLabel === cat.label) return;
-        const { error } = await sb.from("categories").update({ label: newLabel }).eq("id", cat.id);
-        if (error) { showToast(error.message, "error"); return; }
-        await reloadAll(); renderAll();
-        showToast("Category renamed", "success");
-      };
-      del.onclick = async () => {
-        if (used > 0) return;
-        if (!confirm("Delete this category?")) return;
-        const { error } = await sb.from("categories").delete().eq("id", cat.id);
-        if (error) { showToast(error.message, "error"); return; }
-        await reloadAll(); renderAll();
-        showToast("Category deleted", "success");
-      };
+      const input = row.querySelector(".label-input");
+      const del   = row.querySelector("button");
+      if (showEdit) {
+        input.onchange = async () => {
+          const newLabel = input.value.trim();
+          if (!newLabel || newLabel === cat.label) return;
+          const { error } = await sb.from("categories").update({ label: newLabel }).eq("id", cat.id);
+          if (error) { showToast(error.message, "error"); return; }
+          await reloadAll(); renderAll();
+          showToast("Category renamed", "success");
+        };
+        if (del) del.onclick = async () => {
+          if (used > 0) return;
+          if (!confirm("Delete this category?")) return;
+          const { error } = await sb.from("categories").delete().eq("id", cat.id);
+          if (error) { showToast(error.message, "error"); return; }
+          await reloadAll(); renderAll();
+          showToast("Category deleted", "success");
+        };
+      }
       wrap.appendChild(row);
     });
   }
@@ -1758,6 +2270,8 @@
   function renderInfographicsTab() {
     const el = $("#infographicsTable");
     $("#igManageMeta").textContent = state.infographics.length + " image" + (state.infographics.length === 1 ? "" : "s");
+    const showEdit = hasPerm("edit_infographics") && canMutate();
+    const colCount = 4 + (showEdit ? 1 : 0);
     const rows = state.infographics.map((i) => {
       const src = i.storage_path ? publicUrlFor(i.storage_path) : i.external_url;
       const srcType = i.storage_path ? "Uploaded" : (i.external_url ? "External" : "—");
@@ -1767,17 +2281,19 @@
           <td><b>${escapeHtml(i.name)}</b>${i.notes ? `<div style="font-size:11.5px;color:var(--ink-dim)">${escapeHtml(i.notes)}</div>` : ""}</td>
           <td>${(i.tags || []).map((t) => `<span class="type-badge type-workshop">#${escapeHtml(t)}</span>`).join(" ")}</td>
           <td>${srcType}</td>
-          <td class="row-actions"><button class="btn small ghost" data-act="edit-ig" data-id="${escapeHtml(i.id)}">Edit</button></td>
+          ${showEdit ? `<td class="row-actions"><button class="btn small ghost" data-act="edit-ig" data-id="${escapeHtml(i.id)}">Edit</button></td>` : ""}
         </tr>
       `;
     }).join("");
     el.innerHTML = `
       <table>
-        <thead><tr><th>Preview</th><th>Name</th><th>Tags</th><th>Source</th><th></th></tr></thead>
-        <tbody>${rows || '<tr><td colspan="5" style="text-align:center;color:var(--ink-dim);padding:24px">No images yet — click <b>＋ Upload / add image</b>.</td></tr>'}</tbody>
+        <thead><tr><th>Preview</th><th>Name</th><th>Tags</th><th>Source</th>${showEdit ? "<th></th>" : ""}</tr></thead>
+        <tbody>${rows || `<tr><td colspan="${colCount}" style="text-align:center;color:var(--ink-dim);padding:24px">No images yet${showEdit ? " — click <b>＋ Upload / add image</b>." : "."}</td></tr>`}</tbody>
       </table>
     `;
-    $$('[data-act="edit-ig"]', el).forEach((btn) => btn.onclick = () => openIgEditor(btn.dataset.id));
+    if (showEdit) {
+      $$('[data-act="edit-ig"]', el).forEach((btn) => btn.onclick = () => openIgEditor(btn.dataset.id));
+    }
   }
 
   function openIgEditor(id) {
@@ -1941,6 +2457,17 @@
     $("#classModalOverlay").onclick = (e) => { if (e.target.id === "classModalOverlay") closeClassEditor(); };
     $("#classSave").onclick        = saveClass;
     $("#deleteClassBtn").onclick   = deleteClass;
+
+    // Invitation result modal
+    $("#inviteResultClose").onclick = closeInviteResultModal;
+    $("#inviteResultDone").onclick  = closeInviteResultModal;
+    $("#inviteResultOverlay").onclick = (e) => { if (e.target.id === "inviteResultOverlay") closeInviteResultModal(); };
+    $("#inviteResultCopy").onclick  = async () => {
+      const url = $("#inviteResultUrl").value;
+      if (!url) return;
+      const ok = await copyText(url);
+      if (ok) flashCopied($("#inviteResultCopy"));
+    };
 
     // Infographic modal
     $("#igCancel").onclick         = closeIgEditor;
