@@ -62,12 +62,14 @@ response-console-v3/
 │                                 - Closures manager modal
 │                                 - PAR identity bridge (par-identity-proxy
 │                                   call on boot)
-├── styles.css                ← ~2000 lines. Tokens (CSS vars for colors /
+├── styles.css                ← ~2100 lines. Tokens (CSS vars for colors /
 │                               radii / spacing), global resets, component
 │                               classes, schedule-view layouts, and a
 │                               responsive pass under two media queries:
 │                               ≤720px (phones & small tablets) and ≤380px
-│                               (iPhone SE-class).
+│                               (iPhone SE-class). The ≤720px block hides
+│                               the top `.tabs` and shows the fixed-bottom
+│                               `.mobile-tabbar` (see §4.17).
 ├── config.js                 ← Supabase URL + publishable key. The
 │                               publishable key is safe in the browser —
 │                               every write is RLS-gated.
@@ -287,6 +289,18 @@ UI surfaces:
 `clock_ins` is keyed `(teacher_id, class_id, session_date)` via a partial unique index (`where class_id is not null`), which leaves the door open for future non-class shifts (prep, meetings) with a nullable `class_id`. v1 only surfaces class-tied shifts.
 
 Teachers write within the same 2-day grace window as attendance (§4.14). Admins unconstrained. The `clock_in_out` permission already lived in the teacher bundle from Phase T0; T3d just hooked RLS into it.
+
+### 4.17 Mobile navigation mirrors PAR's lower menu
+
+At ≤720px the scrollable top tab bar (`.tabs`) is hidden and replaced by a fixed-bottom `.mobile-tabbar` styled after PAR's lower menu: Home · Schedule · **Tools** (elevated circular center slot) · Classes · Teachers. Tapping Tools opens `.mobile-tools-overlay` as a bottom sheet listing Templates / Categories / Infographics / Reports — i.e., the response-console "tool" tabs that don't merit a fixed mobile slot.
+
+Each `.mtab[data-tab]` button carries the same `data-tab` attribute as its desktop `.tab` counterpart, so `go(tab)` at [app.js](app.js) routes both identically. The three places that iterate tabs (`go()` active-class toggle, `applyRoleVisibility()`, and the click-wire in `wireEvents()`) all use the unified selector `.tab, .mtab[data-tab], .mobile-tools-item`. The Tools center button has no `data-tab` and is wired separately to open/close the sheet.
+
+Role gating is automatic via `canSeeTab()`. For the teacher role (Home + Schedule only), `applyRoleVisibility()` hides the three non-visible mtabs AND the Tools center slot (since no tool tabs are visible to teachers); the remaining two slots auto-center because the bar uses `justify-content: space-evenly`. The center slot is `position: relative; margin-top: -22px` with a ring of `--panel-solid` shadow so it visually "pops" above the bar — don't change the shadow without also re-checking the bar's top border.
+
+Body gets `padding-bottom: calc(76px + env(safe-area-inset-bottom))` at ≤720px so page content isn't hidden behind the fixed bar on iPhones with home-indicator bezels. If you add new full-height views, make sure they respect that bottom padding or scroll containers will clip under the bar.
+
+**When you add a new tab,** update three places together: `index.html` (top `.tabs` + either an `.mtab` for a first-class mobile slot OR a `.mobile-tools-item` for an overflow-sheet entry), `ROLE_TAB_VISIBILITY` in `app.js` (add the new tab name to every role Set that should see it), and the Tools-button auto-hide list in `applyRoleVisibility()` if the tab belongs in the overflow sheet.
 
 ---
 
