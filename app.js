@@ -853,8 +853,9 @@
     const rows = todayClasses.map(({ cls }) => {
       const stats = attendanceStatsForSession(cls.id, today);
       const taken = stats.taken;
+      const marked = stats.present + stats.absent;
       const label = taken
-        ? `<span style="color:#2f7d3a">✓ ${stats.present + stats.late} / ${stats.present + stats.late + stats.absent + stats.excused} present</span>`
+        ? `<span style="color:#2f7d3a">✓ ${stats.present} / ${marked} present${stats.latePickups > 0 ? ` · ${stats.latePickups} late pickup${stats.latePickups === 1 ? "" : "s"}` : ""}</span>`
         : `<span style="color:var(--ink-dim)">Not yet</span>`;
       return `
         <div style="display:flex;gap:8px;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border-subtle,#eee)">
@@ -2504,10 +2505,13 @@
           row.className = "assign-row";
           row.style.cssText = "display:flex;gap:8px;align-items:center;padding:6px 8px;background:var(--surface,#fff);border:1px solid var(--border);border-radius:6px";
           const dateLabel = new Date(d + "T00:00:00").toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+          const lateBit = stats.latePickups > 0
+            ? ` · <span style="color:#a36a00">${stats.latePickups} late pickup${stats.latePickups === 1 ? "" : "s"} (${stats.lateMinutes} min)</span>`
+            : "";
           row.innerHTML = `
             <span style="flex:0 0 140px;font-weight:500">${escapeHtml(dateLabel)}</span>
             <span style="font-size:12px;color:var(--ink-dim);flex:1">
-              ${stats.present} present · ${stats.late} late · ${stats.absent} absent · ${stats.excused} excused
+              ${stats.present} present · ${stats.absent} absent${lateBit}
             </span>
           `;
           if (canEdit) {
@@ -2718,14 +2722,22 @@
    * classes they're assigned to; admins have no window. Date picker's
    * `min` and `max` reflect this.
    */
-  const ATT_STATUSES = ["present","late","absent","excused"];
+  // Status is now simplified to Present / Absent. Late pickup is tracked
+  // independently via late_pickup_minutes (separate from status because a
+  // student can be present AND late-pickup, and franchises may bill late-
+  // pickup fees separately). 'late' and 'excused' remain valid DB values
+  // for historical rows and future UIs, but the v1 roster only emits P/A.
+  const ATT_STATUSES = ["present","absent"];
   let attendanceModalClassId = null;
   let attendanceModalSessionDate = null;
   // per-enrollment status overrides during an open modal session:
-  // { [enrollment_id]: "present"|"late"|"absent"|"excused"|"unknown" }
+  // { [enrollment_id]: "present"|"absent"|"unknown" }
   let attendancePendingMarks = {};
   // per-enrollment notes overrides during an open modal session
   let attendancePendingNotes = {};
+  // per-enrollment late_pickup_minutes overrides during an open modal session.
+  // Value is a number, 0, or null. null = clear; 0 = explicitly "no late pickup".
+  let attendancePendingLateMinutes = {};
 
   // Build a (enrollment_id -> attendance row) map for a class+date session.
   function attendanceMapForSession(classId, sessionDate) {
@@ -2741,17 +2753,23 @@
     return out;
   }
 
-  // Aggregate counts for a class's session. `taken` = at least one non-unknown row.
+  // Aggregate counts for a class's session. `taken` = at least one non-unknown
+  // row. latePickups counts rows where late_pickup_minutes > 0 (independent
+  // of status). Historical rows with status='late'/'excused' are still
+  // counted — 'late' folds into present for display, 'excused' into absent —
+  // so stats remain readable across schema versions.
   function attendanceStatsForSession(classId, sessionDate) {
     const map = attendanceMapForSession(classId, sessionDate);
-    const stats = { present: 0, late: 0, absent: 0, excused: 0, unknown: 0, taken: false };
+    const stats = { present: 0, absent: 0, latePickups: 0, lateMinutes: 0, unknown: 0, taken: false };
     for (const a of map.values()) {
-      if (a.status === "present") stats.present++;
-      else if (a.status === "late") stats.late++;
-      else if (a.status === "absent") stats.absent++;
-      else if (a.status === "excused") stats.excused++;
+      if (a.status === "present" || a.status === "late") stats.present++;
+      else if (a.status === "absent" || a.status === "excused") stats.absent++;
       else stats.unknown++;
       if (a.status && a.status !== "unknown") stats.taken = true;
+      if (a.late_pickup_minutes && a.late_pickup_minutes > 0) {
+        stats.latePickups++;
+        stats.lateMinutes += a.late_pickup_minutes;
+      }
     }
     return stats;
   }
@@ -2773,6 +2791,7 @@
     attendanceModalSessionDate = sessionDate || isoDate(new Date());
     attendancePendingMarks = {};
     attendancePendingNotes = {};
+    attendancePendingLateMinutes = {};
 
     $("#attendanceClassBanner").innerHTML =
       `Taking attendance for <b>${escapeHtml(cls.name || "this class")}</b>` +
@@ -2798,6 +2817,7 @@
       attendanceModalSessionDate = picker.value;
       attendancePendingMarks = {};
       attendancePendingNotes = {};
+      attendancePendingLateMinutes = {};
       renderAttendanceRoster();
     };
 
@@ -2811,6 +2831,7 @@
     attendanceModalSessionDate = null;
     attendancePendingMarks = {};
     attendancePendingNotes = {};
+    attendancePendingLateMinutes = {};
   }
 
   // Re-render the student list in the modal based on current state.
@@ -2832,51 +2853,87 @@
 
     const existing = attendanceMapForSession(cls.id, attendanceModalSessionDate);
     const rowsHtml = enrollments.map(({ id, student }) => {
-      const existingStatus = existing.get(id)?.status || "unknown";
+      const existingRow = existing.get(id);
+      // Normalize legacy status values so P/A buttons still reflect them.
+      const existingStatus = (() => {
+        const s = existingRow?.status;
+        if (s === "late") return "present";
+        if (s === "excused") return "absent";
+        return s || "unknown";
+      })();
       const pending = attendancePendingMarks[id];
       const currentStatus = pending !== undefined ? pending : existingStatus;
-      const existingNotes = existing.get(id)?.notes || "";
+      const existingNotes = existingRow?.notes || "";
       const currentNotes = attendancePendingNotes[id] !== undefined ? attendancePendingNotes[id] : existingNotes;
+      const existingLateMin = existingRow?.late_pickup_minutes ?? null;
+      const currentLateMin = attendancePendingLateMinutes[id] !== undefined
+        ? attendancePendingLateMinutes[id]
+        : existingLateMin;
+      const lateVal = (currentLateMin != null && currentLateMin > 0) ? String(currentLateMin) : "";
+
       const btns = ATT_STATUSES.map((s) => {
         const active = currentStatus === s;
-        const label = s.charAt(0).toUpperCase();
+        const label = s === "present" ? "Present" : "Absent";
         const color = active
-          ? (s === "present" ? "#2f7d3a" : s === "late" ? "#a36a00" : s === "absent" ? "#b3341c" : "#5a5a9b")
+          ? (s === "present" ? "#2f7d3a" : "#b3341c")
           : "transparent";
         return `<button data-att-btn data-enr="${escapeHtml(id)}" data-status="${s}" title="${s}"
-          style="border:1px solid var(--border);background:${active ? color : "var(--surface)"};color:${active ? "#fff" : "var(--ink)"};border-radius:6px;padding:4px 10px;font-size:12px;font-weight:600;cursor:pointer">${label}</button>`;
+          style="border:1px solid var(--border);background:${active ? color : "var(--surface)"};color:${active ? "#fff" : "var(--ink)"};border-radius:6px;padding:4px 12px;font-size:12px;font-weight:600;cursor:pointer">${label}</button>`;
       }).join(" ");
+
       return `
-        <div class="att-row" style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;padding:6px 0;border-bottom:1px solid var(--border-subtle,#eee)">
+        <div class="att-row" style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid var(--border-subtle,#eee)">
           <div>
             <div style="font-weight:500">${escapeHtml(student.first_name || "")} ${escapeHtml(student.last_name || "")}</div>
-            <input type="text" data-att-notes data-enr="${escapeHtml(id)}" placeholder="Notes (optional)" value="${escapeHtml(currentNotes)}"
-              style="margin-top:4px;width:100%;max-width:320px;font-size:11.5px;padding:3px 6px;border:1px solid var(--border);border-radius:4px;color:var(--ink-dim);background:transparent" />
+            <div style="display:flex;gap:6px;align-items:center;margin-top:4px;flex-wrap:wrap">
+              <input type="text" data-att-notes data-enr="${escapeHtml(id)}" placeholder="Notes (optional)" value="${escapeHtml(currentNotes)}"
+                style="flex:1;min-width:140px;max-width:260px;font-size:11.5px;padding:3px 6px;border:1px solid var(--border);border-radius:4px;color:var(--ink-dim);background:transparent" />
+              <label style="display:flex;align-items:center;gap:4px;font-size:11.5px;color:var(--ink-dim)">
+                <span>Late pickup</span>
+                <input type="number" min="0" step="1" data-att-late data-enr="${escapeHtml(id)}" value="${lateVal}" placeholder="min"
+                  ${currentStatus === "absent" ? "disabled" : ""}
+                  style="width:60px;font-size:11.5px;padding:3px 6px;border:1px solid var(--border);border-radius:4px;background:transparent" />
+              </label>
+            </div>
           </div>
-          <div style="display:flex;gap:4px">${btns}</div>
+          <div style="display:flex;gap:6px">${btns}</div>
         </div>`;
     }).join("");
 
     host.innerHTML = rowsHtml;
 
-    // Wire buttons — click toggles; clicking the active status clears to 'unknown'.
+    // Wire status buttons — click toggles; clicking the active status clears to 'unknown'.
+    // Marking a student Absent also clears their late-pickup minutes (can't be late picked-up if not present).
     host.querySelectorAll("[data-att-btn]").forEach((b) => {
       b.onclick = () => {
         const enr = b.dataset.enr;
         const status = b.dataset.status;
-        const existingStatus = existing.get(enr)?.status || "unknown";
+        const existingRow = existing.get(enr);
+        const existingStatus = (() => {
+          const s = existingRow?.status;
+          if (s === "late") return "present";
+          if (s === "excused") return "absent";
+          return s || "unknown";
+        })();
         const pending = attendancePendingMarks[enr];
         const current = pending !== undefined ? pending : existingStatus;
         if (current === status) {
           attendancePendingMarks[enr] = "unknown";
         } else {
           attendancePendingMarks[enr] = status;
+          if (status === "absent") attendancePendingLateMinutes[enr] = null;
         }
         renderAttendanceRoster();
       };
     });
     host.querySelectorAll("[data-att-notes]").forEach((inp) => {
       inp.oninput = () => { attendancePendingNotes[inp.dataset.enr] = inp.value; };
+    });
+    host.querySelectorAll("[data-att-late]").forEach((inp) => {
+      inp.oninput = () => {
+        const v = inp.value.trim();
+        attendancePendingLateMinutes[inp.dataset.enr] = v === "" ? null : Math.max(0, parseInt(v, 10) || 0);
+      };
     });
   }
 
@@ -2894,9 +2951,10 @@
     const sessionDate = attendanceModalSessionDate;
     if (!classId || !sessionDate) { showToast("No session loaded", "error"); return; }
 
-    // Build entries array. Merge pending marks with existing rows so notes-only
-    // changes still get persisted. Skip entries where the effective status is
-    // 'unknown' AND there was no existing row (nothing to record).
+    // Build entries array. Merge pending marks with existing rows so notes or
+    // late-pickup-only changes still get persisted. Skip entries where the
+    // effective status is 'unknown', there's no late pickup, AND there was
+    // no existing row (nothing to record).
     const existing = attendanceMapForSession(classId, sessionDate);
     const activeEnrollments = state.enrollments
       .filter((e) => e.class_id === classId && e.status === "active");
@@ -2904,11 +2962,22 @@
     for (const e of activeEnrollments) {
       const prior = existing.get(e.id);
       const priorStatus = prior?.status || "unknown";
-      const priorNotes = prior?.notes || "";
+      const priorNotes  = prior?.notes || "";
+      const priorLate   = prior?.late_pickup_minutes ?? null;
       const status = attendancePendingMarks[e.id] !== undefined ? attendancePendingMarks[e.id] : priorStatus;
       const notes  = attendancePendingNotes[e.id] !== undefined ? attendancePendingNotes[e.id] : priorNotes;
-      if (status === "unknown" && !prior) continue; // nothing to persist
-      entries.push({ enrollment_id: e.id, status, notes: notes || null });
+      const lateMin = attendancePendingLateMinutes[e.id] !== undefined
+        ? attendancePendingLateMinutes[e.id]
+        : priorLate;
+      // Absent students can't have a late pickup; null it.
+      const effectiveLate = status === "absent" ? null : lateMin;
+      if (status === "unknown" && !effectiveLate && !prior) continue;
+      entries.push({
+        enrollment_id: e.id,
+        status,
+        notes: notes || null,
+        late_pickup_minutes: effectiveLate != null && effectiveLate > 0 ? effectiveLate : null,
+      });
     }
 
     if (entries.length === 0) {
