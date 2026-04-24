@@ -494,6 +494,64 @@
     </div>
   </div>
 
+  <!-- Add student modal (teacher-added / DK-local student; chains into an enrollment) -->
+  <div class="modal-overlay" id="addStudentModalOverlay">
+    <div class="modal" style="max-width:520px">
+      <div class="modal-head">
+        <h3>Add student</h3>
+        <button class="btn ghost small" id="addStudentModalClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="addStudentClassBanner" style="padding:10px 12px;background:var(--surface-alt,#f5f4ef);border-radius:8px;font-size:13px;margin-bottom:12px"></div>
+        <div id="addStudentSourceWarn" style="display:none;padding:8px 12px;background:#fff7e6;border:1px solid #f0d88a;border-radius:8px;font-size:12.5px;margin-bottom:12px;color:#7a5b00">
+          This class is synced from Jackrabbit. Adding here may create a duplicate the next time Jackrabbit syncs — you'll see a reconcile prompt if that happens.
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>First name *</label>
+            <input type="text" id="as_first_name" placeholder="Aidan" />
+          </div>
+          <div class="field">
+            <label>Last name *</label>
+            <input type="text" id="as_last_name" placeholder="Lyons" />
+          </div>
+        </div>
+        <div class="field">
+          <label>Date of birth <span class="field-sub">(optional — helps match if JR imports them later)</span></label>
+          <input type="date" id="as_dob" />
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" id="addStudentCancel">Cancel</button>
+        <button class="btn primary" id="addStudentSave">Add to class</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Reconcile duplicate modal (admin resolves a student_match_candidate) -->
+  <div class="modal-overlay" id="reconcileModalOverlay">
+    <div class="modal" style="max-width:640px">
+      <div class="modal-head">
+        <h3>Possible duplicate student</h3>
+        <button class="btn ghost small" id="reconcileModalClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="reconcileReason" style="font-size:12.5px;color:var(--ink-dim);margin-bottom:10px"></div>
+        <div id="reconcileCompare" style="display:grid;grid-template-columns:1fr 1fr;gap:12px"></div>
+        <div style="margin-top:12px;font-size:12.5px;color:var(--ink-dim)">
+          <b>Link:</b> moves DK-local enrollments + attendance onto the JR record, archives the DK row.<br/>
+          <b>Keep separate:</b> dismisses this prompt without any data change.<br/>
+          <b>Delete DK-only:</b> removes the DK-local row entirely (its enrollments are cascade-deleted).
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn danger small" id="reconcileDelete" style="margin-right:auto">Delete DK-only</button>
+        <button class="btn" id="reconcileKeep">Keep separate</button>
+        <button class="btn primary" id="reconcileLink">Link</button>
+      </div>
+    </div>
+  </div>
+
   <div class="toast" id="toast"></div>
   <div class="loader" id="loader"><div class="spinner"></div></div>
 

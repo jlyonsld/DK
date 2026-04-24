@@ -33,6 +33,7 @@
     classInfographics: [],  // rows { class_id, infographic_id, sort_order, notes }
     students: [],
     enrollments: [],
+    matchCandidates: [],    // unresolved student_match_candidates rows (admin-visible)
     teacherInvitations: [],
     closures: [],
     dkConfig: null,
@@ -75,14 +76,16 @@
       "edit_classes","edit_teachers","edit_students","edit_enrollments","edit_attendance",
       "edit_templates","edit_categories","edit_infographics",
       "view_pay_rates","view_billing_status","view_parent_contact",
-      "run_jackrabbit_sync","respond_to_leads"
+      "run_jackrabbit_sync","respond_to_leads",
+      "reconcile_students"
     ],
     admin: [
       "manage_users",
       "edit_classes","edit_teachers","edit_students","edit_enrollments","edit_attendance",
       "edit_templates","edit_categories","edit_infographics",
       "view_pay_rates","view_billing_status","view_parent_contact",
-      "run_jackrabbit_sync","respond_to_leads"
+      "run_jackrabbit_sync","respond_to_leads",
+      "reconcile_students"
     ],
     manager: [
       "edit_templates","edit_categories","edit_infographics",
@@ -92,7 +95,8 @@
     ],
     teacher: [
       "view_own_schedule","take_own_attendance","clock_in_out",
-      "view_own_curriculum","view_own_pay_history","request_sub"
+      "view_own_curriculum","view_own_pay_history","request_sub",
+      "view_own_roster","manage_own_roster_students","manage_own_enrollments"
     ],
     viewer: [
       "view_classes_readonly","view_teachers_readonly","view_students_readonly",
@@ -357,7 +361,8 @@
       "profiles", "categories", "templates", "classes", "infographics",
       "teachers", "class_teachers", "class_infographics",
       "students", "enrollments", "attendance", "sync_log",
-      "teacher_invitations", "dk_config", "closures"
+      "teacher_invitations", "dk_config", "closures",
+      "student_match_candidates"
     ];
     realtimeChannel = sb.channel("dk-realtime");
     tablesToWatch.forEach((table) => {
@@ -508,7 +513,7 @@
   async function reloadAll() {
     showLoader(true);
     try {
-      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog] = await Promise.all([
+      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches] = await Promise.all([
         sb.from("categories").select("*").order("sort_order", { ascending: true }),
         sb.from("templates").select("*").order("created_at", { ascending: true }),
         sb.from("classes").select("*").order("name", { ascending: true }),
@@ -521,7 +526,8 @@
         sb.from("teacher_invitations").select("*").order("sent_at", { ascending: false }),
         sb.from("dk_config").select("*").eq("id", 1).maybeSingle(),
         sb.from("closures").select("*").order("date", { ascending: true }),
-        sb.from("sync_log").select("*").eq("source", "jackrabbit").eq("operation", "pull_openings").order("created_at", { ascending: false }).limit(1).maybeSingle()
+        sb.from("sync_log").select("*").eq("source", "jackrabbit").eq("operation", "pull_openings").order("created_at", { ascending: false }).limit(1).maybeSingle(),
+        sb.from("student_match_candidates").select("*").is("resolved_at", null).order("detected_at", { ascending: false })
       ]);
       for (const r of [cats, tpls, cls, igs, tch, ct, ci, stu, enr]) if (r.error) throw r.error;
       // Non-admin roles may not have SELECT access to teacher_invitations /
@@ -539,6 +545,9 @@
       state.dkConfig         = (cfg && !cfg.error) ? cfg.data : null;
       state.closures         = (closures && !closures.error) ? closures.data : [];
       state.latestSyncLog    = syncLog.data || null;
+      // Non-admin roles can't SELECT student_match_candidates (admin-only RLS);
+      // swallow the error and treat as empty — banners/chips just don't render.
+      state.matchCandidates  = (matches && !matches.error) ? matches.data : [];
     } catch (e) {
       console.error(e);
       showToast("Failed to load: " + e.message, "error");
@@ -2246,7 +2255,9 @@
       </div>
       <div style="margin-top:16px">
         <div class="section-title">Enrollments <span style="font-weight:400;color:var(--ink-dim);text-transform:none;letter-spacing:0">(${classEnrollments.filter(e => e.status === 'active').length} active${classEnrollments.length > classEnrollments.filter(e => e.status === 'active').length ? ' · ' + (classEnrollments.length - classEnrollments.filter(e => e.status === 'active').length) + ' inactive' : ''})</span></div>
+        <div class="reconcile-banner"></div>
         <div class="enrollments-list"></div>
+        <div class="add-student-row" style="margin-top:8px"></div>
       </div>
       <div style="margin-top:16px">
         <div class="section-title">Class details (from Jackrabbit)</div>
@@ -2332,13 +2343,58 @@
           const row = document.createElement("div");
           row.className = "assign-row";
           const statusClass = status === "active" ? "role-primary" : status === "waitlist" ? "role-substitute" : status === "dropped" ? "role-co-teacher" : "role-assistant";
+          const localBadge = student.source === "dk_local"
+            ? ' <span class="source-badge source-local" title="Added directly in DK — not from Jackrabbit">local</span>'
+            : "";
           row.innerHTML = `
-            <span class="teacher-name">${escapeHtml(student.first_name || "")} ${escapeHtml(student.last_name || "")}${student.dob ? ` <span style="font-size:11px;color:var(--ink-dim);font-weight:400">· DoB ${escapeHtml(student.dob)}</span>` : ""}</span>
+            <span class="teacher-name">${escapeHtml(student.first_name || "")} ${escapeHtml(student.last_name || "")}${localBadge}${student.dob ? ` <span style="font-size:11px;color:var(--ink-dim);font-weight:400">· DoB ${escapeHtml(student.dob)}</span>` : ""}</span>
             <span class="role-tag ${statusClass}">${escapeHtml(status)}</span>
             ${drop_reason ? `<span style="font-size:11px;color:var(--ink-dim)">· ${escapeHtml(drop_reason)}</span>` : ""}
           `;
           enrollList.appendChild(row);
         });
+      }
+    }
+
+    // Match-candidate banner: shown when admins view a class whose roster
+    // has any unresolved duplicate flag. Teachers can't SELECT the candidate
+    // table (RLS) so state.matchCandidates is empty for them.
+    const banner = $(".reconcile-banner", rootEl);
+    if (banner) {
+      banner.innerHTML = "";
+      if (hasPerm("reconcile_students")) {
+        const enrolledStudentIds = new Set(classEnrollments.map(e => e.student.id));
+        const relevant = state.matchCandidates.filter(c =>
+          enrolledStudentIds.has(c.dk_student_id) || enrolledStudentIds.has(c.jr_student_id)
+        );
+        if (relevant.length > 0) {
+          const b = document.createElement("div");
+          b.style.cssText = "padding:8px 12px;background:#fff7e6;border:1px solid #f0d88a;border-radius:8px;font-size:12.5px;margin:6px 0 8px;color:#7a5b00;display:flex;align-items:center;gap:8px;justify-content:space-between";
+          b.innerHTML = `<span><b>${relevant.length}</b> possible duplicate${relevant.length > 1 ? "s" : ""} in this roster</span><button class="btn small" data-act="open-reconcile">Review</button>`;
+          $('[data-act="open-reconcile"]', b).onclick = (e) => {
+            e.stopPropagation();
+            openReconcileModal(relevant[0].id);
+          };
+          banner.appendChild(b);
+        }
+      }
+    }
+
+    // "+ Add student" row: visible to admins always, and to teachers who
+    // are assigned to THIS class (their perm mirrors the RLS scope).
+    const addRow = $(".add-student-row", rootEl);
+    if (addRow) {
+      addRow.innerHTML = "";
+      const canAddAsAdmin = hasPerm("edit_students");
+      const canAddAsTeacher = hasPerm("manage_own_roster_students") &&
+        teachers.some(t => t.teacher && (t.teacher.email || "").toLowerCase() ===
+          (state.session?.user?.email || "").toLowerCase());
+      if (canAddAsAdmin || canAddAsTeacher) {
+        const btn = document.createElement("button");
+        btn.className = "btn small";
+        btn.textContent = "+ Add student";
+        btn.onclick = (e) => { e.stopPropagation(); openAddStudentModal(cls); };
+        addRow.appendChild(btn);
       }
     }
 
@@ -2366,6 +2422,164 @@
         };
         grid.appendChild(chip);
       });
+    }
+  }
+
+  /* ═════════════ T3a: Add-student + Reconcile modals ═════════════
+   * Teacher/admin adds a DK-local student to a class (contracted classes
+   * or late adds to JR classes). The student INSERT fires a server-side
+   * trigger that auto-flags match candidates against JR records; admins
+   * resolve them from the class-panel banner via reconcile_students RPC.
+   */
+  let addStudentTargetClassId = null;
+  let reconcileCandidateId = null;
+
+  function openAddStudentModal(cls) {
+    addStudentTargetClassId = cls.id;
+    $("#addStudentClassBanner").innerHTML =
+      `Adding a student to <b>${escapeHtml(cls.name || "this class")}</b>` +
+      (cls.location ? ` <span style="color:var(--ink-dim)">· ${escapeHtml(cls.location)}</span>` : "");
+    $("#addStudentSourceWarn").style.display = cls.source === "jackrabbit" ? "" : "none";
+    $("#as_first_name").value = "";
+    $("#as_last_name").value = "";
+    $("#as_dob").value = "";
+    $("#addStudentModalOverlay").classList.add("open");
+    setTimeout(() => $("#as_first_name").focus(), 50);
+  }
+
+  function closeAddStudentModal() {
+    $("#addStudentModalOverlay").classList.remove("open");
+    addStudentTargetClassId = null;
+  }
+
+  async function saveAddStudent() {
+    const classId = addStudentTargetClassId;
+    if (!classId) { showToast("No class selected", "error"); return; }
+    const first = $("#as_first_name").value.trim();
+    const last  = $("#as_last_name").value.trim();
+    const dob   = $("#as_dob").value || null;
+    if (!first || !last) { showToast("First and last name are required", "error"); return; }
+
+    showLoader(true);
+    // Generate the student id client-side so we can chain the enrollment
+    // insert without needing SELECT visibility back on the just-inserted
+    // student row (teachers can't SELECT a student until an enrollment
+    // links them to a class the teacher is assigned to).
+    const newStudentId = (crypto && crypto.randomUUID) ? crypto.randomUUID() : null;
+    if (!newStudentId) { showLoader(false); showToast("This browser lacks crypto.randomUUID", "error"); return; }
+    const studentPayload = {
+      id: newStudentId,
+      first_name: first,
+      last_name: last,
+      dob,
+      source: "dk_local",
+      jackrabbit_student_id: null,
+      created_by: state.session?.user?.id || null,
+    };
+    const stuResp = await sb.from("students").insert(studentPayload);
+    if (stuResp.error) {
+      showLoader(false);
+      showToast("Add student failed: " + stuResp.error.message, "error");
+      return;
+    }
+    const enrollPayload = {
+      student_id: newStudentId,
+      class_id: classId,
+      status: "active",
+      source: "dk_local",
+      enrolled_at: new Date().toISOString(),
+      created_by: state.session?.user?.id || null,
+    };
+    const enrResp = await sb.from("enrollments").insert(enrollPayload);
+    showLoader(false);
+    if (enrResp.error) {
+      showToast("Student created but enrollment failed: " + enrResp.error.message, "error");
+      await reloadAll(); renderAll();
+      return;
+    }
+    await reloadAll(); renderAll();
+    closeAddStudentModal();
+    showToast(`${first} ${last} added to class`, "success");
+  }
+
+  function openReconcileModal(candidateId) {
+    const cand = state.matchCandidates.find((c) => c.id === candidateId);
+    if (!cand) { showToast("Match candidate not found", "error"); return; }
+    reconcileCandidateId = candidateId;
+    const dk = state.students.find((s) => s.id === cand.dk_student_id);
+    const jr = state.students.find((s) => s.id === cand.jr_student_id);
+    const reasonLabel = cand.match_reason === "name_dob" ? "Exact name + date of birth"
+      : cand.match_reason === "name_phonetic_dob" ? "Phonetic surname + date of birth"
+      : cand.match_reason === "family_id" ? "Same Jackrabbit family + first name"
+      : cand.match_reason;
+    $("#reconcileReason").innerHTML = `<b>Match reason:</b> ${escapeHtml(reasonLabel)}`;
+
+    const card = (s, label) => {
+      if (!s) return `<div style="padding:12px;border:1px solid var(--border);border-radius:8px">${label}: <i>row missing</i></div>`;
+      const enrollCount = state.enrollments.filter((e) => e.student_id === s.id).length;
+      return `
+        <div style="padding:12px;border:1px solid var(--border);border-radius:8px">
+          <div style="font-size:11px;color:var(--ink-dim);text-transform:uppercase;letter-spacing:.5px">${label}</div>
+          <div style="font-weight:600;margin-top:4px">${escapeHtml(s.first_name || "")} ${escapeHtml(s.last_name || "")}</div>
+          <div style="font-size:12.5px;color:var(--ink-dim);margin-top:4px">
+            Source: <b>${escapeHtml(s.source || "?")}</b><br/>
+            DoB: ${escapeHtml(s.dob || "—")}<br/>
+            JR ID: ${escapeHtml(s.jackrabbit_student_id || "—")}<br/>
+            Family ID: ${escapeHtml(s.family_id || "—")}<br/>
+            Enrollments: ${enrollCount}
+          </div>
+        </div>`;
+    };
+    $("#reconcileCompare").innerHTML = card(dk, "DK-local row") + card(jr, "Jackrabbit row");
+    $("#reconcileModalOverlay").classList.add("open");
+  }
+
+  function closeReconcileModal() {
+    $("#reconcileModalOverlay").classList.remove("open");
+    reconcileCandidateId = null;
+  }
+
+  async function resolveReconcile(action) {
+    const candId = reconcileCandidateId;
+    if (!candId) return;
+    const cand = state.matchCandidates.find((c) => c.id === candId);
+    if (!cand) { showToast("Candidate not found", "error"); return; }
+    showLoader(true);
+    try {
+      if (action === "link") {
+        const { error } = await sb.rpc("reconcile_students", { p_candidate_id: candId });
+        if (error) throw error;
+        showToast("Linked — DK row archived, enrollments moved to JR record", "success");
+      } else if (action === "keep") {
+        const { error } = await sb.from("student_match_candidates")
+          .update({
+            resolved_at: new Date().toISOString(),
+            resolved_by: state.session?.user?.id || null,
+            resolution: "kept_separate",
+          })
+          .eq("id", candId);
+        if (error) throw error;
+        showToast("Kept separate", "success");
+      } else if (action === "delete") {
+        // Delete the DK-local row (cascade removes its enrollments), then
+        // mark the candidate resolved as dk_deleted.
+        const { error: delErr } = await sb.from("students").delete().eq("id", cand.dk_student_id);
+        if (delErr) throw delErr;
+        await sb.from("student_match_candidates")
+          .update({
+            resolved_at: new Date().toISOString(),
+            resolved_by: state.session?.user?.id || null,
+            resolution: "dk_deleted",
+          })
+          .eq("id", candId);
+        showToast("DK-local row deleted", "success");
+      }
+      await reloadAll(); renderAll();
+      closeReconcileModal();
+    } catch (e) {
+      showToast(e.message || "Reconcile failed", "error");
+    } finally {
+      showLoader(false);
     }
   }
 
@@ -3181,6 +3395,19 @@
     $("#inviteEditorOverlay").onclick = (e) => { if (e.target.id === "inviteEditorOverlay") closeInviteEditor(); };
     $("#invRole").addEventListener("change", updateInviteRoleMapHint);
     $("#invSend").onclick           = submitInviteEditor;
+
+    // Add-student modal (teacher/admin adds a DK-local student to a class)
+    $("#addStudentCancel").onclick     = closeAddStudentModal;
+    $("#addStudentModalClose").onclick = closeAddStudentModal;
+    $("#addStudentModalOverlay").onclick = (e) => { if (e.target.id === "addStudentModalOverlay") closeAddStudentModal(); };
+    $("#addStudentSave").onclick       = saveAddStudent;
+
+    // Reconcile modal (admin resolves a student_match_candidate)
+    $("#reconcileModalClose").onclick = closeReconcileModal;
+    $("#reconcileModalOverlay").onclick = (e) => { if (e.target.id === "reconcileModalOverlay") closeReconcileModal(); };
+    $("#reconcileLink").onclick       = () => resolveReconcile("link");
+    $("#reconcileKeep").onclick       = () => resolveReconcile("keep");
+    $("#reconcileDelete").onclick     = () => resolveReconcile("delete");
 
     // Invitation result modal
     $("#inviteResultClose").onclick = closeInviteResultModal;
