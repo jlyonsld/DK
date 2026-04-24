@@ -109,6 +109,11 @@
     ]
   };
 
+  // Test classes are marked with is_test=true. The Classes tab has a toggle
+  // (cState.showTest) to display them; this helper lets the bento + schedule
+  // views honor that same toggle so flipping it once reveals them everywhere.
+  function includeTestClass(c) { return !!c && (state.cState.showTest || !c.is_test); }
+
   function currentRole() { return state.profile ? state.profile.role : null; }
   function isRole(r) { return currentRole() === r; }
   function isSuperAdmin() { return isRole("super_admin"); }
@@ -661,14 +666,14 @@
 
     const now = new Date();
     const todayClasses = state.classes
-      .filter((c) => !c.is_test && c.active !== false && classRunsOnDay(c, now))
+      .filter((c) => includeTestClass(c) && c.active !== false && classRunsOnDay(c, now))
       .map((c) => ({ cls: c, startAt: classStartTimeOn(c, now) }))
       .sort((a, b) => (a.startAt?.getTime() || 0) - (b.startAt?.getTime() || 0));
 
     const upcomingToday = todayClasses.filter((x) => x.startAt && x.startAt > now);
     const nextClass = upcomingToday[0];
 
-    const activeClasses = state.classes.filter((c) => !c.is_test && c.active !== false).length;
+    const activeClasses = state.classes.filter((c) => includeTestClass(c) && c.active !== false).length;
     const activeTeachers = state.teachers.filter((t) => t.status === "active").length;
     const activeEnrollments = state.enrollments.filter((e) => e.status === "active").length;
 
@@ -724,7 +729,7 @@
     const myAssignments = state.classTeachers.filter((ct) => ct.teacher_id === me.id);
     const myClasses = myAssignments
       .map((ct) => state.classes.find((c) => c.id === ct.class_id))
-      .filter((c) => c && !c.is_test && c.active !== false);
+      .filter((c) => c && includeTestClass(c) && c.active !== false);
 
     // Today's classes I'm assigned to
     const todayClasses = myClasses
@@ -1091,7 +1096,7 @@
     const issues = [];
     // Classes without a primary teacher
     const noTeacher = state.classes.filter((c) =>
-      !c.is_test && c.active !== false &&
+      includeTestClass(c) && c.active !== false &&
       !state.classTeachers.some((ct) => ct.class_id === c.id && ct.role === "primary")
     );
     if (noTeacher.length > 0) {
@@ -1103,7 +1108,7 @@
     }
     // Classes without any linked infographics
     const noGraphics = state.classes.filter((c) =>
-      !c.is_test && c.active !== false &&
+      includeTestClass(c) && c.active !== false &&
       !state.classInfographics.some((ci) => ci.class_id === c.id)
     );
     if (noGraphics.length > 0) {
@@ -1156,7 +1161,7 @@
       const d = new Date(anchor);
       d.setDate(d.getDate() + i);
       d.setHours(0, 0, 0, 0);
-      const count = state.classes.filter((c) => !c.is_test && c.active !== false && classRunsOnDay(c, d)).length;
+      const count = state.classes.filter((c) => includeTestClass(c) && c.active !== false && classRunsOnDay(c, d)).length;
       const isToday = i === 0;
       days.push({ d, count, isToday, dow: DOW_SHORT[d.getDay()] });
     }
@@ -1472,7 +1477,7 @@
       : null;
 
     return state.classes.filter((c) => {
-      if (c.is_test) return false;
+      if (c.is_test && !state.cState.showTest) return false;
       if (c.active === false) return false;
       if (!classRunsOnDay(c, date)) return false;
       if (myAssignedClassIds && !myAssignedClassIds.has(c.id)) return false;
@@ -4337,7 +4342,7 @@
     const syncBtn = $("#syncJackrabbitBtn");
     if (syncBtn) syncBtn.onclick = syncJackrabbit;
     const testToggle = $("#showTestClasses");
-    if (testToggle) testToggle.onchange = (e) => { state.cState.showTest = e.target.checked; renderClassesTab(); };
+    if (testToggle) testToggle.onchange = (e) => { state.cState.showTest = e.target.checked; renderAll(); };
 
     // Template modal
     $("#addImageRow").onclick      = () => addImageRow("", "");
