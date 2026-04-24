@@ -2567,6 +2567,10 @@
       // (assignment + 2-day grace window).
       const canTake = isAdminOrAbove() || canTakeAttendanceFor(cls, today);
 
+      // Row containing the two primary actions: Take attendance + Clock in/out.
+      const actionRow = document.createElement("div");
+      actionRow.style.cssText = "display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;align-items:center";
+
       if (canTake) {
         const btn = document.createElement("button");
         btn.className = "btn primary small";
@@ -2578,14 +2582,57 @@
         } else {
           btn.textContent = "Take attendance";
         }
-        btn.style.marginBottom = "8px";
         btn.onclick = (e) => { e.stopPropagation(); openAttendanceModal(cls, today); };
-        attSection.appendChild(btn);
+        actionRow.appendChild(btn);
       } else if (todayIsClassDay) {
         const note = document.createElement("div");
-        note.style.cssText = "font-size:12.5px;color:var(--ink-dim);margin-bottom:8px";
+        note.style.cssText = "font-size:12.5px;color:var(--ink-dim)";
         note.textContent = "Today is a class day — but you're outside the window to take attendance for it.";
-        attSection.appendChild(note);
+        actionRow.appendChild(note);
+      }
+
+      // Clock-in / Clock-out button (T3d). Resolves the signed-in user's
+      // teachers row by email; shows clocked-in time if already clocked in.
+      // Admins without a teachers row will see an error toast on click —
+      // that's fine for v1 (tells them they need a teachers entry).
+      const myEmail = (state.session?.user?.email || "").toLowerCase();
+      const myTeacher = myEmail
+        ? state.teachers.find((t) => (t.email || "").toLowerCase() === myEmail)
+        : null;
+      if (myTeacher) {
+        const shift = state.clockIns.find(
+          (c) => c.teacher_id === myTeacher.id && c.class_id === cls.id && c.session_date === today
+        );
+        if (!shift) {
+          const btn = document.createElement("button");
+          btn.className = "btn small";
+          btn.textContent = "Clock in";
+          btn.onclick = (e) => { e.stopPropagation(); doClockIn(cls.id); };
+          actionRow.appendChild(btn);
+        } else if (!shift.clocked_out_at) {
+          const mins = Math.max(0, Math.round((new Date() - new Date(shift.clocked_in_at)) / 60000));
+          const label = document.createElement("span");
+          label.style.cssText = "font-size:12.5px;color:#2f7d3a";
+          label.textContent = `⏱ Clocked in · ${mins} min`;
+          const btn = document.createElement("button");
+          btn.className = "btn small";
+          btn.textContent = "Clock out";
+          btn.onclick = (e) => { e.stopPropagation(); doClockOut(shift.id); };
+          actionRow.appendChild(label);
+          actionRow.appendChild(btn);
+        } else {
+          const durMin = Math.max(0, Math.round(
+            (new Date(shift.clocked_out_at) - new Date(shift.clocked_in_at)) / 60000
+          ));
+          const label = document.createElement("span");
+          label.style.cssText = "font-size:12.5px;color:var(--ink-dim)";
+          label.textContent = `✓ Shift done · ${durMin} min`;
+          actionRow.appendChild(label);
+        }
+      }
+
+      if (actionRow.children.length > 0) {
+        attSection.appendChild(actionRow);
       }
 
       // Session history table (most recent 8)
