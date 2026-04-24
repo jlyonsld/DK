@@ -595,21 +595,28 @@
   const DOW_LONG  = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
 
   function classRunsOnDay(cls, date) {
-    if (!cls || !cls.days) return false;
+    if (!cls) return false;
+    // JR sync populates cls.days ("Mon, Wed"); the in-app class editor
+    // populates cls.day_time ("Fridays, 3:00–3:45 PM"). Fall back to
+    // day_time so manually-added classes also render on the schedule.
+    const src = String(cls.days || cls.day_time || "").toLowerCase();
+    if (!src) return false;
     const sd = cls.start_date ? new Date(cls.start_date + "T00:00:00") : null;
     const ed = cls.end_date   ? new Date(cls.end_date   + "T23:59:59") : null;
     if (sd && date < sd) return false;
     if (ed && date > ed) return false;
     const dayShort = DOW_SHORT[date.getDay()];
     const dayLong  = DOW_LONG[date.getDay()];
-    const src = String(cls.days).toLowerCase();
     return src.includes(dayShort.toLowerCase()) || src.includes(dayLong.toLowerCase());
   }
 
-  // Parse class.times ("3:44 PM - 4:45 PM") to a start-time Date anchored to `onDate`.
+  // Parse a class's start time to a Date anchored to `onDate`. Prefers the
+  // JR-synced cls.times ("3:00 PM - 3:45 PM") and falls back to cls.day_time
+  // for in-app-edited classes ("Fridays, 3:00–3:45 PM").
   function classStartTimeOn(cls, onDate) {
-    if (!cls || !cls.times) return null;
-    const m = String(cls.times).match(/(\d{1,2}):(\d{2})\s*([AP]M)/i);
+    const src = cls?.times || cls?.day_time;
+    if (!src) return null;
+    const m = String(src).match(/(\d{1,2}):(\d{2})\s*([AP]M)/i);
     if (!m) return null;
     let h = parseInt(m[1], 10);
     const mm = parseInt(m[2], 10);
@@ -1677,8 +1684,9 @@
   // Parse a class's duration (in minutes) from the `times` field like
   // "3:00 PM - 3:45 PM". Falls back to 60 min.
   function parseClassDurationMinutes(cls) {
-    if (!cls?.times) return 60;
-    const m = String(cls.times).match(/(\d{1,2}):(\d{2})\s*([AP]M)\s*[-–]\s*(\d{1,2}):(\d{2})\s*([AP]M)/i);
+    const src = cls?.times || cls?.day_time;
+    if (!src) return 60;
+    const m = String(src).match(/(\d{1,2}):(\d{2})\s*([AP]M)\s*[-–]\s*(\d{1,2}):(\d{2})\s*([AP]M)/i);
     if (!m) return 60;
     const toMin = (h, mm, ap) => {
       let hh = parseInt(h, 10) % 12;
