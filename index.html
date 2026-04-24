@@ -528,6 +528,34 @@
     </div>
   </div>
 
+  <!-- Take attendance modal (per-class, per-session roster with 4-state marks) -->
+  <div class="modal-overlay" id="attendanceModalOverlay">
+    <div class="modal" style="max-width:640px">
+      <div class="modal-head">
+        <h3 id="attendanceModalTitle">Take attendance</h3>
+        <button class="btn ghost small" id="attendanceModalClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="attendanceClassBanner" style="padding:10px 12px;background:var(--surface-alt,#f5f4ef);border-radius:8px;font-size:13px;margin-bottom:12px"></div>
+        <div class="field-row" style="align-items:end">
+          <div class="field" style="flex:0 0 200px">
+            <label>Session date</label>
+            <input type="date" id="att_session_date" />
+          </div>
+          <div class="field" style="flex:1">
+            <button class="btn small" id="att_mark_all_present" style="margin-bottom:4px">Mark all Present</button>
+          </div>
+        </div>
+        <div id="attendanceRoster" style="margin-top:8px"></div>
+        <div id="attendanceWindowNote" style="display:none;font-size:11.5px;color:var(--ink-dim);margin-top:8px"></div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" id="attendanceCancel">Cancel</button>
+        <button class="btn primary" id="attendanceSave">Save</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Reconcile duplicate modal (admin resolves a student_match_candidate) -->
   <div class="modal-overlay" id="reconcileModalOverlay">
     <div class="modal" style="max-width:640px">

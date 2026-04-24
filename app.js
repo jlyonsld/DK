@@ -33,6 +33,7 @@
     classInfographics: [],  // rows { class_id, infographic_id, sort_order, notes }
     students: [],
     enrollments: [],
+    attendance: [],         // attendance rows (enrollment-scoped); RLS-filtered per role
     matchCandidates: [],    // unresolved student_match_candidates rows (admin-visible)
     teacherInvitations: [],
     closures: [],
@@ -513,7 +514,7 @@
   async function reloadAll() {
     showLoader(true);
     try {
-      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches] = await Promise.all([
+      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches, att] = await Promise.all([
         sb.from("categories").select("*").order("sort_order", { ascending: true }),
         sb.from("templates").select("*").order("created_at", { ascending: true }),
         sb.from("classes").select("*").order("name", { ascending: true }),
@@ -527,7 +528,8 @@
         sb.from("dk_config").select("*").eq("id", 1).maybeSingle(),
         sb.from("closures").select("*").order("date", { ascending: true }),
         sb.from("sync_log").select("*").eq("source", "jackrabbit").eq("operation", "pull_openings").order("created_at", { ascending: false }).limit(1).maybeSingle(),
-        sb.from("student_match_candidates").select("*").is("resolved_at", null).order("detected_at", { ascending: false })
+        sb.from("student_match_candidates").select("*").is("resolved_at", null).order("detected_at", { ascending: false }),
+        sb.from("attendance").select("*").order("session_date", { ascending: false })
       ]);
       for (const r of [cats, tpls, cls, igs, tch, ct, ci, stu, enr]) if (r.error) throw r.error;
       // Non-admin roles may not have SELECT access to teacher_invitations /
@@ -548,6 +550,10 @@
       // Non-admin roles can't SELECT student_match_candidates (admin-only RLS);
       // swallow the error and treat as empty — banners/chips just don't render.
       state.matchCandidates  = (matches && !matches.error) ? matches.data : [];
+      // Attendance RLS: admins read all, teachers read their assigned classes,
+      // managers/viewers read via view_attendance_readonly. Any error falls back
+      // to empty — "coming soon"-style UI still renders.
+      state.attendance       = (att && !att.error) ? att.data : [];
     } catch (e) {
       console.error(e);
       showToast("Failed to load: " + e.message, "error");
@@ -731,7 +737,7 @@
       <div class="bento-card bento-span-8">${renderTeacherTodayCard(nextClass, todayClasses.length, now)}</div>
       <div class="bento-card bento-span-4">${renderTeacherWeekStatsCard(myClasses.length, weekCount)}</div>
       <div class="bento-card bento-span-8">${renderTeacherScheduleCard(todayClasses, now)}</div>
-      <div class="bento-card bento-span-4">${renderTeacherComingSoonCard()}</div>
+      <div class="bento-card bento-span-4">${renderTeacherAttendanceCard(todayClasses, now)}</div>
       <div class="bento-card bento-span-8">${renderTeacherWelcomeCard(me)}</div>
       <div class="bento-card bento-span-4">${renderParBridgeCard()}</div>
     `;
@@ -829,6 +835,41 @@
     return `
       <div class="bento-label"><span>Today's schedule</span><span style="font-weight:400;color:var(--ink-dim);text-transform:none;letter-spacing:0">${todayClasses.length} class${todayClasses.length === 1 ? "" : "es"}</span></div>
       <div class="bento-timeline">${items}</div>
+    `;
+  }
+
+  // T3b: live attendance CTAs for today's classes. Data-driven card
+  // that replaces the static "Coming soon" stub on the teacher bento.
+  function renderTeacherAttendanceCard(todayClasses, now) {
+    if (!todayClasses || todayClasses.length === 0) {
+      return `
+        <div class="bento-label"><span>Today's attendance</span></div>
+        <div class="bento-attention-empty" style="text-align:left;padding:8px 0">
+          <p style="margin:0;color:var(--ink-dim);font-size:12px">Nothing to take today.</p>
+        </div>
+      `;
+    }
+    const today = isoDate(new Date());
+    const rows = todayClasses.map(({ cls }) => {
+      const stats = attendanceStatsForSession(cls.id, today);
+      const taken = stats.taken;
+      const label = taken
+        ? `<span style="color:#2f7d3a">✓ ${stats.present + stats.late} / ${stats.present + stats.late + stats.absent + stats.excused} present</span>`
+        : `<span style="color:var(--ink-dim)">Not yet</span>`;
+      return `
+        <div style="display:flex;gap:8px;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border-subtle,#eee)">
+          <div style="flex:1;min-width:0">
+            <div style="font-weight:500;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(cls.name)}</div>
+            <div style="font-size:11px;margin-top:2px">${label}</div>
+          </div>
+          <button data-act="take-attendance" data-class-id="${escapeHtml(cls.id)}"
+            style="flex:0 0 auto;border:1px solid var(--border);background:var(--surface);padding:4px 8px;border-radius:5px;font-size:11.5px;cursor:pointer">${taken ? "Edit" : "Take"}</button>
+        </div>
+      `;
+    }).join("");
+    return `
+      <div class="bento-label"><span>Today's attendance</span></div>
+      <div>${rows}</div>
     `;
   }
 
@@ -1172,6 +1213,14 @@
         else if (qa === "sync-jr")   { go("classes"); syncJackrabbit(); }
         else if (qa === "new-teacher"){ go("teachers"); openTeacherEditor(null); }
         else if (qa === "refresh-par"){ go("teachers"); refreshAllTeacherParLinks(); }
+      };
+    });
+    // T3b: take-attendance CTAs on the teacher bento
+    $$('[data-act="take-attendance"]', $("#bentoGrid")).forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const cls = state.classes.find((c) => c.id === btn.dataset.classId);
+        if (cls) openAttendanceModal(cls, isoDate(new Date()));
       };
     });
   }
@@ -2260,6 +2309,10 @@
         <div class="add-student-row" style="margin-top:8px"></div>
       </div>
       <div style="margin-top:16px">
+        <div class="section-title">Attendance</div>
+        <div class="attendance-section"></div>
+      </div>
+      <div style="margin-top:16px">
         <div class="section-title">Class details (from Jackrabbit)</div>
         <div class="panels-grid">
           <div>
@@ -2395,6 +2448,69 @@
         btn.textContent = "+ Add student";
         btn.onclick = (e) => { e.stopPropagation(); openAddStudentModal(cls); };
         addRow.appendChild(btn);
+      }
+    }
+
+    // Attendance section: session history + "Take attendance for today" CTA.
+    // Visible if the user can see any attendance data (RLS already filters
+    // state.attendance — if the list is empty for this class, we still show
+    // the take-attendance CTA so teachers can start fresh).
+    const attSection = $(".attendance-section", rootEl);
+    if (attSection) {
+      attSection.innerHTML = "";
+      const today = isoDate(new Date());
+      const todayIsClassDay = classRunsOnDay(cls, new Date());
+      const canTakeToday = todayIsClassDay && canTakeAttendanceFor(cls, today);
+
+      // "Take attendance for today" button
+      if (canTakeToday) {
+        const btn = document.createElement("button");
+        btn.className = "btn primary small";
+        const todayStats = attendanceStatsForSession(cls.id, today);
+        btn.textContent = todayStats.taken ? "Edit today's attendance" : "Take attendance for today";
+        btn.style.marginBottom = "8px";
+        btn.onclick = (e) => { e.stopPropagation(); openAttendanceModal(cls, today); };
+        attSection.appendChild(btn);
+      } else if (todayIsClassDay) {
+        const note = document.createElement("div");
+        note.style.cssText = "font-size:12.5px;color:var(--ink-dim);margin-bottom:8px";
+        note.textContent = "Today is a class day — but you're outside the window to take attendance for it.";
+        attSection.appendChild(note);
+      }
+
+      // Session history table (most recent 8)
+      const sessionDates = recentSessionDatesForClass(cls.id, 8);
+      if (sessionDates.length === 0) {
+        const empty = document.createElement("div");
+        empty.style.cssText = "font-size:12.5px;color:var(--ink-dim);padding:4px 0";
+        empty.textContent = "No attendance recorded yet for this class.";
+        attSection.appendChild(empty);
+      } else {
+        const list = document.createElement("div");
+        list.style.cssText = "display:flex;flex-direction:column;gap:4px;margin-top:4px";
+        sessionDates.forEach((d) => {
+          const stats = attendanceStatsForSession(cls.id, d);
+          const canEdit = canTakeAttendanceFor(cls, d);
+          const row = document.createElement("div");
+          row.className = "assign-row";
+          row.style.cssText = "display:flex;gap:8px;align-items:center;padding:6px 8px;background:var(--surface,#fff);border:1px solid var(--border);border-radius:6px";
+          const dateLabel = new Date(d + "T00:00:00").toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+          row.innerHTML = `
+            <span style="flex:0 0 140px;font-weight:500">${escapeHtml(dateLabel)}</span>
+            <span style="font-size:12px;color:var(--ink-dim);flex:1">
+              ${stats.present} present · ${stats.late} late · ${stats.absent} absent · ${stats.excused} excused
+            </span>
+          `;
+          if (canEdit) {
+            const editBtn = document.createElement("button");
+            editBtn.className = "btn small";
+            editBtn.textContent = "Edit";
+            editBtn.onclick = (e) => { e.stopPropagation(); openAttendanceModal(cls, d); };
+            row.appendChild(editBtn);
+          }
+          list.appendChild(row);
+        });
+        attSection.appendChild(list);
       }
     }
 
@@ -2581,6 +2697,245 @@
     } finally {
       showLoader(false);
     }
+  }
+
+  /* ═════════════ T3b: Attendance capture ═════════════
+   * Attendance is enrollment-scoped: one row per (enrollment, session_date).
+   * The modal loads the current session's marks, lets the user toggle per
+   * student between Present/Late/Absent/Excused (unset = "unknown" = no row
+   * sent), and bulk-upserts via the take_attendance RPC.
+   *
+   * Teachers can only take/edit within the 2-day RLS grace window on
+   * classes they're assigned to; admins have no window. Date picker's
+   * `min` and `max` reflect this.
+   */
+  const ATT_STATUSES = ["present","late","absent","excused"];
+  let attendanceModalClassId = null;
+  let attendanceModalSessionDate = null;
+  // per-enrollment status overrides during an open modal session:
+  // { [enrollment_id]: "present"|"late"|"absent"|"excused"|"unknown" }
+  let attendancePendingMarks = {};
+  // per-enrollment notes overrides during an open modal session
+  let attendancePendingNotes = {};
+
+  // Build a (enrollment_id -> attendance row) map for a class+date session.
+  function attendanceMapForSession(classId, sessionDate) {
+    const classEnrollmentIds = new Set(
+      state.enrollments.filter((e) => e.class_id === classId).map((e) => e.id)
+    );
+    const out = new Map();
+    for (const a of state.attendance) {
+      if (!classEnrollmentIds.has(a.enrollment_id)) continue;
+      if (a.session_date !== sessionDate) continue;
+      out.set(a.enrollment_id, a);
+    }
+    return out;
+  }
+
+  // Aggregate counts for a class's session. `taken` = at least one non-unknown row.
+  function attendanceStatsForSession(classId, sessionDate) {
+    const map = attendanceMapForSession(classId, sessionDate);
+    const stats = { present: 0, late: 0, absent: 0, excused: 0, unknown: 0, taken: false };
+    for (const a of map.values()) {
+      if (a.status === "present") stats.present++;
+      else if (a.status === "late") stats.late++;
+      else if (a.status === "absent") stats.absent++;
+      else if (a.status === "excused") stats.excused++;
+      else stats.unknown++;
+      if (a.status && a.status !== "unknown") stats.taken = true;
+    }
+    return stats;
+  }
+
+  // List recent session_dates for a class (descending) with row coverage.
+  function recentSessionDatesForClass(classId, limit) {
+    const classEnrollmentIds = new Set(
+      state.enrollments.filter((e) => e.class_id === classId).map((e) => e.id)
+    );
+    const dates = new Set();
+    for (const a of state.attendance) {
+      if (classEnrollmentIds.has(a.enrollment_id)) dates.add(a.session_date);
+    }
+    return [...dates].sort((a, b) => (a < b ? 1 : -1)).slice(0, limit || 8);
+  }
+
+  function openAttendanceModal(cls, sessionDate) {
+    attendanceModalClassId = cls.id;
+    attendanceModalSessionDate = sessionDate || isoDate(new Date());
+    attendancePendingMarks = {};
+    attendancePendingNotes = {};
+
+    $("#attendanceClassBanner").innerHTML =
+      `Taking attendance for <b>${escapeHtml(cls.name || "this class")}</b>` +
+      (cls.location ? ` <span style="color:var(--ink-dim)">· ${escapeHtml(cls.location)}</span>` : "");
+
+    const picker = $("#att_session_date");
+    picker.value = attendanceModalSessionDate;
+    // Admins: unconstrained (can edit history). Teachers: 2-day window, no future.
+    const note = $("#attendanceWindowNote");
+    if (isAdminOrAbove()) {
+      picker.removeAttribute("min");
+      picker.removeAttribute("max");
+      note.style.display = "none";
+    } else {
+      const today = new Date();
+      const earliest = new Date(today); earliest.setDate(earliest.getDate() - 2);
+      picker.min = isoDate(earliest);
+      picker.max = isoDate(today);
+      note.style.display = "";
+      note.textContent = "Teachers can take or edit attendance within a 2-day grace window.";
+    }
+    picker.onchange = () => {
+      attendanceModalSessionDate = picker.value;
+      attendancePendingMarks = {};
+      attendancePendingNotes = {};
+      renderAttendanceRoster();
+    };
+
+    renderAttendanceRoster();
+    $("#attendanceModalOverlay").classList.add("open");
+  }
+
+  function closeAttendanceModal() {
+    $("#attendanceModalOverlay").classList.remove("open");
+    attendanceModalClassId = null;
+    attendanceModalSessionDate = null;
+    attendancePendingMarks = {};
+    attendancePendingNotes = {};
+  }
+
+  // Re-render the student list in the modal based on current state.
+  function renderAttendanceRoster() {
+    const host = $("#attendanceRoster");
+    if (!host) return;
+    const cls = state.classes.find((c) => c.id === attendanceModalClassId);
+    if (!cls) { host.innerHTML = ""; return; }
+    const enrollments = state.enrollments
+      .filter((e) => e.class_id === cls.id && e.status === "active")
+      .map((e) => ({ ...e, student: state.students.find((s) => s.id === e.student_id) }))
+      .filter((x) => x.student && !x.student.archived_at)
+      .sort((a, b) => (a.student.last_name || "").localeCompare(b.student.last_name || ""));
+
+    if (enrollments.length === 0) {
+      host.innerHTML = '<div style="font-size:12.5px;color:var(--ink-dim);padding:12px 0">No active enrollments for this class.</div>';
+      return;
+    }
+
+    const existing = attendanceMapForSession(cls.id, attendanceModalSessionDate);
+    const rowsHtml = enrollments.map(({ id, student }) => {
+      const existingStatus = existing.get(id)?.status || "unknown";
+      const pending = attendancePendingMarks[id];
+      const currentStatus = pending !== undefined ? pending : existingStatus;
+      const existingNotes = existing.get(id)?.notes || "";
+      const currentNotes = attendancePendingNotes[id] !== undefined ? attendancePendingNotes[id] : existingNotes;
+      const btns = ATT_STATUSES.map((s) => {
+        const active = currentStatus === s;
+        const label = s.charAt(0).toUpperCase();
+        const color = active
+          ? (s === "present" ? "#2f7d3a" : s === "late" ? "#a36a00" : s === "absent" ? "#b3341c" : "#5a5a9b")
+          : "transparent";
+        return `<button data-att-btn data-enr="${escapeHtml(id)}" data-status="${s}" title="${s}"
+          style="border:1px solid var(--border);background:${active ? color : "var(--surface)"};color:${active ? "#fff" : "var(--ink)"};border-radius:6px;padding:4px 10px;font-size:12px;font-weight:600;cursor:pointer">${label}</button>`;
+      }).join(" ");
+      return `
+        <div class="att-row" style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;padding:6px 0;border-bottom:1px solid var(--border-subtle,#eee)">
+          <div>
+            <div style="font-weight:500">${escapeHtml(student.first_name || "")} ${escapeHtml(student.last_name || "")}</div>
+            <input type="text" data-att-notes data-enr="${escapeHtml(id)}" placeholder="Notes (optional)" value="${escapeHtml(currentNotes)}"
+              style="margin-top:4px;width:100%;max-width:320px;font-size:11.5px;padding:3px 6px;border:1px solid var(--border);border-radius:4px;color:var(--ink-dim);background:transparent" />
+          </div>
+          <div style="display:flex;gap:4px">${btns}</div>
+        </div>`;
+    }).join("");
+
+    host.innerHTML = rowsHtml;
+
+    // Wire buttons — click toggles; clicking the active status clears to 'unknown'.
+    host.querySelectorAll("[data-att-btn]").forEach((b) => {
+      b.onclick = () => {
+        const enr = b.dataset.enr;
+        const status = b.dataset.status;
+        const existingStatus = existing.get(enr)?.status || "unknown";
+        const pending = attendancePendingMarks[enr];
+        const current = pending !== undefined ? pending : existingStatus;
+        if (current === status) {
+          attendancePendingMarks[enr] = "unknown";
+        } else {
+          attendancePendingMarks[enr] = status;
+        }
+        renderAttendanceRoster();
+      };
+    });
+    host.querySelectorAll("[data-att-notes]").forEach((inp) => {
+      inp.oninput = () => { attendancePendingNotes[inp.dataset.enr] = inp.value; };
+    });
+  }
+
+  async function markAllPresent() {
+    const cls = state.classes.find((c) => c.id === attendanceModalClassId);
+    if (!cls) return;
+    const enrollments = state.enrollments
+      .filter((e) => e.class_id === cls.id && e.status === "active");
+    for (const e of enrollments) attendancePendingMarks[e.id] = "present";
+    renderAttendanceRoster();
+  }
+
+  async function saveAttendance() {
+    const classId = attendanceModalClassId;
+    const sessionDate = attendanceModalSessionDate;
+    if (!classId || !sessionDate) { showToast("No session loaded", "error"); return; }
+
+    // Build entries array. Merge pending marks with existing rows so notes-only
+    // changes still get persisted. Skip entries where the effective status is
+    // 'unknown' AND there was no existing row (nothing to record).
+    const existing = attendanceMapForSession(classId, sessionDate);
+    const activeEnrollments = state.enrollments
+      .filter((e) => e.class_id === classId && e.status === "active");
+    const entries = [];
+    for (const e of activeEnrollments) {
+      const prior = existing.get(e.id);
+      const priorStatus = prior?.status || "unknown";
+      const priorNotes = prior?.notes || "";
+      const status = attendancePendingMarks[e.id] !== undefined ? attendancePendingMarks[e.id] : priorStatus;
+      const notes  = attendancePendingNotes[e.id] !== undefined ? attendancePendingNotes[e.id] : priorNotes;
+      if (status === "unknown" && !prior) continue; // nothing to persist
+      entries.push({ enrollment_id: e.id, status, notes: notes || null });
+    }
+
+    if (entries.length === 0) {
+      showToast("Mark at least one student before saving", "error");
+      return;
+    }
+
+    showLoader(true);
+    const { error } = await sb.rpc("take_attendance", {
+      p_class_id: classId,
+      p_session_date: sessionDate,
+      p_entries: entries,
+    });
+    showLoader(false);
+    if (error) { showToast("Save failed: " + error.message, "error"); return; }
+    await reloadAll(); renderAll();
+    closeAttendanceModal();
+    showToast(`Attendance saved (${entries.length})`, "success");
+  }
+
+  // Permission helper: can THIS user take attendance for THIS class on this date?
+  function canTakeAttendanceFor(cls, dateIso) {
+    if (isAdminOrAbove()) return true;
+    if (!hasPerm("take_own_attendance")) return false;
+    // Teacher must be assigned to the class
+    const myEmail = (state.session?.user?.email || "").toLowerCase();
+    const me = state.teachers.find((t) => (t.email || "").toLowerCase() === myEmail);
+    if (!me) return false;
+    const assigned = state.classTeachers.some((ct) => ct.class_id === cls.id && ct.teacher_id === me.id);
+    if (!assigned) return false;
+    // Date must be in the 2-day grace window
+    const today = isoDate(new Date());
+    const d = new Date(dateIso + "T00:00:00");
+    const t = new Date(today + "T00:00:00");
+    const diffDays = Math.round((t - d) / (1000 * 60 * 60 * 24));
+    return diffDays >= 0 && diffDays <= 2;
   }
 
   function renderSyncStatus() {
@@ -3401,6 +3756,13 @@
     $("#addStudentModalClose").onclick = closeAddStudentModal;
     $("#addStudentModalOverlay").onclick = (e) => { if (e.target.id === "addStudentModalOverlay") closeAddStudentModal(); };
     $("#addStudentSave").onclick       = saveAddStudent;
+
+    // Attendance modal (T3b: take or edit a session's attendance)
+    $("#attendanceCancel").onclick       = closeAttendanceModal;
+    $("#attendanceModalClose").onclick   = closeAttendanceModal;
+    $("#attendanceModalOverlay").onclick = (e) => { if (e.target.id === "attendanceModalOverlay") closeAttendanceModal(); };
+    $("#attendanceSave").onclick         = saveAttendance;
+    $("#att_mark_all_present").onclick   = markAllPresent;
 
     // Reconcile modal (admin resolves a student_match_candidate)
     $("#reconcileModalClose").onclick = closeReconcileModal;
