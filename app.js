@@ -45,6 +45,9 @@
     // Schedule state: `anchor` is the currently-focused date (ISO); mode is
     // day/week/month; onlyMine filters to the signed-in teacher's assignments.
     sState: { mode: "day", anchor: isoDate(new Date()), onlyMine: false },
+    // Reports tab state: active report id + date range (ISO). Defaults to
+    // last 30 days including today.
+    rptState: { active: "attendance", start: null, end: null },
     router: "home"
   };
 
@@ -123,8 +126,8 @@
   // Which tabs each role is allowed to see. (Role Management tab doesn't
   // exist in T1 — it lands in T6.)
   const ROLE_TAB_VISIBILITY = {
-    super_admin: new Set(["home","schedule","templates","classes","teachers","categories","infographics"]),
-    admin:       new Set(["home","schedule","templates","classes","teachers","categories","infographics"]),
+    super_admin: new Set(["home","schedule","templates","classes","teachers","categories","infographics","reports"]),
+    admin:       new Set(["home","schedule","templates","classes","teachers","categories","infographics","reports"]),
     manager:     new Set(["home","schedule","templates","classes","teachers","categories","infographics"]),
     teacher:     new Set(["home","schedule"]),
     viewer:      new Set(["home","schedule","templates","classes","teachers","categories","infographics"])
@@ -571,6 +574,7 @@
     renderTeachersTab();
     renderCategoriesTab();
     renderInfographicsTab();
+    renderReportsTab();
   }
 
   /* ═════════════ HOME (Bento) ═════════════ */
@@ -2996,6 +3000,260 @@
     await reloadAll(); renderAll();
     closeAttendanceModal();
     showToast(`Attendance saved (${entries.length})`, "success");
+  }
+
+  /* ═════════════ Reports tab ═════════════
+   * Admin-only aggregation views that sit alongside the operational tabs.
+   * Registered reports:
+   *   - attendance: overall summary + per-class breakdown + late-pickup log
+   * Adding a new report:
+   *   1. Add to REPORTS list (id, label, render fn)
+   *   2. Implement the render fn — it receives state.rptState and the
+   *      #reportContent DOM node.
+   */
+  const REPORTS = [
+    { id: "attendance", label: "Attendance", render: renderAttendanceReport },
+  ];
+
+  function ensureReportDateDefaults() {
+    if (state.rptState.start && state.rptState.end) return;
+    const today = new Date();
+    const start = new Date(today); start.setDate(start.getDate() - 29);
+    state.rptState.start = isoDate(start);
+    state.rptState.end   = isoDate(today);
+  }
+
+  function renderReportsTab() {
+    const panel = document.querySelector('.tab-panel[data-tab="reports"]');
+    if (!panel) return;
+    // Gate: only render when the user is allowed on this tab.
+    if (!canSeeTab("reports")) return;
+    ensureReportDateDefaults();
+
+    // Sub-nav
+    const subNav = $("#reportSubNav");
+    if (subNav) {
+      subNav.innerHTML = REPORTS.map((r) => {
+        const active = r.id === state.rptState.active;
+        return `<button data-report="${escapeHtml(r.id)}" class="btn small"
+          style="${active ? "background:var(--accent,#2d2d2d);color:#fff;border-color:var(--accent,#2d2d2d)" : ""}">${escapeHtml(r.label)}</button>`;
+      }).join(" ");
+      subNav.querySelectorAll("[data-report]").forEach((b) => {
+        b.onclick = () => {
+          state.rptState.active = b.dataset.report;
+          renderReportsTab();
+        };
+      });
+    }
+
+    const content = $("#reportContent");
+    if (!content) return;
+    const active = REPORTS.find((r) => r.id === state.rptState.active) || REPORTS[0];
+    active.render(content);
+  }
+
+  // Filter state.attendance by [start, end] inclusive (ISO dates).
+  function attendanceInRange(start, end) {
+    return state.attendance.filter((a) => a.session_date >= start && a.session_date <= end);
+  }
+
+  function renderAttendanceReport(host) {
+    const s = state.rptState;
+    const rows = attendanceInRange(s.start, s.end);
+
+    // Aggregate: total sessions = distinct (class_id, session_date) pairs.
+    const sessionKeys = new Set();
+    let totPresent = 0, totAbsent = 0, totLate = 0, totMin = 0;
+    for (const a of rows) {
+      const enr = state.enrollments.find((e) => e.id === a.enrollment_id);
+      if (!enr) continue;
+      sessionKeys.add(enr.class_id + "|" + a.session_date);
+      if (a.status === "present" || a.status === "late") totPresent++;
+      else if (a.status === "absent" || a.status === "excused") totAbsent++;
+      if (a.late_pickup_minutes && a.late_pickup_minutes > 0) {
+        totLate++;
+        totMin += a.late_pickup_minutes;
+      }
+    }
+
+    // Per-class stats
+    const byClass = new Map(); // class_id -> {sessions:Set, present, absent, late, minutes}
+    for (const a of rows) {
+      const enr = state.enrollments.find((e) => e.id === a.enrollment_id);
+      if (!enr) continue;
+      let s2 = byClass.get(enr.class_id);
+      if (!s2) { s2 = { sessions: new Set(), present: 0, absent: 0, late: 0, minutes: 0 }; byClass.set(enr.class_id, s2); }
+      s2.sessions.add(a.session_date);
+      if (a.status === "present" || a.status === "late") s2.present++;
+      else if (a.status === "absent" || a.status === "excused") s2.absent++;
+      if (a.late_pickup_minutes && a.late_pickup_minutes > 0) {
+        s2.late++;
+        s2.minutes += a.late_pickup_minutes;
+      }
+    }
+    const classRows = [...byClass.entries()]
+      .map(([cid, st]) => {
+        const cls = state.classes.find((c) => c.id === cid);
+        return {
+          className: cls ? (cls.name || "—") : "(unknown class)",
+          sessions: st.sessions.size,
+          present: st.present,
+          absent: st.absent,
+          late: st.late,
+          minutes: st.minutes,
+        };
+      })
+      .sort((a, b) => a.className.localeCompare(b.className));
+
+    // Late-pickup itemized list
+    const latePickups = rows
+      .filter((a) => a.late_pickup_minutes && a.late_pickup_minutes > 0)
+      .map((a) => {
+        const enr = state.enrollments.find((e) => e.id === a.enrollment_id);
+        const stu = enr ? state.students.find((st) => st.id === enr.student_id) : null;
+        const cls = enr ? state.classes.find((c) => c.id === enr.class_id) : null;
+        return {
+          date: a.session_date,
+          student: stu ? `${stu.first_name || ""} ${stu.last_name || ""}`.trim() : "(unknown)",
+          className: cls ? (cls.name || "—") : "(unknown)",
+          minutes: a.late_pickup_minutes,
+          notes: a.notes || "",
+        };
+      })
+      .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+
+    const presetBtn = (label, days) =>
+      `<button data-rpt-preset="${days}" class="btn small">${escapeHtml(label)}</button>`;
+
+    host.innerHTML = `
+      <div style="display:flex;gap:8px;align-items:end;flex-wrap:wrap;padding:12px 0 16px;border-bottom:1px solid var(--border-subtle,#eee)">
+        <div class="field" style="flex:0 0 160px">
+          <label>From</label>
+          <input type="date" id="rpt_start" value="${escapeHtml(s.start)}" />
+        </div>
+        <div class="field" style="flex:0 0 160px">
+          <label>To</label>
+          <input type="date" id="rpt_end" value="${escapeHtml(s.end)}" />
+        </div>
+        <div style="display:flex;gap:4px">
+          ${presetBtn("Last 7d", 7)}
+          ${presetBtn("Last 30d", 30)}
+          ${presetBtn("Last 90d", 90)}
+        </div>
+        <div style="flex:1"></div>
+        <button class="btn small" id="rpt_export_csv">Export CSV (late pickups)</button>
+      </div>
+
+      <div style="margin-top:16px">
+        <div class="section-title">Summary</div>
+        <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;padding:12px 0">
+          ${[
+            ["Sessions", sessionKeys.size, ""],
+            ["Present", totPresent, ""],
+            ["Absent", totAbsent, ""],
+            ["Late pickups", totLate, totLate > 0 ? "#a36a00" : ""],
+            ["Late minutes", totMin, totMin > 0 ? "#a36a00" : ""],
+          ].map(([k, v, col]) => `
+            <div style="padding:10px 12px;background:var(--surface-alt,#f5f4ef);border-radius:8px">
+              <div style="font-size:11px;color:var(--ink-dim);text-transform:uppercase;letter-spacing:.5px">${escapeHtml(k)}</div>
+              <div style="font-size:22px;font-weight:600;margin-top:2px;${col ? `color:${col}` : ""}">${v}</div>
+            </div>
+          `).join("")}
+        </div>
+      </div>
+
+      <div style="margin-top:16px">
+        <div class="section-title">By class</div>
+        ${classRows.length === 0 ? '<div style="padding:12px 0;color:var(--ink-dim);font-size:12.5px">No attendance recorded in this range.</div>' : `
+          <table style="width:100%;border-collapse:collapse;font-size:12.5px">
+            <thead>
+              <tr style="text-align:left;color:var(--ink-dim);border-bottom:1px solid var(--border)">
+                <th style="padding:6px 8px;font-weight:600">Class</th>
+                <th style="padding:6px 8px;font-weight:600;text-align:right">Sessions</th>
+                <th style="padding:6px 8px;font-weight:600;text-align:right">Present</th>
+                <th style="padding:6px 8px;font-weight:600;text-align:right">Absent</th>
+                <th style="padding:6px 8px;font-weight:600;text-align:right">Late pickups</th>
+                <th style="padding:6px 8px;font-weight:600;text-align:right">Late min</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${classRows.map((r) => `
+                <tr style="border-bottom:1px solid var(--border-subtle,#eee)">
+                  <td style="padding:6px 8px">${escapeHtml(r.className)}</td>
+                  <td style="padding:6px 8px;text-align:right">${r.sessions}</td>
+                  <td style="padding:6px 8px;text-align:right">${r.present}</td>
+                  <td style="padding:6px 8px;text-align:right">${r.absent}</td>
+                  <td style="padding:6px 8px;text-align:right${r.late > 0 ? ';color:#a36a00;font-weight:600' : ''}">${r.late}</td>
+                  <td style="padding:6px 8px;text-align:right${r.minutes > 0 ? ';color:#a36a00;font-weight:600' : ''}">${r.minutes}</td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        `}
+      </div>
+
+      <div style="margin-top:16px">
+        <div class="section-title">Late pickups <span style="font-weight:400;color:var(--ink-dim);text-transform:none;letter-spacing:0">(billing candidates)</span></div>
+        ${latePickups.length === 0 ? '<div style="padding:12px 0;color:var(--ink-dim);font-size:12.5px">No late pickups in this range.</div>' : `
+          <table style="width:100%;border-collapse:collapse;font-size:12.5px">
+            <thead>
+              <tr style="text-align:left;color:var(--ink-dim);border-bottom:1px solid var(--border)">
+                <th style="padding:6px 8px;font-weight:600">Date</th>
+                <th style="padding:6px 8px;font-weight:600">Student</th>
+                <th style="padding:6px 8px;font-weight:600">Class</th>
+                <th style="padding:6px 8px;font-weight:600;text-align:right">Minutes</th>
+                <th style="padding:6px 8px;font-weight:600">Notes</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${latePickups.map((r) => `
+                <tr style="border-bottom:1px solid var(--border-subtle,#eee)">
+                  <td style="padding:6px 8px;white-space:nowrap">${escapeHtml(new Date(r.date + "T00:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }))}</td>
+                  <td style="padding:6px 8px">${escapeHtml(r.student)}</td>
+                  <td style="padding:6px 8px">${escapeHtml(r.className)}</td>
+                  <td style="padding:6px 8px;text-align:right;color:#a36a00;font-weight:600">${r.minutes}</td>
+                  <td style="padding:6px 8px;color:var(--ink-dim)">${escapeHtml(r.notes)}</td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        `}
+      </div>
+    `;
+
+    // Wire controls
+    $("#rpt_start").onchange = (e) => { state.rptState.start = e.target.value; renderReportsTab(); };
+    $("#rpt_end").onchange   = (e) => { state.rptState.end   = e.target.value; renderReportsTab(); };
+    host.querySelectorAll("[data-rpt-preset]").forEach((b) => {
+      b.onclick = () => {
+        const days = parseInt(b.dataset.rptPreset, 10);
+        const today = new Date();
+        const start = new Date(today); start.setDate(start.getDate() - (days - 1));
+        state.rptState.start = isoDate(start);
+        state.rptState.end   = isoDate(today);
+        renderReportsTab();
+      };
+    });
+    $("#rpt_export_csv").onclick = () => downloadLatePickupCsv(latePickups, s.start, s.end);
+  }
+
+  function downloadLatePickupCsv(rows, start, end) {
+    const esc = (v) => {
+      const s = String(v == null ? "" : v);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const header = ["Date","Student","Class","Minutes","Notes"].join(",");
+    const body = rows.map((r) => [r.date, r.student, r.className, r.minutes, r.notes].map(esc).join(",")).join("\n");
+    const csv = header + "\n" + body + "\n";
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `late-pickups-${start}-to-${end}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   }
 
   // Permission helper: can THIS user take attendance for THIS class on this date?
