@@ -96,7 +96,19 @@ DK Optimization/
 ├── migrations/               ← SQL migrations, applied to Supabase in order.
 │   ├── phase_t0_role_foundation.sql
 │   ├── phase_t2_teacher_invitations.sql
-│   └── phase_s1_closures.sql
+│   ├── phase_s1_closures.sql
+│   ├── phase_t3_permissions.sql         ← Adds reconcile_students +
+│   │                                      view_own_roster +
+│   │                                      manage_own_roster_students +
+│   │                                      manage_own_enrollments perms.
+│   ├── phase_t3a_student_adds.sql       ← Teacher-added students,
+│   │                                      dk_local vs jackrabbit source,
+│   │                                      student_match_candidates,
+│   │                                      reconcile_students RPC.
+│   ├── phase_t3b_attendance.sql         ← Attendance RLS + take_attendance
+│   │                                      RPC (enrollment-scoped).
+│   └── phase_t3c_late_pickup.sql        ← attendance.late_pickup_minutes
+│                                          + RPC persist.
 ├── edge-functions/           ← Deno sources for Edge Functions deployed to
 │   │                           DK's Supabase project.
 │   └── dk-invite-teacher/index.ts
@@ -125,9 +137,18 @@ classes                  — classes synced nightly from Jackrabbit
 teachers                 — DK-side teacher roster
 class_teachers           — many-to-many: which teacher is primary/sub for which class
 class_infographics       — many-to-many: which images suggest for which class
-students                 — students (came from Jackrabbit Phase 2)
-enrollments              — student enrollments (came from Jackrabbit Phase 2)
-attendance               — attendance records (scaffolded, UI deferred to Phase T3)
+students                 — students; `source` in {jackrabbit, dk_local}. JR
+                           rows come from the Zapier webhook; dk_local from
+                           the in-app "+ Add student" flow. See §4.13.
+enrollments              — student enrollments; also carries `source`.
+attendance               — attendance records, enrollment-scoped (one row
+                           per enrollment_id + session_date). Status is
+                           present/absent in the UI; `late`/`excused` remain
+                           allowed in the check constraint for historical
+                           rows. Includes `late_pickup_minutes` for billing.
+                           See §4.14.
+student_match_candidates — flagged possible duplicates across sources;
+                           admin resolves via reconcile_students RPC. See §4.13.
 infographics             — image assets in Supabase Storage bucket
 teacher_invitations      — DK-side mirror of PAR invitations (see §4.6)
 closures                 — holidays / non-class dates rendered on Schedule views
@@ -220,6 +241,28 @@ Classes carry `days: "Mon, Wed"` and `times: "3:00 PM - 3:45 PM"` strings, both 
 
 Sharon and future teachers don't want to manage DK passwords. The login screen exposes both: password (for people who prefer it) and a "✉ Email me a sign-in link" button that calls `sb.auth.signInWithOtp()`. The magic-link path auto-creates the `auth.users` row on first click, which triggers `handle_new_user`, which creates the DK profile and redeems any pending invitation. The `onAuthStateChange` handler detects the session arriving via the magic-link hash redirect and boots the app if the login screen is still visible.
 
+### 4.13 Students have a `source` discriminator; reconciliation is user-driven
+
+Students come from two places: Jackrabbit (via the Zapier webhook; `source='jackrabbit'`) and DK itself (teacher/admin "+ Add student" on a class panel; `source='dk_local'`). They coexist — contracted classes that never touch JR keep their students as dk_local indefinitely; late adds to JR classes may eventually reconcile.
+
+**No auto-merging, ever.** On every insert into `students`, a `detect_student_match` trigger looks for likely duplicates across sources and files a `student_match_candidates` row. Three heuristics (all candidate, never merge): exact `(lower(first_name), lower(last_name), dob)`; phonetic `dmetaphone(last_name)` + exact first + dob; same `family_id` + exact first. Admin sees a yellow banner on affected class panels → **Review** opens a reconcile modal with three actions: **Link** (calls `reconcile_students` RPC, re-parents enrollments, archives the DK row), **Keep separate** (dismiss), **Delete DK-only**. Teachers can't SELECT the candidate table — admin-territory.
+
+The `reconcile_students(uuid)` RPC is `security definer`, gated by `has_permission('reconcile_students')`. It re-parents `enrollments.student_id` only; attendance follows automatically because attendance is enrollment-scoped (see §4.14).
+
+### 4.14 Attendance is enrollment-scoped (not student+class)
+
+The `attendance` table keys on `enrollment_id` + `session_date`, not `student_id` + `class_id` + `session_date`. An attendance row can't exist without the enrollment that ties a student to a class — which means reconciling a duplicate student (see §4.13) silently moves all attendance with its enrollments, no explicit reparenting.
+
+One row per `(enrollment_id, session_date)` enforced by unique index. Re-takes upsert via the `take_attendance(p_class_id, p_session_date, p_entries)` RPC. RPC is `security invoker` so RLS fires per INSERT — teachers can only write within their 2-day grace window on classes they teach; admins unconstrained. Defense-in-depth: the RPC also verifies each entry's enrollment belongs to `p_class_id` before inserting.
+
+**Status in the UI is simplified to `present` / `absent`.** The check constraint still accepts `late` and `excused` for historical rows and future states — the renderer folds legacy `late` into Present and `excused` into Absent so old data reads cleanly. Unmarked students have no row (status `unknown` sentinel in-memory only; not persisted).
+
+**Late pickup is tracked independently of status** via `attendance.late_pickup_minutes` (nullable integer ≥ 0). A student can be Present AND late-pickup. Absent students can't — the UI disables + clears the minutes input, and the modal's save logic nulls it regardless. The Reports tab's late-pickup list is the billing source of truth.
+
+### 4.15 Reports tab is a pluggable registry
+
+Admin-only top-level tab. `app.js` has a `REPORTS` array of `{ id, label, render }` entries; `renderReportsTab()` builds the sub-nav from it and calls the active entry's render function against a shared `#reportContent` node. Adding a report = one entry + one function. v1 ships a single Attendance report (summary + per-class breakdown + late-pickup log + CSV export) that aggregates entirely client-side from `state.attendance` — no new queries.
+
 ---
 
 ## 5. Gotchas, quirks, and "don't touch this"
@@ -258,6 +301,14 @@ Sharon and future teachers don't want to manage DK passwords. The login screen e
 
 **Classes' `times` field is parsed by a brittle regex.** See `parseClassDurationMinutes()` in `app.js`. If Jackrabbit ever changes its openings-feed time format, the week-view block heights break. We default to 60 min duration on parse failure, so it degrades gracefully.
 
+**Never use `(select email from auth.users where id = auth.uid())` in RLS policies.** The `authenticated` role lacks SELECT on `auth.users`, so any policy referencing it errors with "permission denied for table users" — and because multiple permissive policies are OR'd in a way that doesn't short-circuit on error, ONE broken policy on a table breaks INSERT/UPDATE for every role that has any policy there (even admins). Use `auth.jwt() ->> 'email'` — Supabase reads it straight off the JWT, no grant needed. All T3a/T3b teacher-scoped policies follow this pattern.
+
+**`take_attendance` RPC is `security invoker`, `reconcile_students` is `security definer`.** `take_attendance` wants RLS to fire per INSERT so teachers can't write outside their grace window via the RPC. `reconcile_students` needs to move enrollments for an admin even if RLS would otherwise restrict; it's gated with an explicit `has_permission('reconcile_students')` check at the top.
+
+**Student INSERTs use client-side `crypto.randomUUID()` ids.** Because teacher-scoped RLS on `students` only allows SELECT once the student is enrolled in one of the teacher's classes, `.insert().select().single()` would fail to read back the just-inserted row. The "+ Add student" flow pre-generates the UUID in JS so it can chain the enrollment INSERT without reading the student back.
+
+**Attendance status enum still accepts `late` and `excused`.** The UI only writes `present` / `absent` / `unknown`, but the check constraint is kept permissive so historical rows and future states survive a schema change without a migration. Renderers fold `late` → Present and `excused` → Absent.
+
 ---
 
 ## 6. Open issues and half-built features
@@ -266,7 +317,9 @@ Sharon and future teachers don't want to manage DK passwords. The login screen e
 
 - **Phase T1.5 — manager write access.** Strategy doc says managers should be able to edit templates/categories/infographics. RLS on those tables currently checks `is_admin()`, which excludes managers. UI gating treats them as read-only to match. Fix is a small migration extending those three tables' INSERT/UPDATE/DELETE policies to also allow `role = 'manager' AND has_permission('edit_templates')`. Untouched.
 
-- **Phase T3 — attendance + clock-in/out.** Teacher bento has a "Coming soon in Phase T3" placeholder card explicitly calling this out. `attendance` table exists but has no UI. `clock_ins` table doesn't exist yet. Intended to be the thing that makes the teacher role genuinely useful.
+- **Phase T3 — attendance.** ✅ **Attendance shipped.** Teachers and admins take per-session attendance (Present/Absent + late-pickup minutes) via the class detail panel or the "Today's attendance" card on the teacher bento. Admin-only **Reports** tab ships with an Attendance report: summary counts, per-class breakdown, itemized late-pickup log with CSV export for billing. See §4.13 – §4.15.
+
+- **Phase T3 — clock-in/out.** Still deferred. `clock_ins` table doesn't exist yet. Would pair well with attendance (shift timestamps for payroll) but is a separate concern from student attendance and was explicitly cut from T3 scope.
 
 - **Phase T4 — sub requests / shift trades.** No schema. Strategy doc sketches `sub_requests` + `sub_claims` tables.
 
@@ -333,7 +386,7 @@ JACKRABBIT_ORG_ID                # "551000" for the Charleston franchise
 | Spoke install-flow platform (Phase A + B) | ✅ Shipped, awaiting Sharon's PAR setup |
 | Schedule tab (Day / Week / Month) + closures | ✅ Shipped |
 | Full responsive pass | ✅ Shipped |
-| T3 — Attendance + clock-in | 🔲 Not started |
+| T3 — Attendance UI + Reports tab | ✅ Shipped (clock-in/out still deferred) |
 | T4 — Sub requests / shift trades | 🔲 Not started |
 | T5 — Curriculum library | 🔲 Not started |
 | T6 — Role management UI + profiles.teacher_id | 🔲 Not started |
