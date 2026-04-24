@@ -2460,14 +2460,23 @@
       attSection.innerHTML = "";
       const today = isoDate(new Date());
       const todayIsClassDay = classRunsOnDay(cls, new Date());
-      const canTakeToday = todayIsClassDay && canTakeAttendanceFor(cls, today);
+      // Admins can take/edit attendance any day (date picker handles
+      // off-day sessions like make-ups or test classes with no schedule).
+      // Teachers only see the button when canTakeAttendanceFor passes
+      // (assignment + 2-day grace window).
+      const canTake = isAdminOrAbove() || canTakeAttendanceFor(cls, today);
 
-      // "Take attendance for today" button
-      if (canTakeToday) {
+      if (canTake) {
         const btn = document.createElement("button");
         btn.className = "btn primary small";
         const todayStats = attendanceStatsForSession(cls.id, today);
-        btn.textContent = todayStats.taken ? "Edit today's attendance" : "Take attendance for today";
+        if (todayStats.taken) {
+          btn.textContent = "Edit today's attendance";
+        } else if (todayIsClassDay) {
+          btn.textContent = "Take attendance for today";
+        } else {
+          btn.textContent = "Take attendance";
+        }
         btn.style.marginBottom = "8px";
         btn.onclick = (e) => { e.stopPropagation(); openAttendanceModal(cls, today); };
         attSection.appendChild(btn);
