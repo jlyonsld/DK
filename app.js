@@ -68,10 +68,11 @@
    * anything — they only hide UI that would fail RLS anyway. All real
    * enforcement happens server-side via RLS on Supabase.
    *
-   * T1 scope: UI gating only. The RLS policies on templates/categories/
-   * infographics still require is_admin() for writes, so manager +
-   * viewer are effectively read-only in the console. Extending RLS for
-   * manager write access is deferred to T1.5 or T6.
+   * T1.5 scope: managers can write templates, categories, infographics,
+   * teachers, classes, class_teachers, closures. RLS gates those tables
+   * on has_permission('edit_<resource>') so per-user grants/revocations
+   * work uniformly. Viewer stays read-only. class_infographics and
+   * teacher_invitations remain admin-only.
    */
 
   const PERM_BUNDLES = {
@@ -79,7 +80,7 @@
       "manage_billing","manage_super_admins","manage_admins",
       "manage_org","hard_delete","manage_users",
       "edit_classes","edit_teachers","edit_students","edit_enrollments","edit_attendance",
-      "edit_templates","edit_categories","edit_infographics",
+      "edit_templates","edit_categories","edit_infographics","edit_closures",
       "view_pay_rates","view_billing_status","view_parent_contact",
       "run_jackrabbit_sync","respond_to_leads",
       "reconcile_students"
@@ -87,13 +88,14 @@
     admin: [
       "manage_users",
       "edit_classes","edit_teachers","edit_students","edit_enrollments","edit_attendance",
-      "edit_templates","edit_categories","edit_infographics",
+      "edit_templates","edit_categories","edit_infographics","edit_closures",
       "view_pay_rates","view_billing_status","view_parent_contact",
       "run_jackrabbit_sync","respond_to_leads",
       "reconcile_students"
     ],
     manager: [
       "edit_templates","edit_categories","edit_infographics",
+      "edit_classes","edit_teachers","edit_closures",
       "respond_to_leads",
       "view_classes_readonly","view_teachers_readonly",
       "view_students_readonly","view_enrollments_readonly"
@@ -143,10 +145,6 @@
     if (!role) return false;
     return (ROLE_TAB_VISIBILITY[role] || new Set()).has(tab);
   }
-
-  // True for admin+super_admin: can mutate classes/teachers/templates/etc.
-  // via RLS. In T1, manager and viewer can't mutate anything server-side.
-  function canMutate() { return isAdminOrAbove(); }
 
   // Friendly role label
   function roleLabel(r) {
@@ -1241,10 +1239,10 @@
   function renderQuickActionsCard() {
     // Only show actions the current role can actually perform server-side.
     const actions = [];
-    if (hasPerm("edit_templates")     && canMutate()) actions.push({ key: "new-template",  icon: "＋",   label: "New template" });
-    if (hasPerm("run_jackrabbit_sync") && canMutate()) actions.push({ key: "sync-jr",      icon: "⟳",   label: "Sync Jackrabbit" });
-    if (hasPerm("edit_teachers")      && canMutate()) actions.push({ key: "new-teacher",   icon: "🧑‍🏫", label: "New teacher" });
-    if (hasPerm("edit_teachers")      && canMutate()) actions.push({ key: "refresh-par",   icon: "↻",   label: "Refresh PAR links" });
+    if (hasPerm("edit_templates"))      actions.push({ key: "new-template",  icon: "＋",   label: "New template" });
+    if (hasPerm("run_jackrabbit_sync")) actions.push({ key: "sync-jr",      icon: "⟳",   label: "Sync Jackrabbit" });
+    if (hasPerm("edit_teachers"))       actions.push({ key: "new-teacher",   icon: "🧑‍🏫", label: "New teacher" });
+    if (hasPerm("edit_teachers"))       actions.push({ key: "refresh-par",   icon: "↻",   label: "Refresh PAR links" });
 
     if (actions.length === 0) {
       return `
@@ -1365,7 +1363,7 @@
 
     // Top-right "New template" header button — only when we can actually edit
     const newTplBtn = $("#newTemplateBtn");
-    if (newTplBtn) newTplBtn.style.display = hasPerm("edit_templates") && canMutate() ? "" : "none";
+    if (newTplBtn) newTplBtn.style.display = hasPerm("edit_templates") ? "" : "none";
 
     // Per-tab header action buttons
     const newClassBtn      = $("#newClassBtn");
@@ -1375,21 +1373,21 @@
     const newCategoryBtn   = $("#newCategoryBtn");
     const newInfographicBtn = $("#newInfographicBtn");
 
-    if (newClassBtn)       newClassBtn.style.display       = hasPerm("edit_classes")      && canMutate() ? "" : "none";
-    if (syncJrBtn)         syncJrBtn.style.display         = hasPerm("run_jackrabbit_sync") && canMutate() ? "" : "none";
-    if (newTeacherBtn)     newTeacherBtn.style.display     = hasPerm("edit_teachers")     && canMutate() ? "" : "none";
-    if (refreshParBtn)     refreshParBtn.style.display     = hasPerm("edit_teachers")     && canMutate() ? "" : "none";
-    if (newCategoryBtn)    newCategoryBtn.style.display    = hasPerm("edit_categories")   && canMutate() ? "" : "none";
-    if (newInfographicBtn) newInfographicBtn.style.display = hasPerm("edit_infographics") && canMutate() ? "" : "none";
+    if (newClassBtn)       newClassBtn.style.display       = hasPerm("edit_classes")       ? "" : "none";
+    if (syncJrBtn)         syncJrBtn.style.display         = hasPerm("run_jackrabbit_sync") ? "" : "none";
+    if (newTeacherBtn)     newTeacherBtn.style.display     = hasPerm("edit_teachers")      ? "" : "none";
+    if (refreshParBtn)     refreshParBtn.style.display     = hasPerm("edit_teachers")      ? "" : "none";
+    if (newCategoryBtn)    newCategoryBtn.style.display    = hasPerm("edit_categories")    ? "" : "none";
+    if (newInfographicBtn) newInfographicBtn.style.display = hasPerm("edit_infographics")  ? "" : "none";
 
-    // "Invite user" is admin+ only (manager/viewer/teacher never see it)
+    // "Invite user" is admin+ only — creating teacher invitations calls
+    // PAR's spoke-create-org-invitation and is out of scope for managers.
     const inviteUserBtn = $("#inviteUserBtn");
-    if (inviteUserBtn) inviteUserBtn.style.display = canMutate() ? "" : "none";
+    if (inviteUserBtn) inviteUserBtn.style.display = isAdminOrAbove() ? "" : "none";
 
-    // Closures are admin+ only (manager/viewer can see the Schedule view but
-    // can't manage closures — only add/remove via the modal)
+    // Closures: managers can manage them in T1.5 (academic-calendar work).
     const schedManageClosures = $("#schedManageClosures");
-    if (schedManageClosures) schedManageClosures.style.display = canMutate() ? "" : "none";
+    if (schedManageClosures) schedManageClosures.style.display = hasPerm("edit_closures") ? "" : "none";
   }
 
   /* ═════════════ SCHEDULE (Day / Week / Month) ═════════════
@@ -1929,7 +1927,7 @@
     const categoryLabel = (state.categories.find((c) => c.id === tpl.category_id) || {}).label || "—";
     const tagLine = (tpl.tags || []).slice(0, 4).map((t) => "#" + t).join(" ");
 
-    const showEditBtns = hasPerm("edit_templates") && canMutate();
+    const showEditBtns = hasPerm("edit_templates");
     card.innerHTML = `
       <div class="card-head">
         <div style="flex:1">
@@ -2285,7 +2283,7 @@
     $("#classMeta").innerHTML = visible.length + (visible.length === 1 ? " class" : " classes") +
       (testCount > 0 ? ` <span style="color:var(--ink-dim)">· ${testCount} test class${testCount === 1 ? "" : "es"} hidden</span>`.replace("hidden", showTest ? "shown" : "hidden") : "");
 
-    const showClassEdit = hasPerm("edit_classes") && canMutate();
+    const showClassEdit = hasPerm("edit_classes");
     const typeLabel = { weekly: "Weekly", camp: "Camp", workshop: "Workshop", contracted: "Contracted" };
     const fmtSync = (ts) => {
       if (!ts) return '<span style="color:var(--ink-dim);font-size:11px">—</span>';
@@ -3762,8 +3760,8 @@
       (state.teachers.length ? ` <span style="color:var(--ink-dim)">· ${active} active${parLinked ? ` · ${parLinked} PAR-linked` : ""}${resolvable ? ` · ${resolvable} pending PAR check` : ""}</span>` : "");
 
     const showPay    = hasPerm("view_pay_rates");
-    const showEdit   = hasPerm("edit_teachers") && canMutate();
-    const showInvite = canMutate();
+    const showEdit   = hasPerm("edit_teachers");
+    const showInvite = isAdminOrAbove();
     const colCount = 4 + (showPay ? 1 : 0) + (showEdit || showInvite ? 1 : 0);
 
     const rows = state.teachers.map((t) => {
@@ -4103,7 +4101,7 @@
   function renderCategoriesTab() {
     const wrap = $("#categoryList");
     wrap.innerHTML = "";
-    const showEdit = hasPerm("edit_categories") && canMutate();
+    const showEdit = hasPerm("edit_categories");
     state.categories.forEach((cat) => {
       const used = state.templates.filter((t) => t.category_id === cat.id).length;
       const row = document.createElement("div");
@@ -4236,7 +4234,7 @@
   function renderInfographicsTab() {
     const el = $("#infographicsTable");
     $("#igManageMeta").textContent = state.infographics.length + " image" + (state.infographics.length === 1 ? "" : "s");
-    const showEdit = hasPerm("edit_infographics") && canMutate();
+    const showEdit = hasPerm("edit_infographics");
     const colCount = 4 + (showEdit ? 1 : 0);
     const rows = state.infographics.map((i) => {
       const src = i.storage_path ? publicUrlFor(i.storage_path) : i.external_url;

@@ -358,7 +358,7 @@ Body gets `padding-bottom: calc(76px + env(safe-area-inset-bottom))` at ≤720px
 
 ### Half-built / deferred by phase
 
-- **Phase T1.5 — manager write access.** Strategy doc says managers should be able to edit templates/categories/infographics. RLS on those tables currently checks `is_admin()`, which excludes managers. UI gating treats them as read-only to match. Fix is a small migration extending those three tables' INSERT/UPDATE/DELETE policies to also allow `role = 'manager' AND has_permission('edit_templates')`. Untouched.
+- **Phase T1.5 — manager write access.** ✅ **Shipped.** Managers can write templates, categories, infographics, teachers, classes, class_teachers, and closures. RLS on those 7 tables was swapped from `is_admin()` to `has_permission('edit_<resource>')`, and the manager bundle gained `edit_classes`, `edit_teachers`, plus a new `edit_closures` permission. `class_infographics`, `teacher_invitations`, `dk_config`, and `profiles.role` stay admin-only. The Reports tab stays admin-only via ROLE_TAB_VISIBILITY. See `migrations/phase_t1_5_manager_writes.sql` and `T1_5_VERIFICATION.md`.
 
 - **Phase T3 — attendance + clock-in/out + reports.** ✅ **All shipped.** Teachers and admins take per-session attendance (Present/Absent + late-pickup minutes) and clock in/out per class via the class detail panel or the teacher bento cards. Admin-only **Reports** tab ships with two entries: **Attendance** (summary, per-class breakdown, late-pickup log + CSV for billing) and **Teacher hours** (per-teacher payroll roll-up, shift log + CSV for payroll). See §4.13 – §4.16.
 
@@ -422,7 +422,7 @@ JACKRABBIT_ORG_ID                # "551000" for the Charleston franchise
 |---|---|
 | T0 — Role schema foundation | ✅ Shipped |
 | T1 — UI gating by role | ✅ Shipped |
-| T1.5 — Manager write RLS | 🔲 Not started |
+| T1.5 — Manager write RLS | ✅ Shipped |
 | T2 — Teacher invitation flow (code-complete) | ✅ Shipped, awaiting Sharon's PAR setup |
 | Spoke install-flow platform (Phase A + B) | ✅ Shipped, awaiting Sharon's PAR setup |
 | Schedule tab (Day / Week / Month) + closures | ✅ Shipped |
