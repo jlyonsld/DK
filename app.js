@@ -34,6 +34,7 @@
     students: [],
     enrollments: [],
     attendance: [],         // attendance rows (enrollment-scoped); RLS-filtered per role
+    clockIns: [],           // clock_ins rows; teacher sees own, admin sees all
     matchCandidates: [],    // unresolved student_match_candidates rows (admin-visible)
     teacherInvitations: [],
     closures: [],
@@ -364,7 +365,7 @@
     const tablesToWatch = [
       "profiles", "categories", "templates", "classes", "infographics",
       "teachers", "class_teachers", "class_infographics",
-      "students", "enrollments", "attendance", "sync_log",
+      "students", "enrollments", "attendance", "clock_ins", "sync_log",
       "teacher_invitations", "dk_config", "closures",
       "student_match_candidates"
     ];
@@ -517,7 +518,7 @@
   async function reloadAll() {
     showLoader(true);
     try {
-      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches, att] = await Promise.all([
+      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches, att, clk] = await Promise.all([
         sb.from("categories").select("*").order("sort_order", { ascending: true }),
         sb.from("templates").select("*").order("created_at", { ascending: true }),
         sb.from("classes").select("*").order("name", { ascending: true }),
@@ -532,7 +533,8 @@
         sb.from("closures").select("*").order("date", { ascending: true }),
         sb.from("sync_log").select("*").eq("source", "jackrabbit").eq("operation", "pull_openings").order("created_at", { ascending: false }).limit(1).maybeSingle(),
         sb.from("student_match_candidates").select("*").is("resolved_at", null).order("detected_at", { ascending: false }),
-        sb.from("attendance").select("*").order("session_date", { ascending: false })
+        sb.from("attendance").select("*").order("session_date", { ascending: false }),
+        sb.from("clock_ins").select("*").order("session_date", { ascending: false })
       ]);
       for (const r of [cats, tpls, cls, igs, tch, ct, ci, stu, enr]) if (r.error) throw r.error;
       // Non-admin roles may not have SELECT access to teacher_invitations /
@@ -557,6 +559,9 @@
       // managers/viewers read via view_attendance_readonly. Any error falls back
       // to empty — "coming soon"-style UI still renders.
       state.attendance       = (att && !att.error) ? att.data : [];
+      // Clock-ins RLS: admins read all, teachers read own rows. Errors
+      // (e.g. managers/viewers without perm) fall back to empty.
+      state.clockIns         = (clk && !clk.error) ? clk.data : [];
     } catch (e) {
       console.error(e);
       showToast("Failed to load: " + e.message, "error");
@@ -742,6 +747,7 @@
       <div class="bento-card bento-span-4">${renderTeacherWeekStatsCard(myClasses.length, weekCount)}</div>
       <div class="bento-card bento-span-8">${renderTeacherScheduleCard(todayClasses, now)}</div>
       <div class="bento-card bento-span-4">${renderTeacherAttendanceCard(todayClasses, now)}</div>
+      <div class="bento-card bento-span-12">${renderTeacherShiftsCard(me, todayClasses, now)}</div>
       <div class="bento-card bento-span-8">${renderTeacherWelcomeCard(me)}</div>
       <div class="bento-card bento-span-4">${renderParBridgeCard()}</div>
     `;
@@ -876,6 +882,76 @@
       <div class="bento-label"><span>Today's attendance</span></div>
       <div>${rows}</div>
     `;
+  }
+
+  // T3d: Teacher shifts (clock-in / clock-out). One row per today's class
+  // showing current clock status and the action button. Clock in is idempotent
+  // server-side — the RPC returns the existing open shift if you tap twice.
+  function renderTeacherShiftsCard(me, todayClasses, now) {
+    if (!me || !todayClasses || todayClasses.length === 0) {
+      return `
+        <div class="bento-label"><span>Today's shifts</span></div>
+        <div class="bento-attention-empty" style="text-align:left;padding:8px 0">
+          <p style="margin:0;color:var(--ink-dim);font-size:12px">No classes today — nothing to clock.</p>
+        </div>
+      `;
+    }
+    const today = isoDate(new Date());
+    const rows = todayClasses.map(({ cls }) => {
+      const shift = state.clockIns.find(
+        (c) => c.teacher_id === me.id && c.class_id === cls.id && c.session_date === today
+      );
+      let status, action;
+      if (!shift) {
+        status = `<span style="color:var(--ink-dim)">Not clocked in</span>`;
+        action = `<button data-act="clock-in" data-class-id="${escapeHtml(cls.id)}"
+          class="btn primary small">Clock in</button>`;
+      } else if (!shift.clocked_out_at) {
+        const inTime = new Date(shift.clocked_in_at);
+        const mins = Math.max(0, Math.round((now - inTime) / 60000));
+        const timeStr = inTime.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+        status = `<span style="color:#2f7d3a">⏱ Clocked in at ${escapeHtml(timeStr)} · ${mins} min</span>`;
+        action = `<button data-act="clock-out" data-clock-id="${escapeHtml(shift.id)}"
+          class="btn small">Clock out</button>`;
+      } else {
+        const durMin = Math.max(0, Math.round(
+          (new Date(shift.clocked_out_at) - new Date(shift.clocked_in_at)) / 60000
+        ));
+        status = `<span style="color:var(--ink-dim)">✓ Done · ${durMin} min</span>`;
+        action = ``;
+      }
+      return `
+        <div style="display:flex;gap:10px;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border-subtle,#eee)">
+          <div style="flex:1;min-width:0">
+            <div style="font-weight:500">${escapeHtml(cls.name)}${cls.location ? ` <span style="color:var(--ink-dim);font-weight:400;font-size:12px">· ${escapeHtml(cls.location)}</span>` : ""}</div>
+            <div style="font-size:12px;margin-top:2px">${status}</div>
+          </div>
+          <div>${action}</div>
+        </div>
+      `;
+    }).join("");
+    return `
+      <div class="bento-label"><span>Today's shifts</span><span style="font-weight:400;color:var(--ink-dim);text-transform:none;letter-spacing:0">Tap to clock in or out</span></div>
+      <div>${rows}</div>
+    `;
+  }
+
+  async function doClockIn(classId) {
+    showLoader(true);
+    const { error } = await sb.rpc("clock_in", { p_class_id: classId });
+    showLoader(false);
+    if (error) { showToast("Clock in failed: " + error.message, "error"); return; }
+    await reloadAll(); renderAll();
+    showToast("Clocked in", "success");
+  }
+
+  async function doClockOut(clockInId) {
+    showLoader(true);
+    const { error } = await sb.rpc("clock_out", { p_clock_in_id: clockInId });
+    showLoader(false);
+    if (error) { showToast("Clock out failed: " + error.message, "error"); return; }
+    await reloadAll(); renderAll();
+    showToast("Clocked out", "success");
   }
 
   function renderTeacherComingSoonCard() {
@@ -1227,6 +1303,13 @@
         const cls = state.classes.find((c) => c.id === btn.dataset.classId);
         if (cls) openAttendanceModal(cls, isoDate(new Date()));
       };
+    });
+    // T3d: clock-in / clock-out CTAs on the teacher bento
+    $$('[data-act="clock-in"]', $("#bentoGrid")).forEach((btn) => {
+      btn.onclick = (e) => { e.stopPropagation(); doClockIn(btn.dataset.classId); };
+    });
+    $$('[data-act="clock-out"]', $("#bentoGrid")).forEach((btn) => {
+      btn.onclick = (e) => { e.stopPropagation(); doClockOut(btn.dataset.clockId); };
     });
   }
 
@@ -3013,6 +3096,7 @@
    */
   const REPORTS = [
     { id: "attendance", label: "Attendance", render: renderAttendanceReport },
+    { id: "teacher_hours", label: "Teacher hours", render: renderTeacherHoursReport },
   ];
 
   function ensureReportDateDefaults() {
@@ -3235,6 +3319,225 @@
       };
     });
     $("#rpt_export_csv").onclick = () => downloadLatePickupCsv(latePickups, s.start, s.end);
+  }
+
+  // T3d: Teacher hours report — per-teacher payroll roll-up + itemized log.
+  // Aggregates state.clockIns in [start, end]. Shifts without clocked_out_at
+  // are shown but excluded from totals (open shifts — not yet billable).
+  function renderTeacherHoursReport(host) {
+    const s = state.rptState;
+    const rows = state.clockIns.filter((c) => c.session_date >= s.start && c.session_date <= s.end);
+
+    const byTeacher = new Map(); // teacher_id -> { shifts, minutes, openShifts }
+    const byClass = new Map();
+    let totalShifts = 0, totalMinutes = 0, openShifts = 0;
+
+    for (const c of rows) {
+      totalShifts++;
+      if (!c.clocked_out_at) { openShifts++; continue; }
+      const mins = Math.max(0, Math.round((new Date(c.clocked_out_at) - new Date(c.clocked_in_at)) / 60000));
+      totalMinutes += mins;
+      let t = byTeacher.get(c.teacher_id);
+      if (!t) { t = { shifts: 0, minutes: 0 }; byTeacher.set(c.teacher_id, t); }
+      t.shifts++; t.minutes += mins;
+      if (c.class_id) {
+        let k = byClass.get(c.class_id);
+        if (!k) { k = { shifts: 0, minutes: 0 }; byClass.set(c.class_id, k); }
+        k.shifts++; k.minutes += mins;
+      }
+    }
+
+    const fmtHours = (mins) => {
+      const h = Math.floor(mins / 60);
+      const m = mins % 60;
+      return h > 0 ? `${h}h ${m}m` : `${m}m`;
+    };
+
+    const teacherRows = [...byTeacher.entries()]
+      .map(([tid, st]) => {
+        const t = state.teachers.find((x) => x.id === tid);
+        return { name: t ? t.full_name : "(unknown)", shifts: st.shifts, minutes: st.minutes };
+      })
+      .sort((a, b) => b.minutes - a.minutes);
+
+    const classRows = [...byClass.entries()]
+      .map(([cid, st]) => {
+        const c = state.classes.find((x) => x.id === cid);
+        return { name: c ? c.name : "(unknown class)", shifts: st.shifts, minutes: st.minutes };
+      })
+      .sort((a, b) => b.minutes - a.minutes);
+
+    // Itemized log (desc by date, then teacher)
+    const log = rows.map((c) => {
+      const t = state.teachers.find((x) => x.id === c.teacher_id);
+      const cls = c.class_id ? state.classes.find((x) => x.id === c.class_id) : null;
+      const dur = c.clocked_out_at
+        ? Math.max(0, Math.round((new Date(c.clocked_out_at) - new Date(c.clocked_in_at)) / 60000))
+        : null;
+      return {
+        date: c.session_date,
+        teacher: t ? t.full_name : "(unknown)",
+        className: cls ? cls.name : "(no class)",
+        clockedInAt: c.clocked_in_at,
+        clockedOutAt: c.clocked_out_at,
+        minutes: dur,
+      };
+    }).sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : a.teacher.localeCompare(b.teacher)));
+
+    const presetBtn = (label, days) =>
+      `<button data-rpt-preset="${days}" class="btn small">${escapeHtml(label)}</button>`;
+
+    host.innerHTML = `
+      <div style="display:flex;gap:8px;align-items:end;flex-wrap:wrap;padding:12px 0 16px;border-bottom:1px solid var(--border-subtle,#eee)">
+        <div class="field" style="flex:0 0 160px">
+          <label>From</label>
+          <input type="date" id="rpt_start" value="${escapeHtml(s.start)}" />
+        </div>
+        <div class="field" style="flex:0 0 160px">
+          <label>To</label>
+          <input type="date" id="rpt_end" value="${escapeHtml(s.end)}" />
+        </div>
+        <div style="display:flex;gap:4px">
+          ${presetBtn("Last 7d", 7)}
+          ${presetBtn("Last 30d", 30)}
+          ${presetBtn("Last 90d", 90)}
+        </div>
+        <div style="flex:1"></div>
+        <button class="btn small" id="rpt_export_hours_csv">Export CSV (itemized)</button>
+      </div>
+
+      <div style="margin-top:16px">
+        <div class="section-title">Summary</div>
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;padding:12px 0">
+          ${[
+            ["Shifts", totalShifts, ""],
+            ["Total hours", fmtHours(totalMinutes), ""],
+            ["Teachers", teacherRows.length, ""],
+            ["Open shifts", openShifts, openShifts > 0 ? "#a36a00" : ""],
+          ].map(([k, v, col]) => `
+            <div style="padding:10px 12px;background:var(--surface-alt,#f5f4ef);border-radius:8px">
+              <div style="font-size:11px;color:var(--ink-dim);text-transform:uppercase;letter-spacing:.5px">${escapeHtml(k)}</div>
+              <div style="font-size:22px;font-weight:600;margin-top:2px;${col ? `color:${col}` : ""}">${v}</div>
+            </div>
+          `).join("")}
+        </div>
+      </div>
+
+      <div style="margin-top:16px">
+        <div class="section-title">By teacher <span style="font-weight:400;color:var(--ink-dim);text-transform:none;letter-spacing:0">(payroll roll-up)</span></div>
+        ${teacherRows.length === 0 ? '<div style="padding:12px 0;color:var(--ink-dim);font-size:12.5px">No completed shifts in this range.</div>' : `
+          <table style="width:100%;border-collapse:collapse;font-size:12.5px">
+            <thead>
+              <tr style="text-align:left;color:var(--ink-dim);border-bottom:1px solid var(--border)">
+                <th style="padding:6px 8px;font-weight:600">Teacher</th>
+                <th style="padding:6px 8px;font-weight:600;text-align:right">Shifts</th>
+                <th style="padding:6px 8px;font-weight:600;text-align:right">Hours</th>
+                <th style="padding:6px 8px;font-weight:600;text-align:right">Minutes</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${teacherRows.map((r) => `
+                <tr style="border-bottom:1px solid var(--border-subtle,#eee)">
+                  <td style="padding:6px 8px">${escapeHtml(r.name)}</td>
+                  <td style="padding:6px 8px;text-align:right">${r.shifts}</td>
+                  <td style="padding:6px 8px;text-align:right">${escapeHtml(fmtHours(r.minutes))}</td>
+                  <td style="padding:6px 8px;text-align:right">${r.minutes}</td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        `}
+      </div>
+
+      <div style="margin-top:16px">
+        <div class="section-title">By class</div>
+        ${classRows.length === 0 ? '<div style="padding:12px 0;color:var(--ink-dim);font-size:12.5px">No completed shifts tied to a class.</div>' : `
+          <table style="width:100%;border-collapse:collapse;font-size:12.5px">
+            <thead>
+              <tr style="text-align:left;color:var(--ink-dim);border-bottom:1px solid var(--border)">
+                <th style="padding:6px 8px;font-weight:600">Class</th>
+                <th style="padding:6px 8px;font-weight:600;text-align:right">Shifts</th>
+                <th style="padding:6px 8px;font-weight:600;text-align:right">Hours</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${classRows.map((r) => `
+                <tr style="border-bottom:1px solid var(--border-subtle,#eee)">
+                  <td style="padding:6px 8px">${escapeHtml(r.name)}</td>
+                  <td style="padding:6px 8px;text-align:right">${r.shifts}</td>
+                  <td style="padding:6px 8px;text-align:right">${escapeHtml(fmtHours(r.minutes))}</td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        `}
+      </div>
+
+      <div style="margin-top:16px">
+        <div class="section-title">Shift log <span style="font-weight:400;color:var(--ink-dim);text-transform:none;letter-spacing:0">(${log.length} shifts)</span></div>
+        ${log.length === 0 ? '<div style="padding:12px 0;color:var(--ink-dim);font-size:12.5px">No shifts in this range.</div>' : `
+          <table style="width:100%;border-collapse:collapse;font-size:12.5px">
+            <thead>
+              <tr style="text-align:left;color:var(--ink-dim);border-bottom:1px solid var(--border)">
+                <th style="padding:6px 8px;font-weight:600">Date</th>
+                <th style="padding:6px 8px;font-weight:600">Teacher</th>
+                <th style="padding:6px 8px;font-weight:600">Class</th>
+                <th style="padding:6px 8px;font-weight:600">In</th>
+                <th style="padding:6px 8px;font-weight:600">Out</th>
+                <th style="padding:6px 8px;font-weight:600;text-align:right">Duration</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${log.map((r) => `
+                <tr style="border-bottom:1px solid var(--border-subtle,#eee)">
+                  <td style="padding:6px 8px;white-space:nowrap">${escapeHtml(new Date(r.date + "T00:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }))}</td>
+                  <td style="padding:6px 8px">${escapeHtml(r.teacher)}</td>
+                  <td style="padding:6px 8px">${escapeHtml(r.className)}</td>
+                  <td style="padding:6px 8px;white-space:nowrap">${escapeHtml(new Date(r.clockedInAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }))}</td>
+                  <td style="padding:6px 8px;white-space:nowrap">${r.clockedOutAt ? escapeHtml(new Date(r.clockedOutAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })) : '<span style="color:#a36a00">open</span>'}</td>
+                  <td style="padding:6px 8px;text-align:right;${r.minutes == null ? 'color:#a36a00' : ''}">${r.minutes == null ? "—" : escapeHtml(fmtHours(r.minutes))}</td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        `}
+      </div>
+    `;
+
+    $("#rpt_start").onchange = (e) => { state.rptState.start = e.target.value; renderReportsTab(); };
+    $("#rpt_end").onchange   = (e) => { state.rptState.end   = e.target.value; renderReportsTab(); };
+    host.querySelectorAll("[data-rpt-preset]").forEach((b) => {
+      b.onclick = () => {
+        const days = parseInt(b.dataset.rptPreset, 10);
+        const today = new Date();
+        const start = new Date(today); start.setDate(start.getDate() - (days - 1));
+        state.rptState.start = isoDate(start);
+        state.rptState.end   = isoDate(today);
+        renderReportsTab();
+      };
+    });
+    $("#rpt_export_hours_csv").onclick = () => downloadTeacherHoursCsv(log, s.start, s.end);
+  }
+
+  function downloadTeacherHoursCsv(rows, start, end) {
+    const esc = (v) => {
+      const s = String(v == null ? "" : v);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const header = ["Date","Teacher","Class","ClockedInAt","ClockedOutAt","Minutes"].join(",");
+    const body = rows.map((r) => [
+      r.date, r.teacher, r.className, r.clockedInAt, r.clockedOutAt || "", r.minutes == null ? "" : r.minutes
+    ].map(esc).join(",")).join("\n");
+    const csv = header + "\n" + body + "\n";
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `teacher-hours-${start}-to-${end}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   }
 
   function downloadLatePickupCsv(rows, start, end) {
