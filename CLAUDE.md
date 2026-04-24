@@ -188,9 +188,16 @@ Every mutation handler calls `reloadAll() + renderAll()` — never a partial re-
 
 `PERM_BUNDLES` in `app.js` is a literal copy of the `has_permission()` SQL function's per-role permission list. The client uses `hasPerm('edit_templates')` to decide whether to show the Edit button; the server enforces the same check via RLS policies that call `is_admin()` or `has_permission()`. They agree line-for-line. **If you change one, change the other.** Otherwise the UI will show buttons that fail with RLS errors, which is the worst kind of broken (user confused, no clear diagnostic).
 
-### 4.5 `is_admin()` was redefined, not replaced, to preserve 33 RLS policies
+### 4.5 `is_admin()` was redefined, not replaced — and is being gradually retired in favor of `has_permission()`
 
-Phase T0 expanded roles from `{admin, teacher}` to `{super_admin, admin, manager, teacher, viewer}`. Instead of rewriting every existing RLS policy, we redefined `is_admin()` to match both `super_admin` AND `admin`. Every pre-existing policy that gated writes with `using (is_admin())` continued to work for super_admins without change. Don't "fix" `is_admin()` to mean only `admin` — it'd break 33 policies silently. See `migrations/phase_t0_role_foundation.sql` for the full story.
+Phase T0 expanded roles from `{admin, teacher}` to `{super_admin, admin, manager, teacher, viewer}`. Instead of rewriting every existing RLS policy, we redefined `is_admin()` to match both `super_admin` AND `admin`. Every pre-existing policy that gated writes with `using (is_admin())` continued to work for super_admins without change. Don't "fix" `is_admin()` to mean only `admin` — it still gates the remaining admin-only tables (`class_infographics`, `teacher_invitations`, `dk_config`, `role_audit`, `install_nonces`, etc.) and would break those silently.
+
+Subsequent phases migrate specific write scopes off `is_admin()` onto `has_permission('edit_<resource>')`, a scope at a time:
+
+- **T3 (attendance / students / enrollments / clock_ins)** already use `has_permission()` with teacher-scoped conditions (see `migrations/phase_t3[a-d]_*.sql`).
+- **T1.5 (templates / categories / infographics / teachers / classes / class_teachers / closures)** swapped from `is_admin()` to `has_permission('edit_<resource>')` so managers can write them (see `migrations/phase_t1_5_manager_writes.sql`). Admin and super_admin kept the same permissions via their bundles; the swap is a strict superset.
+
+The pattern lets us extend per-user grants/revocations (via `profiles.granted_permissions` / `revoked_permissions`) uniformly wherever a table has been migrated off `is_admin()`. See `migrations/phase_t0_role_foundation.sql` for the original `is_admin()` / `has_permission()` definitions.
 
 ### 4.6 Teacher invitations pass through PAR's `org_invitations`, not DK's
 
@@ -306,7 +313,7 @@ Body gets `padding-bottom: calc(76px + env(safe-area-inset-bottom))` at ≤720px
 
 ## 5. Gotchas, quirks, and "don't touch this"
 
-**`is_admin()` matches super_admin OR admin.** See §4.5. Don't refactor it to mean just admin. It's called by 33 RLS policies.
+**`is_admin()` matches super_admin OR admin.** See §4.5. Don't refactor it to mean just admin — it still gates the admin-only residue (`class_infographics`, `teacher_invitations`, `dk_config`, `role_audit`, `install_nonces`, etc.) that T3 and T1.5 didn't migrate to `has_permission()`.
 
 **`PERM_BUNDLES` in `app.js` ↔ `has_permission()` in SQL must stay byte-identical.** Any role/permission change requires editing both. If they drift, the UI lies about what the user can do.
 
