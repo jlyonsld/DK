@@ -210,6 +210,32 @@
     <footer>
       PAR DK · Response Console · <code>v3.1</code> · Federating with PAR
     </footer>
+
+    <!-- Mobile bottom navigation (≤720px only — CSS-gated). Mirrors PAR's
+         lower menu: Home · Schedule · Tools (elevated) · Classes · Teachers.
+         Tools opens a bottom sheet listing Templates / Categories /
+         Infographics / Reports (and future tool views). -->
+    <nav class="mobile-tabbar" id="mobileTabbar" aria-label="Primary">
+      <button class="mtab active" data-tab="home" type="button">
+        <span class="mtab-ico" aria-hidden="true">⌂</span>
+        <span class="mtab-label">Home</span>
+      </button>
+      <button class="mtab" data-tab="schedule" type="button">
+        <span class="mtab-ico" aria-hidden="true">🗓</span>
+        <span class="mtab-label">Schedule</span>
+      </button>
+      <button class="mtab mtab-center" id="mobileToolsBtn" type="button" aria-label="Open tools menu">
+        <span class="mtab-ico" aria-hidden="true">☰</span>
+      </button>
+      <button class="mtab" data-tab="classes" type="button">
+        <span class="mtab-ico" aria-hidden="true">🎭</span>
+        <span class="mtab-label">Classes</span>
+      </button>
+      <button class="mtab" data-tab="teachers" type="button">
+        <span class="mtab-ico" aria-hidden="true">👥</span>
+        <span class="mtab-label">Teachers</span>
+      </button>
+    </nav>
   </div>
 
   <!-- ═══════════════════════════ MODALS ════════════════════════════════ -->
@@ -585,6 +611,34 @@
         <button class="btn danger small" id="reconcileDelete" style="margin-right:auto">Delete DK-only</button>
         <button class="btn" id="reconcileKeep">Keep separate</button>
         <button class="btn primary" id="reconcileLink">Link</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Mobile Tools bottom sheet (≤720px) — opened by .mtab-center button -->
+  <div class="mobile-tools-overlay" id="mobileToolsOverlay" role="dialog" aria-label="Tools" aria-modal="true">
+    <div class="mobile-tools-sheet">
+      <div class="mobile-tools-head">
+        <h3>Tools</h3>
+        <button class="btn ghost small" id="mobileToolsClose" type="button">✕</button>
+      </div>
+      <div class="mobile-tools-list">
+        <button class="mobile-tools-item" data-tab="templates" type="button">
+          <span class="mobile-tools-ico" aria-hidden="true">📝</span>
+          <span>Templates</span>
+        </button>
+        <button class="mobile-tools-item" data-tab="categories" type="button">
+          <span class="mobile-tools-ico" aria-hidden="true">🏷</span>
+          <span>Categories</span>
+        </button>
+        <button class="mobile-tools-item" data-tab="infographics" type="button">
+          <span class="mobile-tools-ico" aria-hidden="true">🖼</span>
+          <span>Infographics</span>
+        </button>
+        <button class="mobile-tools-item" data-tab="reports" type="button">
+          <span class="mobile-tools-ico" aria-hidden="true">📊</span>
+          <span>Reports</span>
+        </button>
       </div>
     </div>
   </div>

@@ -2134,3 +2134,139 @@ footer code {
 
   .header-actions .btn.primary { padding: 6px 10px; font-size: 12px; }
 }
+
+/* ═════════════ Mobile bottom nav (≤720px) — mirrors PAR's lower menu ═════════════
+ * Hidden by default; shown only on narrow viewports. Replaces the horizontal
+ * tab bar when CSS hides .tabs at ≤720px (see below).
+ * Slots: Home | Schedule | Tools (elevated) | Classes | Teachers.
+ * Tools opens .mobile-tools-overlay as a bottom sheet.
+ */
+.mobile-tabbar     { display: none; }
+.mobile-tools-overlay { display: none; }
+
+@media (max-width: 720px) {
+  /* Replace the top tabs with the bottom bar */
+  .tabs { display: none !important; }
+
+  /* Clear space so page content isn't hidden under the fixed bar */
+  body { padding-bottom: calc(76px + env(safe-area-inset-bottom)); }
+
+  .mobile-tabbar {
+    display: flex;
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    z-index: 40;
+    background: var(--panel-solid);
+    border-top: 1px solid var(--border);
+    padding: 8px 10px calc(8px + env(safe-area-inset-bottom));
+    justify-content: space-evenly;
+    align-items: center;
+    gap: 4px;
+    box-shadow: 0 -6px 20px rgba(0, 0, 0, 0.3);
+  }
+
+  .mtab {
+    appearance: none;
+    -webkit-appearance: none;
+    background: transparent;
+    border: 0;
+    color: var(--ink-dim);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    padding: 6px 10px;
+    min-width: 56px;
+    min-height: 44px;
+    font: 500 10px/1.2 system-ui, -apple-system, sans-serif;
+    cursor: pointer;
+    transition: color 0.15s;
+  }
+  .mtab .mtab-ico   { font-size: 20px; line-height: 1; }
+  .mtab .mtab-label { white-space: nowrap; }
+  .mtab:hover       { color: var(--ink); }
+  .mtab.active      { color: var(--accent); }
+
+  /* Elevated circular center slot — the Tools hamburger */
+  .mtab.mtab-center {
+    background: var(--accent-solid);
+    color: #fff;
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    margin-top: -22px;
+    padding: 0;
+    gap: 0;
+    box-shadow: 0 6px 18px rgba(16, 185, 129, 0.4),
+                0 0 0 4px var(--panel-solid);
+  }
+  .mtab.mtab-center .mtab-ico { font-size: 24px; }
+  .mtab.mtab-center:hover     { color: #fff; background: var(--accent); }
+
+  /* Tools bottom sheet */
+  .mobile-tools-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    z-index: 60;
+    align-items: flex-end;
+    justify-content: center;
+    backdrop-filter: blur(2px);
+  }
+  .mobile-tools-overlay.show { display: flex; }
+
+  .mobile-tools-sheet {
+    background: var(--panel-solid);
+    border-top: 1px solid var(--border);
+    border-top-left-radius: 18px;
+    border-top-right-radius: 18px;
+    width: 100%;
+    padding: 14px 14px calc(20px + env(safe-area-inset-bottom));
+    max-height: 75vh;
+    overflow: auto;
+    animation: mobileToolsSlideUp 180ms ease-out;
+  }
+  @keyframes mobileToolsSlideUp {
+    from { transform: translateY(12%); opacity: 0.6; }
+    to   { transform: translateY(0);    opacity: 1; }
+  }
+  .mobile-tools-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+  }
+  .mobile-tools-head h3 {
+    margin: 0;
+    font-size: 11px;
+    color: var(--ink-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 600;
+  }
+  .mobile-tools-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .mobile-tools-item {
+    appearance: none;
+    -webkit-appearance: none;
+    background: transparent;
+    border: 0;
+    color: var(--ink);
+    text-align: left;
+    padding: 14px 12px;
+    border-radius: 10px;
+    font: 500 15px system-ui, -apple-system, sans-serif;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .mobile-tools-item .mobile-tools-ico { font-size: 18px; width: 24px; text-align: center; }
+  .mobile-tools-item:hover  { background: var(--panel-raised); }
+  .mobile-tools-item.active { background: var(--accent-soft); color: var(--accent); }
+}

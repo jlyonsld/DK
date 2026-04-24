@@ -1334,7 +1334,7 @@
     // Route guard: if the role can't see this tab, fall back to home.
     if (!canSeeTab(tab)) tab = "home";
     state.router = tab;
-    $$(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === tab));
+    $$(".tab, .mtab[data-tab], .mobile-tools-item").forEach((t) => t.classList.toggle("active", t.dataset.tab === tab));
     $$(".tab-panel").forEach((p) => p.style.display = p.dataset.tab === tab ? "" : "none");
     $("#subBarTemplates").classList.toggle("hidden", tab !== "templates");
     const layout = document.querySelector(".layout");
@@ -1349,10 +1349,19 @@
    * once on boot. Re-render of tab/page content lives in renderAll().
    */
   function applyRoleVisibility() {
-    // Tab buttons
-    $$(".tab").forEach((t) => {
+    // Tab buttons (top bar + mobile bottom nav + mobile Tools sheet items)
+    $$(".tab, .mtab[data-tab], .mobile-tools-item").forEach((t) => {
       t.style.display = canSeeTab(t.dataset.tab) ? "" : "none";
     });
+
+    // Hide the Tools center slot when the role has no visible tool tabs.
+    // The mobile bar uses justify-content: space-evenly, so the remaining
+    // visible mtabs will center themselves naturally.
+    const toolsBtn = $("#mobileToolsBtn");
+    if (toolsBtn) {
+      const anyTool = ["templates","categories","infographics","reports"].some(canSeeTab);
+      toolsBtn.style.display = anyTool ? "" : "none";
+    }
 
     // Top-right "New template" header button — only when we can actually edit
     const newTplBtn = $("#newTemplateBtn");
@@ -4361,6 +4370,25 @@
   function wireEvents() {
     // Tabs
     $$(".tab").forEach((t) => t.onclick = () => go(t.dataset.tab));
+
+    // Mobile bottom nav — route tabs that carry data-tab directly.
+    $$(".mtab[data-tab]").forEach((t) => t.onclick = () => go(t.dataset.tab));
+
+    // Mobile Tools sheet — open, close (backdrop / ✕), and route on item tap.
+    const toolsOverlay = $("#mobileToolsOverlay");
+    const toolsBtn     = $("#mobileToolsBtn");
+    const toolsClose   = $("#mobileToolsClose");
+    if (toolsBtn && toolsOverlay) {
+      toolsBtn.onclick = () => toolsOverlay.classList.add("show");
+      toolsOverlay.addEventListener("click", (e) => {
+        if (e.target === toolsOverlay) toolsOverlay.classList.remove("show");
+      });
+      if (toolsClose) toolsClose.onclick = () => toolsOverlay.classList.remove("show");
+      $$(".mobile-tools-item").forEach((b) => b.onclick = () => {
+        toolsOverlay.classList.remove("show");
+        go(b.dataset.tab);
+      });
+    }
 
     // Search
     $("#search").addEventListener("input", (e) => { state.tState.query = e.target.value.trim(); renderTemplates(); });
