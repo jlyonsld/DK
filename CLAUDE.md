@@ -107,8 +107,11 @@ DK Optimization/
 │   │                                      reconcile_students RPC.
 │   ├── phase_t3b_attendance.sql         ← Attendance RLS + take_attendance
 │   │                                      RPC (enrollment-scoped).
-│   └── phase_t3c_late_pickup.sql        ← attendance.late_pickup_minutes
-│                                          + RPC persist.
+│   ├── phase_t3c_late_pickup.sql        ← attendance.late_pickup_minutes
+│   │                                      + RPC persist.
+│   └── phase_t3d_clock_in_out.sql       ← clock_ins table, clock_in /
+│                                          clock_out RPCs, teacher-scoped
+│                                          RLS, 2-day grace window.
 ├── edge-functions/           ← Deno sources for Edge Functions deployed to
 │   │                           DK's Supabase project.
 │   └── dk-invite-teacher/index.ts
@@ -149,6 +152,10 @@ attendance               — attendance records, enrollment-scoped (one row
                            See §4.14.
 student_match_candidates — flagged possible duplicates across sources;
                            admin resolves via reconcile_students RPC. See §4.13.
+clock_ins                — teacher shift timestamps (one row per
+                           teacher+class+day). Fed by the clock_in /
+                           clock_out RPCs. Feeds the "Teacher hours"
+                           report for payroll. See §4.16.
 infographics             — image assets in Supabase Storage bucket
 teacher_invitations      — DK-side mirror of PAR invitations (see §4.6)
 closures                 — holidays / non-class dates rendered on Schedule views
@@ -261,7 +268,25 @@ One row per `(enrollment_id, session_date)` enforced by unique index. Re-takes u
 
 ### 4.15 Reports tab is a pluggable registry
 
-Admin-only top-level tab. `app.js` has a `REPORTS` array of `{ id, label, render }` entries; `renderReportsTab()` builds the sub-nav from it and calls the active entry's render function against a shared `#reportContent` node. Adding a report = one entry + one function. v1 ships a single Attendance report (summary + per-class breakdown + late-pickup log + CSV export) that aggregates entirely client-side from `state.attendance` — no new queries.
+Admin-only top-level tab. `app.js` has a `REPORTS` array of `{ id, label, render }` entries; `renderReportsTab()` builds the sub-nav from it and calls the active entry's render function against a shared `#reportContent` node. Adding a report = one entry + one function. Ships with two entries:
+
+- **Attendance** — summary counts, per-class breakdown, late-pickup log, CSV export (billing source).
+- **Teacher hours** — shift summary, per-teacher payroll roll-up, per-class breakdown, itemized shift log, CSV export (payroll source).
+
+Both aggregate entirely client-side from `state.attendance` / `state.clockIns` — no new queries.
+
+### 4.16 Clock-in / clock-out is class-scoped and RPC-driven
+
+Teachers record shift start/end per class session via two security-invoker RPCs: `clock_in(class_id)` (idempotent — returns the existing open shift if called twice) and `clock_out(clock_in_id)` (errors if already closed). Both resolve `teacher_id` from `auth.jwt() ->> 'email'` → `teachers.email`, so a user with no matching `teachers` row can't clock in — including super_admins who aren't also teachers.
+
+UI surfaces:
+- **Teacher bento "Today's shifts" card** — one row per today's assigned class with Clock in / Clock out + live duration.
+- **Class detail panel** — a Clock in/out button next to "Take attendance for today" (visible to anyone with a matching `teachers` row, not just teachers-role users; admin-owners who also teach can clock in for their own classes).
+- **Reports → Teacher hours** — admin payroll view.
+
+`clock_ins` is keyed `(teacher_id, class_id, session_date)` via a partial unique index (`where class_id is not null`), which leaves the door open for future non-class shifts (prep, meetings) with a nullable `class_id`. v1 only surfaces class-tied shifts.
+
+Teachers write within the same 2-day grace window as attendance (§4.14). Admins unconstrained. The `clock_in_out` permission already lived in the teacher bundle from Phase T0; T3d just hooked RLS into it.
 
 ---
 
@@ -301,6 +326,10 @@ Admin-only top-level tab. `app.js` has a `REPORTS` array of `{ id, label, render
 
 **Classes' `times` field is parsed by a brittle regex.** See `parseClassDurationMinutes()` in `app.js`. If Jackrabbit ever changes its openings-feed time format, the week-view block heights break. We default to 60 min duration on parse failure, so it degrades gracefully.
 
+**Classes have two overlapping day/time columns: `days`+`times` (JR sync) vs. `day_time` (in-app editor).** JR populates structured `days` ("Mon, Wed") + `times` ("3:00 PM - 3:45 PM"); the class editor modal writes a single free-form `day_time` ("Fridays, 3:00–3:45 PM"). All three schedule helpers (`classRunsOnDay`, `classStartTimeOn`, `parseClassDurationMinutes`) check the JR columns first and fall back to `day_time`. Don't remove the fallback — any manually-added class disappears from the schedule if you do. A future cleanup could unify the columns, but matches CLAUDE.md §4.10's "string-based, not RRULE" principle as-is.
+
+**`includeTestClass(c)` honors the Classes-tab "Show test classes" toggle across bento + schedule.** Toggle is session-only (not persisted). When off (the default), test classes stay invisible across home bento, teacher bento, schedule views, and `classesForDate`. When on, they appear everywhere — useful for testing features like clock-in/out against seeded test classes without deploying real data.
+
 **Never use `(select email from auth.users where id = auth.uid())` in RLS policies.** The `authenticated` role lacks SELECT on `auth.users`, so any policy referencing it errors with "permission denied for table users" — and because multiple permissive policies are OR'd in a way that doesn't short-circuit on error, ONE broken policy on a table breaks INSERT/UPDATE for every role that has any policy there (even admins). Use `auth.jwt() ->> 'email'` — Supabase reads it straight off the JWT, no grant needed. All T3a/T3b teacher-scoped policies follow this pattern.
 
 **`take_attendance` RPC is `security invoker`, `reconcile_students` is `security definer`.** `take_attendance` wants RLS to fire per INSERT so teachers can't write outside their grace window via the RPC. `reconcile_students` needs to move enrollments for an admin even if RLS would otherwise restrict; it's gated with an explicit `has_permission('reconcile_students')` check at the top.
@@ -317,9 +346,7 @@ Admin-only top-level tab. `app.js` has a `REPORTS` array of `{ id, label, render
 
 - **Phase T1.5 — manager write access.** Strategy doc says managers should be able to edit templates/categories/infographics. RLS on those tables currently checks `is_admin()`, which excludes managers. UI gating treats them as read-only to match. Fix is a small migration extending those three tables' INSERT/UPDATE/DELETE policies to also allow `role = 'manager' AND has_permission('edit_templates')`. Untouched.
 
-- **Phase T3 — attendance.** ✅ **Attendance shipped.** Teachers and admins take per-session attendance (Present/Absent + late-pickup minutes) via the class detail panel or the "Today's attendance" card on the teacher bento. Admin-only **Reports** tab ships with an Attendance report: summary counts, per-class breakdown, itemized late-pickup log with CSV export for billing. See §4.13 – §4.15.
-
-- **Phase T3 — clock-in/out.** Still deferred. `clock_ins` table doesn't exist yet. Would pair well with attendance (shift timestamps for payroll) but is a separate concern from student attendance and was explicitly cut from T3 scope.
+- **Phase T3 — attendance + clock-in/out + reports.** ✅ **All shipped.** Teachers and admins take per-session attendance (Present/Absent + late-pickup minutes) and clock in/out per class via the class detail panel or the teacher bento cards. Admin-only **Reports** tab ships with two entries: **Attendance** (summary, per-class breakdown, late-pickup log + CSV for billing) and **Teacher hours** (per-teacher payroll roll-up, shift log + CSV for payroll). See §4.13 – §4.16.
 
 - **Phase T4 — sub requests / shift trades.** No schema. Strategy doc sketches `sub_requests` + `sub_claims` tables.
 
@@ -386,7 +413,7 @@ JACKRABBIT_ORG_ID                # "551000" for the Charleston franchise
 | Spoke install-flow platform (Phase A + B) | ✅ Shipped, awaiting Sharon's PAR setup |
 | Schedule tab (Day / Week / Month) + closures | ✅ Shipped |
 | Full responsive pass | ✅ Shipped |
-| T3 — Attendance UI + Reports tab | ✅ Shipped (clock-in/out still deferred) |
+| T3 — Attendance + clock-in/out + Reports tab | ✅ Shipped |
 | T4 — Sub requests / shift trades | 🔲 Not started |
 | T5 — Curriculum library | 🔲 Not started |
 | T6 — Role management UI + profiles.teacher_id | 🔲 Not started |
