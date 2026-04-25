@@ -105,6 +105,7 @@
         <button class="tab" data-tab="categories">Categories</button>
         <button class="tab" data-tab="infographics">Infographics</button>
         <button class="tab" data-tab="subrequests">Sub requests</button>
+        <button class="tab" data-tab="curriculum">Curriculum</button>
         <button class="tab" data-tab="reports">Reports</button>
       </div>
 
@@ -219,6 +220,27 @@
         <div class="tab-panel" data-tab="subrequests" style="display:none">
           <!-- Phase T4: sub requests / shift trades. The tab body is rendered
                by renderSubRequestsTab() in app.js into this empty panel. -->
+        </div>
+
+        <div class="tab-panel" data-tab="curriculum" style="display:none">
+          <div class="tab-head">
+            <div class="results-meta" id="curriculumMeta"></div>
+            <div style="display:flex; gap:8px; align-items:center;">
+              <select id="curriculumTypeFilter" class="select-inline" title="Filter by asset type">
+                <option value="all">All types</option>
+                <option value="pdf">PDFs</option>
+                <option value="video">Videos</option>
+                <option value="image">Images</option>
+                <option value="script">Scripts</option>
+                <option value="link">Links</option>
+              </select>
+              <label style="display:inline-flex; align-items:center; gap:6px; font-size:12px; color:var(--ink-dim); cursor:pointer;">
+                <input type="checkbox" id="curriculumShowArchived" /> Show archived
+              </label>
+              <button class="btn primary small" id="newCurriculumBtn">＋ New curriculum item</button>
+            </div>
+          </div>
+          <div class="data-table" id="curriculumTable"></div>
         </div>
 
         <div class="tab-panel" data-tab="reports" style="display:none">
@@ -794,6 +816,67 @@
     </div>
   </div>
 
+  <!-- Curriculum item editor (T5a) -->
+  <div class="modal-overlay" id="curriculumModalOverlay">
+    <div class="modal" style="max-width:560px">
+      <div class="modal-head">
+        <h3 id="curriculumModalTitle">New curriculum item</h3>
+        <button class="btn ghost small" id="curriculumModalClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="field">
+          <label>Title *</label>
+          <input type="text" id="cu_title" placeholder="e.g. Term 1 Week 3 — Improvisation warmups" />
+        </div>
+        <div class="field">
+          <label>Description</label>
+          <input type="text" id="cu_description" placeholder="Short summary teachers will see" />
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>Type *</label>
+            <select id="cu_asset_type">
+              <option value="pdf">PDF</option>
+              <option value="video">Video</option>
+              <option value="image">Image</option>
+              <option value="script">Script (rich text)</option>
+              <option value="link">External link</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Default lead time <span class="field-sub">(days before each session)</span></label>
+            <input type="number" id="cu_default_lead_days" min="0" max="60" value="7" />
+          </div>
+        </div>
+        <div class="field" id="cu_uploadField">
+          <label>File <span class="field-sub" id="cu_uploadHint">(PDF, max 25 MB)</span></label>
+          <input type="file" id="cu_file" />
+          <div class="field-hint" id="cu_currentFileLabel"></div>
+        </div>
+        <div class="field" id="cu_externalField" style="display:none">
+          <label>URL</label>
+          <input type="text" id="cu_external_url" placeholder="https://…" />
+          <div class="field-hint">For external Vimeo / Google Doc / corporate links. Watermarking can't be applied — use uploaded files for sensitive content.</div>
+        </div>
+        <div class="field" id="cu_scriptField" style="display:none">
+          <label>Script content</label>
+          <textarea id="cu_script_content" placeholder="Lesson script, dialog, blocking notes…" style="min-height:160px"></textarea>
+        </div>
+        <div class="field">
+          <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer">
+            <input type="checkbox" id="cu_dk_approved" />
+            <span>DK Corporate approved <span class="field-sub">(adds a verified badge)</span></span>
+          </label>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn danger small" id="cu_archiveBtn" style="margin-right:auto;display:none">Archive</button>
+        <button class="btn" id="curriculumCancel">Cancel</button>
+        <button class="btn primary" id="curriculumSave">Save</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Reconcile duplicate modal (admin resolves a student_match_candidate) -->
   <div class="modal-overlay" id="reconcileModalOverlay">
     <div class="modal" style="max-width:640px">
@@ -1048,6 +1131,10 @@
         <button class="mobile-tools-item" data-tab="subrequests" type="button">
           <span class="mobile-tools-ico" aria-hidden="true">🔄</span>
           <span>Sub requests</span>
+        </button>
+        <button class="mobile-tools-item" data-tab="curriculum" type="button">
+          <span class="mobile-tools-ico" aria-hidden="true">📚</span>
+          <span>Curriculum</span>
         </button>
         <button class="mobile-tools-item" data-tab="reports" type="button">
           <span class="mobile-tools-ico" aria-hidden="true">📊</span>

@@ -132,9 +132,16 @@ DK Optimization/
 │   │                                      RPC (enrollment-scoped).
 │   ├── phase_t3c_late_pickup.sql        ← attendance.late_pickup_minutes
 │   │                                      + RPC persist.
-│   └── phase_t3d_clock_in_out.sql       ← clock_ins table, clock_in /
-│                                          clock_out RPCs, teacher-scoped
-│                                          RLS, 2-day grace window.
+│   ├── phase_t3d_clock_in_out.sql       ← clock_ins table, clock_in /
+│   │                                      clock_out RPCs, teacher-scoped
+│   │                                      RLS, 2-day grace window.
+│   ├── phase_t4_sub_requests.sql        ← Sub requests + claims schema +
+│   │                                      RLS + RPCs. UI not yet built.
+│   └── phase_t5a_curriculum_library.sql ← curriculum_items table +
+│                                          private curriculum-assets
+│                                          bucket. New perms:
+│                                          edit_curriculum,
+│                                          assign_curriculum.
 ├── edge-functions/           ← Deno sources for Edge Functions deployed to
 │   │                           DK's Supabase project.
 │   └── dk-invite-teacher/index.ts
@@ -180,6 +187,12 @@ clock_ins                — teacher shift timestamps (one row per
                            clock_out RPCs. Feeds the "Teacher hours"
                            report for payroll. See §4.16.
 infographics             — image assets in Supabase Storage bucket
+curriculum_items         — DK-curated lesson library (PDFs, videos,
+                           images, scripts, links). Stored in the
+                           private `curriculum-assets` bucket. T5b
+                           adds curriculum_assignments + teacher
+                           visibility; T5c adds the watermarked
+                           viewer + audit log. See §4.20.
 teacher_invitations      — DK-side mirror of PAR invitations (see §4.6)
 schools                  — first-class school records with primary +
                            daily contacts. classes.school_id is the FK;
@@ -399,6 +412,18 @@ The notify modal (`openNotifyModal({ kind, cls, sessionDate, ... })`) handles th
 
 Permissions: schools and class_cancellations writes are gated on the existing `edit_classes` permission — no new permission name. Anyone signed in can SELECT both tables (the schedule needs cancellation data for every viewer to render line-throughs correctly).
 
+### 4.22 Curriculum library is private-by-default with three slices
+
+DK corporate is serious about access to its curriculum, so the library is built as a layered cake instead of a single feature. Each slice ships independently:
+
+- **T5a (✅ shipped):** `curriculum_items` table + admin/manager CRUD on the **Curriculum** tab. Five asset types — `pdf` / `video` / `image` / `script` / `link`. Items live in a private `curriculum-assets` Storage bucket (writes gated on `edit_curriculum`, **no SELECT policy at all** — direct browser reads of the bucket are blocked by RLS denying everything that isn't whitelisted). `default_lead_days` is admin-configurable per item; `dk_approved` is a soft badge. Two new permissions: `edit_curriculum` (admin/manager/super_admin) and `assign_curriculum` (same — managers can assign within scope per franchise direction).
+- **T5b (🔲 next):** `curriculum_assignments` table keyed `(curriculum_item_id, class_id, teacher_id)` with `lead_days` override. Admin/manager UI to assign items to specific teacher+class combos. Teacher home gets a locked-card view: items they're assigned to but whose lead window hasn't opened yet show a countdown chip; passed-window items unlock.
+- **T5c (🔲 final):** `curriculum_access_log` (append-only audit) + Edge Function `curriculum-fetch` (verify_jwt true) that gates every read — verifies assignment + lead-window + logs the access + returns a short-TTL signed URL. Plus the watermarked viewer: PDFs render via PDF.js, videos via `<video controlsList="nodownload">`, all wrapped in a CSS-tiled overlay with the teacher's name + email + timestamp, with `contextmenu` / `selectstart` / Cmd-S/P/C suppressed. None of this is unbreakable — but it makes any leaked screenshot trivially traceable, which is the corporate-sensitivity ask.
+
+**Lead-window is enforced at three layers, not RLS.** The user-confirmed semantic is "rolling per-session" (a teacher gets access N days before *each* upcoming session, not once at the start of the term). Encoding that in RLS would require evaluating the class's recurring `days`/`times` strings inside SQL — brittle and slow. So the gate lives in (a) the client UI (lock icons + countdown chips), (b) T5c's Edge Function (refuses to mint a signed URL until `now() >= next_session - lead_days`), and (c) the audit log (every fetched URL records who saw what when). RLS only verifies "an assignment exists" — read access alone tells corporate nothing without the access-log entry to match it.
+
+**Why three permissions instead of one.** `edit_curriculum` covers writes to the library. `assign_curriculum` is a separate gate so a future role split can give one person curating powers without hand-out powers, or vice versa. `view_own_curriculum` already lived in the teacher bundle from Phase T0 — T5b uses it.
+
 ---
 
 ## 5. Gotchas, quirks, and "don't touch this"
@@ -451,6 +476,8 @@ Permissions: schools and class_cancellations writes are gated on the existing `e
 
 **`sw.js` is pass-through, not caching.** It exists only to satisfy PWA install criteria (§4.18). Don't add caching casually — caching the static shell would gate Vercel deploys behind a SW registration update + reload, undoing the "push hits prod in ~30s" property the rest of this codebase relies on. If you genuinely need offline support, design versioning + a forced-update path first.
 
+**The `curriculum-assets` storage bucket has NO SELECT policy and that is intentional.** RLS on `storage.objects` is permissive — every read goes through whichever policies match. The T5a migration creates INSERT/UPDATE/DELETE policies scoped to this bucket but deliberately omits SELECT. With no matching SELECT policy, all direct browser reads of this bucket are denied. Reads happen exclusively via T5c's `curriculum-fetch` Edge Function using the service-role key (which bypasses RLS) after the function verifies an active assignment + lead-window. **Don't add a SELECT policy to this bucket** — it would let any teacher with a Supabase URL bypass the audit log and the lead-window gate. If the bucket ever needs admin-direct preview, do it through a dedicated Edge Function that still logs the access, not a SELECT policy.
+
 ---
 
 ## 6. Open issues and half-built features
@@ -465,7 +492,10 @@ Permissions: schools and class_cancellations writes are gated on the existing `e
 
 - **Phase T4 — sub requests / shift trades.** ✅ **Shipped.** Teachers (or admins on a teacher's behalf) open a `sub_requests` row for a specific class+session_date; other teachers offer to cover via `sub_claims`; admins/managers `fill_sub_request(req, teacher)` which atomically marks the request `filled` and flips the chosen claim to `accepted` (sibling pending claims auto-`declined`). Cancellation by the requester or admin auto-declines outstanding claims. Two new permissions — `claim_sub_requests` (teacher+), `manage_all_sub_requests` (manager+) — layered onto the existing `request_sub` permission. The "Sub requests" tab is visible to every signed-in role with a status filter (Open / Mine / All-for-admins) and per-card claim/withdraw/fill/cancel actions. The class detail panel grows a "Request sub" button next to "Take attendance" / "Clock in" that pre-fills the next session date; week + month schedule blocks badge classes with an active request (🔄 open, ✓ filled). All RPCs (`create_sub_request`, `create_sub_request_for`, `claim_sub_request`, `withdraw_sub_claim`, `fill_sub_request`, `cancel_sub_request`) are `security invoker` so RLS fires per row. See `migrations/phase_t4_sub_requests.sql` and `T4_VERIFICATION.md`.
 
-- **Phase T5 — curriculum / scripts / materials library.** No schema. Strategy doc sketches an admin-curated content library with optional DK-corporate-approval badges.
+- **Phase T5 — curriculum / scripts / materials library.** Three slices documented in §4.22.
+  - **T5a (✅ shipped):** `curriculum_items` + private `curriculum-assets` Storage bucket + admin/manager Curriculum tab with full CRUD on the library. New perms `edit_curriculum` + `assign_curriculum` added to both SQL `has_permission()` and JS `PERM_BUNDLES`.
+  - **T5b (🔲 next):** `curriculum_assignments` (per-teacher per-class) + assignment UI + teacher locked-card view.
+  - **T5c (🔲 final):** `curriculum_access_log` + Edge Function `curriculum-fetch` (signed-URL gate + audit) + watermarked viewer (PDF.js + CSS-tiled overlay with teacher identity + suppressed copy/save/print).
 
 - **Phase T6 — role management UI + explicit `profiles.teacher_id` link + returning-user invitation redemption.** Today, promotion is manual SQL (or auto via PAR org ownership). `handle_new_user` only redeems invitations on FIRST sign-in. T6 adds an RPC or UI flow for admins to (a) change roles via a UI, (b) manually redeem a pending invitation for a returning user, (c) link a profile to a teacher row explicitly via a new `profiles.teacher_id` foreign key column.
 
@@ -531,6 +561,8 @@ JACKRABBIT_ORG_ID                # "551000" for the Charleston franchise
 | T3 — Attendance + clock-in/out + Reports tab | ✅ Shipped |
 | T4 — Sub requests / shift trades | ✅ Shipped |
 | T8 — Schools + class cancellations + notify-daily-contact | ✅ Shipped |
-| T5 — Curriculum library | 🔲 Not started |
+| T5a — Curriculum library (admin CRUD) | ✅ Shipped |
+| T5b — Curriculum assignments + teacher view | 🔲 Not started |
+| T5c — Watermarked viewer + audit log | 🔲 Not started |
 | T6 — Role management UI + profiles.teacher_id | 🔲 Not started |
 | T7 — Freemium conversion tracking | 🔲 Not started |

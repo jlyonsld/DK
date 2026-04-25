@@ -43,11 +43,13 @@
     schools: [],            // schools rows (every signed-in role can SELECT)
     classCancellations: [], // class_cancellations rows (one per cancelled session)
     closures: [],
+    curriculumItems: [],
     dkConfig: null,
     latestSyncLog: null,
     tState: { query: "", category: "all", filled: {} },
     igState: { query: "", tag: "all" },
     cState: { showTest: false, openClassId: null },
+    curState: { typeFilter: "all", showArchived: false, editingId: null },
     // Schedule state: `anchor` is the currently-focused date (ISO); mode is
     // day/week/month; onlyMine filters to the signed-in teacher's assignments.
     sState: { mode: "day", anchor: isoDate(new Date()), onlyMine: false },
@@ -91,6 +93,7 @@
       "manage_org","hard_delete","manage_users",
       "edit_classes","edit_teachers","edit_students","edit_enrollments","edit_attendance",
       "edit_templates","edit_categories","edit_infographics","edit_closures",
+      "edit_curriculum","assign_curriculum",
       "view_pay_rates","view_billing_status","view_parent_contact",
       "run_jackrabbit_sync","respond_to_leads",
       "reconcile_students",
@@ -100,6 +103,7 @@
       "manage_users",
       "edit_classes","edit_teachers","edit_students","edit_enrollments","edit_attendance",
       "edit_templates","edit_categories","edit_infographics","edit_closures",
+      "edit_curriculum","assign_curriculum",
       "view_pay_rates","view_billing_status","view_parent_contact",
       "run_jackrabbit_sync","respond_to_leads",
       "reconcile_students",
@@ -108,6 +112,7 @@
     manager: [
       "edit_templates","edit_categories","edit_infographics",
       "edit_classes","edit_teachers","edit_closures",
+      "edit_curriculum","assign_curriculum",
       "respond_to_leads",
       "view_classes_readonly","view_teachers_readonly",
       "view_students_readonly","view_enrollments_readonly",
@@ -148,9 +153,9 @@
   // Which tabs each role is allowed to see. (Role Management tab doesn't
   // exist in T1 — it lands in T6.)
   const ROLE_TAB_VISIBILITY = {
-    super_admin: new Set(["home","schedule","templates","classes","schools","teachers","categories","infographics","subrequests","reports"]),
-    admin:       new Set(["home","schedule","templates","classes","schools","teachers","categories","infographics","subrequests","reports"]),
-    manager:     new Set(["home","schedule","templates","classes","schools","teachers","categories","infographics","subrequests"]),
+    super_admin: new Set(["home","schedule","templates","classes","schools","teachers","categories","infographics","subrequests","curriculum","reports"]),
+    admin:       new Set(["home","schedule","templates","classes","schools","teachers","categories","infographics","subrequests","curriculum","reports"]),
+    manager:     new Set(["home","schedule","templates","classes","schools","teachers","categories","infographics","subrequests","curriculum"]),
     teacher:     new Set(["home","schedule","subrequests"]),
     viewer:      new Set(["home","schedule","templates","classes","schools","teachers","categories","infographics","subrequests"])
   };
@@ -386,7 +391,8 @@
       "teacher_invitations", "dk_config", "closures",
       "student_match_candidates",
       "sub_requests", "sub_claims",
-      "schools", "class_cancellations"
+      "schools", "class_cancellations",
+      "curriculum_items"
     ];
     realtimeChannel = sb.channel("dk-realtime");
     tablesToWatch.forEach((table) => {
@@ -537,7 +543,7 @@
   async function reloadAll() {
     showLoader(true);
     try {
-      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches, att, clk, subs, subClm, schs, canc] = await Promise.all([
+      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches, att, clk, subs, subClm, schs, canc, cur] = await Promise.all([
         sb.from("categories").select("*").order("sort_order", { ascending: true }),
         sb.from("templates").select("*").order("created_at", { ascending: true }),
         sb.from("classes").select("*").order("name", { ascending: true }),
@@ -557,7 +563,8 @@
         sb.from("sub_requests").select("*").order("session_date", { ascending: true }),
         sb.from("sub_claims").select("*").order("created_at", { ascending: false }),
         sb.from("schools").select("*").order("name", { ascending: true }),
-        sb.from("class_cancellations").select("*").order("session_date", { ascending: false })
+        sb.from("class_cancellations").select("*").order("session_date", { ascending: false }),
+        sb.from("curriculum_items").select("*").order("created_at", { ascending: false })
       ]);
       for (const r of [cats, tpls, cls, igs, tch, ct, ci, stu, enr]) if (r.error) throw r.error;
       // Non-admin roles may not have SELECT access to teacher_invitations /
@@ -595,6 +602,9 @@
       // applied; tolerate the error so the rest of the app stays usable.
       state.schools          = (schs && !schs.error) ? schs.data : [];
       state.classCancellations = (canc && !canc.error) ? canc.data : [];
+      // Curriculum items: T5a RLS gates SELECT to edit_curriculum / assign_curriculum.
+      // Teachers/viewers see empty here; their gated view lands in T5b.
+      state.curriculumItems  = (cur && !cur.error) ? cur.data : [];
     } catch (e) {
       console.error(e);
       showToast("Failed to load: " + e.message, "error");
@@ -614,6 +624,7 @@
     renderCategoriesTab();
     renderInfographicsTab();
     renderSubRequestsTab();
+    renderCurriculumTab();
     renderReportsTab();
   }
 
@@ -1389,7 +1400,7 @@
     // visible mtabs will center themselves naturally.
     const toolsBtn = $("#mobileToolsBtn");
     if (toolsBtn) {
-      const anyTool = ["templates","categories","infographics","schools","subrequests","reports"].some(canSeeTab);
+      const anyTool = ["templates","categories","infographics","schools","subrequests","curriculum","reports"].some(canSeeTab);
       toolsBtn.style.display = anyTool ? "" : "none";
     }
 
@@ -1409,6 +1420,9 @@
     if (refreshParBtn)     refreshParBtn.style.display     = hasPerm("edit_teachers")      ? "" : "none";
     if (newCategoryBtn)    newCategoryBtn.style.display    = hasPerm("edit_categories")    ? "" : "none";
     if (newInfographicBtn) newInfographicBtn.style.display = hasPerm("edit_infographics")  ? "" : "none";
+
+    const newCurriculumBtn = $("#newCurriculumBtn");
+    if (newCurriculumBtn) newCurriculumBtn.style.display = hasPerm("edit_curriculum") ? "" : "none";
 
     // "Invite user" is admin+ only — creating teacher invitations calls
     // PAR's spoke-create-org-invitation and is out of scope for managers.
@@ -4246,6 +4260,260 @@
     showToast("Sub request cancelled", "success");
   }
 
+  /* ═════════════ Curriculum tab (T5a) ═════════════
+   *
+   * Admin/manager library of DK lesson assets — PDFs, videos, images, scripts,
+   * external links. T5a ships the library + CRUD only. Assignments
+   * (per-teacher per-class) and the watermarked teacher viewer land in T5b
+   * + T5c respectively.
+   *
+   * Storage: private `curriculum-assets` bucket. Direct browser reads are
+   * blocked at the storage RLS layer. T5a uploads write directly because
+   * `edit_curriculum` users can write the bucket. T5c will gate reads
+   * through an Edge Function that mints short-TTL signed URLs after
+   * checking assignment + lead-window.
+   */
+
+  const CURRICULUM_TYPE_META = {
+    pdf:    { label: "PDF",    ico: "📄", accept: ".pdf,application/pdf",  uploadHint: "(PDF, max 25 MB)",            file: true },
+    video:  { label: "Video",  ico: "🎬", accept: "video/mp4,video/webm,video/quicktime", uploadHint: "(MP4 / WebM / MOV, max 200 MB)", file: true },
+    image:  { label: "Image",  ico: "🖼", accept: "image/png,image/jpeg,image/webp",      uploadHint: "(PNG / JPG / WebP, max 10 MB)",   file: true },
+    script: { label: "Script", ico: "📜", accept: "",                                       uploadHint: "",                              file: false },
+    link:   { label: "Link",   ico: "🔗", accept: "",                                       uploadHint: "",                              file: false },
+  };
+  const CURRICULUM_MAX_BYTES = {
+    pdf: 25 * 1024 * 1024,
+    video: 200 * 1024 * 1024,
+    image: 10 * 1024 * 1024,
+  };
+
+  function renderCurriculumTab() {
+    const panel = document.querySelector('.tab-panel[data-tab="curriculum"]');
+    if (!panel) return;
+    if (!canSeeTab("curriculum")) return;
+
+    const items = (state.curriculumItems || [])
+      .filter((it) => state.curState.showArchived || !it.is_archived)
+      .filter((it) => state.curState.typeFilter === "all" || it.asset_type === state.curState.typeFilter);
+
+    const meta = $("#curriculumMeta");
+    if (meta) {
+      const total = (state.curriculumItems || []).length;
+      const shown = items.length;
+      meta.innerHTML = total === 0
+        ? "Curate the franchise's lesson library here. Items live in a private bucket; teachers see them through assigned classes (T5b)."
+        : `${shown} of ${total} item${total === 1 ? "" : "s"}`;
+    }
+
+    const tbl = $("#curriculumTable");
+    if (!tbl) return;
+
+    if (items.length === 0) {
+      tbl.innerHTML = `<div class="empty-state" style="padding:32px;text-align:center;color:var(--ink-dim)">
+        ${(state.curriculumItems || []).length === 0
+          ? "No curriculum items yet. Click <b>＋ New curriculum item</b> to add one."
+          : "No items match the current filter."}
+      </div>`;
+      return;
+    }
+
+    tbl.innerHTML = items.map((it) => {
+      const meta = CURRICULUM_TYPE_META[it.asset_type] || { label: it.asset_type, ico: "📦" };
+      const approved = it.dk_approved
+        ? `<span class="cur-badge cur-badge-approved" title="DK Corporate approved">✓ DK approved</span>` : "";
+      const archived = it.is_archived
+        ? `<span class="cur-badge cur-badge-archived">Archived</span>` : "";
+      const assetLabel = it.asset_type === "link"
+        ? (it.external_url ? `<span class="cur-asset-meta">${escapeHtml(truncateUrl(it.external_url, 48))}</span>` : "")
+        : it.storage_path
+          ? `<span class="cur-asset-meta">${escapeHtml(it.storage_path.split("/").pop() || "")}</span>`
+          : "";
+      const desc = it.description
+        ? `<div class="cur-desc">${escapeHtml(it.description)}</div>` : "";
+      const canEdit = hasPerm("edit_curriculum");
+      return `
+        <div class="cur-row" data-cur-id="${escapeHtml(it.id)}">
+          <div class="cur-row-ico" aria-hidden="true">${meta.ico}</div>
+          <div class="cur-row-main">
+            <div class="cur-row-head">
+              <span class="cur-row-title">${escapeHtml(it.title)}</span>
+              <span class="cur-pill">${escapeHtml(meta.label)}</span>
+              ${approved}
+              ${archived}
+            </div>
+            ${desc}
+            <div class="cur-row-meta">
+              <span title="Default lead time">⏱ ${it.default_lead_days}d default</span>
+              ${assetLabel}
+            </div>
+          </div>
+          <div class="cur-row-actions">
+            ${canEdit ? `<button class="btn ghost small" data-cur-edit="${escapeHtml(it.id)}">Edit</button>` : ""}
+          </div>
+        </div>`;
+    }).join("");
+
+    tbl.querySelectorAll("[data-cur-edit]").forEach((b) => {
+      b.onclick = () => openCurriculumEditor(b.getAttribute("data-cur-edit"));
+    });
+  }
+
+  function truncateUrl(s, n) {
+    if (!s) return "";
+    if (s.length <= n) return s;
+    return s.slice(0, n - 1) + "…";
+  }
+
+  function openCurriculumEditor(itemId) {
+    if (!hasPerm("edit_curriculum")) return;
+    const it = itemId ? (state.curriculumItems || []).find((x) => x.id === itemId) : null;
+    state.curState.editingId = itemId || null;
+
+    $("#curriculumModalTitle").textContent = it ? "Edit curriculum item" : "New curriculum item";
+    $("#cu_title").value             = it?.title || "";
+    $("#cu_description").value       = it?.description || "";
+    $("#cu_asset_type").value        = it?.asset_type || "pdf";
+    $("#cu_default_lead_days").value = it?.default_lead_days ?? 7;
+    $("#cu_external_url").value      = it?.external_url || "";
+    $("#cu_script_content").value    = it?.script_content || "";
+    $("#cu_dk_approved").checked     = !!it?.dk_approved;
+    $("#cu_file").value              = "";
+    const cur = $("#cu_currentFileLabel");
+    if (cur) {
+      cur.textContent = (it && it.storage_path)
+        ? `Current file: ${it.storage_path.split("/").pop()} — choose a new file to replace.`
+        : "";
+    }
+    const archiveBtn = $("#cu_archiveBtn");
+    if (archiveBtn) {
+      archiveBtn.style.display = it ? "" : "none";
+      archiveBtn.textContent = it && it.is_archived ? "Restore" : "Archive";
+    }
+
+    syncCurriculumTypeFields();
+    $("#curriculumModalOverlay").classList.add("show");
+  }
+
+  function closeCurriculumEditor() {
+    $("#curriculumModalOverlay").classList.remove("show");
+    state.curState.editingId = null;
+  }
+
+  function syncCurriculumTypeFields() {
+    const type = $("#cu_asset_type").value;
+    const meta = CURRICULUM_TYPE_META[type] || {};
+    const uploadField   = $("#cu_uploadField");
+    const externalField = $("#cu_externalField");
+    const scriptField   = $("#cu_scriptField");
+    const fileInput     = $("#cu_file");
+    const uploadHint    = $("#cu_uploadHint");
+
+    if (uploadField)   uploadField.style.display   = meta.file ? "" : "none";
+    if (externalField) externalField.style.display = (type === "link" || type === "video") ? "" : "none";
+    if (scriptField)   scriptField.style.display   = type === "script" ? "" : "none";
+    if (fileInput && meta.accept) fileInput.setAttribute("accept", meta.accept);
+    if (uploadHint && meta.uploadHint) uploadHint.textContent = meta.uploadHint;
+  }
+
+  async function saveCurriculumItem() {
+    if (!hasPerm("edit_curriculum")) return;
+    const editingId = state.curState.editingId;
+    const existing  = editingId ? (state.curriculumItems || []).find((x) => x.id === editingId) : null;
+
+    const title = $("#cu_title").value.trim();
+    if (!title) { showToast("Title is required", "error"); return; }
+
+    const asset_type        = $("#cu_asset_type").value;
+    const description       = $("#cu_description").value.trim() || null;
+    const default_lead_days = parseInt($("#cu_default_lead_days").value, 10) || 0;
+    const external_url      = $("#cu_external_url").value.trim() || null;
+    const script_content    = $("#cu_script_content").value || null;
+    const dk_approved       = $("#cu_dk_approved").checked;
+
+    if (asset_type === "link" && !external_url) {
+      showToast("Link items need a URL", "error"); return;
+    }
+    if (asset_type === "script" && !(script_content || "").trim()) {
+      showToast("Script items need content", "error"); return;
+    }
+
+    const fileEl = $("#cu_file");
+    const file   = fileEl && fileEl.files && fileEl.files[0];
+    const meta   = CURRICULUM_TYPE_META[asset_type] || {};
+    if (meta.file && !existing && !file && asset_type !== "video") {
+      showToast(`${meta.label} items need a file`, "error"); return;
+    }
+    const cap = CURRICULUM_MAX_BYTES[asset_type];
+    if (file && cap && file.size > cap) {
+      showToast(`File too large (max ${Math.round(cap / 1024 / 1024)} MB)`, "error"); return;
+    }
+
+    showLoader(true);
+    try {
+      let storage_path = existing?.storage_path || null;
+
+      if (file) {
+        const ext  = (file.name.split(".").pop() || "bin").toLowerCase();
+        const uid  = (crypto.randomUUID && crypto.randomUUID()) || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        const path = `${asset_type}/${uid}.${ext}`;
+        const up = await sb.storage.from("curriculum-assets").upload(path, file, {
+          contentType: file.type || undefined,
+          upsert: false,
+        });
+        if (up.error) throw up.error;
+        // Best-effort cleanup of the prior file when replacing.
+        if (existing?.storage_path && existing.storage_path !== path) {
+          sb.storage.from("curriculum-assets").remove([existing.storage_path]).catch(() => {});
+        }
+        storage_path = path;
+      }
+
+      const row = {
+        title,
+        description,
+        asset_type,
+        default_lead_days,
+        dk_approved,
+        external_url: (asset_type === "link" || asset_type === "video") ? external_url : null,
+        script_content: asset_type === "script" ? script_content : null,
+        storage_path: meta.file ? storage_path : null,
+      };
+
+      if (existing) {
+        const { error } = await sb.from("curriculum_items").update(row).eq("id", existing.id);
+        if (error) throw error;
+      } else {
+        row.created_by = state.profile?.id || null;
+        const { error } = await sb.from("curriculum_items").insert(row);
+        if (error) throw error;
+      }
+
+      await reloadAll(); renderAll();
+      closeCurriculumEditor();
+      showToast(existing ? "Curriculum item updated" : "Curriculum item added", "success");
+    } catch (e) {
+      console.error(e);
+      showToast("Save failed: " + (e.message || e), "error");
+    }
+    showLoader(false);
+  }
+
+  async function toggleCurriculumArchive() {
+    if (!hasPerm("edit_curriculum")) return;
+    const editingId = state.curState.editingId;
+    if (!editingId) return;
+    const it = (state.curriculumItems || []).find((x) => x.id === editingId);
+    if (!it) return;
+    const next = !it.is_archived;
+    showLoader(true);
+    const { error } = await sb.from("curriculum_items").update({ is_archived: next }).eq("id", editingId);
+    showLoader(false);
+    if (error) { showToast("Failed: " + error.message, "error"); return; }
+    await reloadAll(); renderAll();
+    closeCurriculumEditor();
+    showToast(next ? "Archived" : "Restored", "success");
+  }
+
   /* ═════════════ Reports tab ═════════════
    * Admin-only aggregation views that sit alongside the operational tabs.
    * Registered reports:
@@ -5643,6 +5911,30 @@
     $("#classModalOverlay").onclick = (e) => { if (e.target.id === "classModalOverlay") closeClassEditor(); };
     $("#classSave").onclick        = saveClass;
     $("#deleteClassBtn").onclick   = deleteClass;
+
+    // Curriculum modal (T5a)
+    const newCurBtn   = $("#newCurriculumBtn");
+    if (newCurBtn) newCurBtn.onclick = () => openCurriculumEditor(null);
+    const curTypeFilter = $("#curriculumTypeFilter");
+    if (curTypeFilter) curTypeFilter.onchange = (e) => {
+      state.curState.typeFilter = e.target.value || "all"; renderCurriculumTab();
+    };
+    const curShowArchived = $("#curriculumShowArchived");
+    if (curShowArchived) curShowArchived.onchange = (e) => {
+      state.curState.showArchived = !!e.target.checked; renderCurriculumTab();
+    };
+    const cuTypeSel = $("#cu_asset_type");
+    if (cuTypeSel) cuTypeSel.onchange = syncCurriculumTypeFields;
+    const cuCancel  = $("#curriculumCancel");
+    const cuClose   = $("#curriculumModalClose");
+    const cuOverlay = $("#curriculumModalOverlay");
+    const cuSave    = $("#curriculumSave");
+    const cuArchive = $("#cu_archiveBtn");
+    if (cuCancel)  cuCancel.onclick  = closeCurriculumEditor;
+    if (cuClose)   cuClose.onclick   = closeCurriculumEditor;
+    if (cuOverlay) cuOverlay.onclick = (e) => { if (e.target.id === "curriculumModalOverlay") closeCurriculumEditor(); };
+    if (cuSave)    cuSave.onclick    = saveCurriculumItem;
+    if (cuArchive) cuArchive.onclick = toggleCurriculumArchive;
 
     // Schedule toolbar
     $$(".sched-mode").forEach((b) => {
