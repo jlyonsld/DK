@@ -589,15 +589,13 @@
           </div>
           <div class="field-row">
             <div class="field">
-              <label>Payment method</label>
+              <label>
+                Payment method
+                <button type="button" class="link-btn pm-edit-btn" id="t_payment_method_edit" title="Edit available payment methods (super_admin only)" style="display:none">⚙ Edit options</button>
+              </label>
               <select id="t_payment_method">
                 <option value="">—</option>
-                <option value="direct_deposit">Direct deposit</option>
-                <option value="check">Check</option>
-                <option value="paypal">PayPal</option>
-                <option value="venmo">Venmo</option>
-                <option value="zelle">Zelle</option>
-                <option value="other">Other</option>
+                <!-- options populated dynamically from state.paymentMethods -->
               </select>
             </div>
             <div class="field">
@@ -1299,6 +1297,36 @@
           <span class="mobile-tools-ico" aria-hidden="true">📊</span>
           <span>Reports</span>
         </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- T6c: payment-methods editor modal. Super_admin only — gated by
+       RLS on the payment_methods table; the open-button on the teacher
+       modal is also hidden for non-super_admins. -->
+  <div class="modal-overlay" id="paymentMethodsOverlay">
+    <div class="modal" style="max-width:620px">
+      <div class="modal-head">
+        <h3>Manage payment methods</h3>
+        <button class="btn ghost small" id="paymentMethodsClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="results-meta" style="margin-bottom:10px">
+          Define the options that show in every teacher's Payment method dropdown. Only super_admins can edit. The "Kind" column drives whether the bank fields, payment-handle field, or neither shows on the personnel modal.
+        </div>
+        <div class="pm-list" id="paymentMethodsList"></div>
+        <div class="pm-add-row">
+          <input type="text" id="pm_new_label" placeholder="Label (e.g. Cash App)" />
+          <select id="pm_new_kind">
+            <option value="bank">Bank account</option>
+            <option value="handle" selected>Handle (email/phone)</option>
+            <option value="none">Neither</option>
+          </select>
+          <button type="button" class="btn primary small" id="pm_add_btn">＋ Add</button>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn primary" id="paymentMethodsDone">Done</button>
       </div>
     </div>
   </div>

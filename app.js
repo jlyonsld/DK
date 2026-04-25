@@ -46,6 +46,9 @@
     curriculumItems: [],
     curriculumAssignments: [],   // (curriculum_item_id, class_id, teacher_id) rows
                                  // RLS: admin/manager see all; teacher sees own.
+    paymentMethods: [],          // T6c: super_admin-managed list of options
+                                 // for teachers.payment_method. SELECT open
+                                 // to all authenticated; writes super_admin.
     teacherPaymentDetails: [],   // T6b: bank/routing/account/handle. RLS:
                                  // manage_teacher_payments (admin+super_admin).
     teacherDocuments: [],        // T6b: tax forms, certs metadata. RLS:
@@ -409,7 +412,8 @@
       "schools", "class_cancellations",
       "curriculum_items", "curriculum_assignments",
       "teacher_payment_details", "teacher_documents",
-      "liability_waivers", "liability_waiver_signatures"
+      "liability_waivers", "liability_waiver_signatures",
+      "payment_methods"
     ];
     realtimeChannel = sb.channel("dk-realtime");
     tablesToWatch.forEach((table) => {
@@ -598,7 +602,7 @@
   async function reloadAll() {
     showLoader(true);
     try {
-      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches, att, clk, subs, subClm, schs, canc, cur, curA, tpd, tdocs, waivers, wSigs] = await Promise.all([
+      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches, att, clk, subs, subClm, schs, canc, cur, curA, tpd, tdocs, waivers, wSigs, pms] = await Promise.all([
         sb.from("categories").select("*").order("sort_order", { ascending: true }),
         sb.from("templates").select("*").order("created_at", { ascending: true }),
         sb.from("classes").select("*").order("name", { ascending: true }),
@@ -624,7 +628,8 @@
         sb.from("teacher_payment_details").select("*"),
         sb.from("teacher_documents").select("*").order("uploaded_at", { ascending: false }),
         sb.from("liability_waivers").select("*").order("version", { ascending: false }),
-        sb.from("liability_waiver_signatures").select("*").order("signed_at", { ascending: false })
+        sb.from("liability_waiver_signatures").select("*").order("signed_at", { ascending: false }),
+        sb.from("payment_methods").select("*").order("sort_order", { ascending: true })
       ]);
       for (const r of [cats, tpls, cls, igs, tch, ct, ci, stu, enr]) if (r.error) throw r.error;
       // Non-admin roles may not have SELECT access to teacher_invitations /
@@ -676,6 +681,10 @@
       state.teacherDocuments      = (tdocs && !tdocs.error) ? tdocs.data : [];
       state.liabilityWaivers      = (waivers && !waivers.error) ? waivers.data : [];
       state.waiverSignatures      = (wSigs && !wSigs.error) ? wSigs.data : [];
+      // T6c: payment_methods SELECT is open to any authenticated user;
+      // empty fallback covers the brief window before the migration is
+      // applied in any local-dev branch.
+      state.paymentMethods        = (pms && !pms.error) ? pms.data : [];
     } catch (e) {
       console.error(e);
       showToast("Failed to load: " + e.message, "error");
@@ -6173,9 +6182,14 @@
     // Payroll section (view_pay_rates)
     $("#t_pay_type").value        = t ? (t.pay_type || "") : "";
     $("#t_pay_rate").value        = t ? (t.pay_rate || "") : "";
-    $("#t_payment_method").value  = t ? (t.payment_method || "") : "";
+    // T6c: dropdown options come from state.paymentMethods, not hardcoded.
+    populatePaymentMethodSelect(t ? (t.payment_method || "") : "");
     $("#t_w9_date").value         = t ? (t.w9_received_date || "") : "";
     $("#t_w9_on_file").checked    = t ? !!t.w9_on_file : false;
+    // Edit-options gear is super_admin-only (RLS would also block writes,
+    // but hiding the button avoids the surprise of a 42501 toast).
+    const pmEditBtn = $("#t_payment_method_edit");
+    if (pmEditBtn) pmEditBtn.style.display = isSuperAdmin() ? "" : "none";
 
     // T6b: payment details (super_admin/admin only). Only populated if the
     // caller has SELECT — non-perm callers won't see the section anyway.
@@ -6211,15 +6225,59 @@
     setTimeout(() => $("#t_name").focus(), 50);
   }
 
+  function paymentMethodKind(slug) {
+    if (!slug) return null;
+    const row = state.paymentMethods.find((p) => p.slug === slug);
+    return row ? row.kind : null;
+  }
+
   function applyPaymentMethodVisibility(method) {
-    const isDD = method === "direct_deposit";
-    const isHandle = method === "paypal" || method === "venmo" || method === "zelle";
+    const kind = paymentMethodKind(method);
     const dd1 = $("#t_pay_dd_block");
     const dd2 = $("#t_pay_dd_block2");
     const handle = $("#t_pay_handle_block");
-    if (dd1) dd1.style.display = isDD ? "" : "none";
-    if (dd2) dd2.style.display = isDD ? "" : "none";
-    if (handle) handle.style.display = isHandle ? "" : "none";
+    if (dd1) dd1.style.display = kind === "bank" ? "" : "none";
+    if (dd2) dd2.style.display = kind === "bank" ? "" : "none";
+    if (handle) handle.style.display = kind === "handle" ? "" : "none";
+  }
+
+  /* T6c: build the payment-method <select> from state.paymentMethods.
+     Inactive methods still appear if currentSlug matches one (so legacy
+     teacher rows don't lose their value silently); fresh choices only
+     show active ones. */
+  function populatePaymentMethodSelect(currentSlug) {
+    const sel = $("#t_payment_method");
+    if (!sel) return;
+    sel.innerHTML = "";
+    const blank = document.createElement("option");
+    blank.value = "";
+    blank.textContent = "—";
+    sel.appendChild(blank);
+    const methods = [...state.paymentMethods];
+    // If currentSlug points at an inactive/missing row, surface it as a
+    // disabled option so the admin sees what was previously set.
+    const matchActive = methods.find((m) => m.slug === currentSlug);
+    methods
+      .filter((m) => m.is_active || m.slug === currentSlug)
+      .sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0))
+      .forEach((m) => {
+        const opt = document.createElement("option");
+        opt.value = m.slug;
+        opt.textContent = m.label + (m.is_active ? "" : " (inactive)");
+        sel.appendChild(opt);
+      });
+    if (currentSlug && !matchActive && !methods.find((m) => m.slug === currentSlug)) {
+      // The slug isn't in the list at all (deleted method). Show it as
+      // a disabled "missing" option so the admin can still see the
+      // teacher's previous value before reassigning.
+      const opt = document.createElement("option");
+      opt.value = currentSlug;
+      opt.textContent = currentSlug + " (removed)";
+      opt.disabled = true;
+      sel.appendChild(opt);
+    }
+    sel.value = currentSlug || "";
+    applyPaymentMethodVisibility(sel.value);
   }
   function closeTeacherEditor() { $("#teacherModalOverlay").classList.remove("open"); editingTeacherId = null; }
 
@@ -6695,6 +6753,94 @@
     $("#categoriesOverlay").classList.remove("open");
   }
 
+  /* ═════════════ T6c: Payment methods manage-list modal ═════════════ */
+
+  function openPaymentMethodsModal() {
+    if (!isSuperAdmin()) { showToast("Super_admins only", "error"); return; }
+    renderPaymentMethodsList();
+    $("#paymentMethodsOverlay").classList.add("open");
+  }
+  function closePaymentMethodsModal() {
+    $("#paymentMethodsOverlay").classList.remove("open");
+    // Re-populate the personnel-modal's dropdown so any edits take effect
+    // immediately if it's still open.
+    const t = state.teachers.find((x) => x.id === editingTeacherId);
+    if (t) populatePaymentMethodSelect(t.payment_method || $("#t_payment_method").value);
+  }
+
+  function renderPaymentMethodsList() {
+    const wrap = $("#paymentMethodsList");
+    if (!wrap) return;
+    const rows = [...state.paymentMethods].sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
+    if (!rows.length) { wrap.innerHTML = `<div class="muted">No payment methods configured.</div>`; return; }
+    wrap.innerHTML = rows.map((m) => {
+      const inUse = state.teachers.filter((t) => t.payment_method === m.slug).length;
+      return `
+        <div class="pm-row" data-pm-id="${m.id}">
+          <input class="pm-label" type="text" value="${escapeHtml(m.label)}" />
+          <select class="pm-kind">
+            <option value="bank"   ${m.kind === "bank"   ? "selected" : ""}>Bank account</option>
+            <option value="handle" ${m.kind === "handle" ? "selected" : ""}>Handle</option>
+            <option value="none"   ${m.kind === "none"   ? "selected" : ""}>Neither</option>
+          </select>
+          <label class="pm-active">
+            <input type="checkbox" class="pm-active-cb" ${m.is_active ? "checked" : ""} />
+            Active
+          </label>
+          <span class="pm-use-count">${inUse} in use</span>
+          <button type="button" class="btn danger ghost small pm-del" ${inUse > 0 ? `disabled title="In use — reassign teachers first"` : ""}>Delete</button>
+        </div>`;
+    }).join("");
+    // Wire per-row handlers.
+    $$('#paymentMethodsList .pm-row').forEach((row) => {
+      const id = row.dataset.pmId;
+      const labelInp = row.querySelector(".pm-label");
+      const kindSel  = row.querySelector(".pm-kind");
+      const activeCb = row.querySelector(".pm-active-cb");
+      const delBtn   = row.querySelector(".pm-del");
+      const save = async (patch) => {
+        const resp = await sb.from("payment_methods").update(patch).eq("id", id);
+        if (resp.error) { showToast(resp.error.message, "error"); return; }
+        await reloadAll();
+        renderPaymentMethodsList();
+      };
+      labelInp.onchange = () => {
+        const v = labelInp.value.trim();
+        if (!v) { showToast("Label can't be empty", "error"); return; }
+        save({ label: v });
+      };
+      kindSel.onchange = () => save({ kind: kindSel.value });
+      activeCb.onchange = () => save({ is_active: activeCb.checked });
+      if (delBtn && !delBtn.disabled) {
+        delBtn.onclick = async () => {
+          if (!confirm(`Delete payment method "${labelInp.value}"? This cannot be undone.`)) return;
+          const resp = await sb.from("payment_methods").delete().eq("id", id);
+          if (resp.error) { showToast(resp.error.message, "error"); return; }
+          await reloadAll();
+          renderPaymentMethodsList();
+          showToast("Payment method deleted", "success");
+        };
+      }
+    });
+  }
+
+  async function addPaymentMethod() {
+    const label = $("#pm_new_label").value.trim();
+    const kind  = $("#pm_new_kind").value;
+    if (!label) { showToast("Label is required", "error"); return; }
+    const slugs = new Set(state.paymentMethods.map((m) => m.slug));
+    const slug = uniqueSlug(slugify(label), slugs);
+    const maxSort = state.paymentMethods.reduce((mx, m) => Math.max(mx, m.sort_order || 0), 0);
+    const resp = await sb.from("payment_methods").insert({
+      slug, label, kind, sort_order: maxSort + 10, is_active: true
+    });
+    if (resp.error) { showToast(resp.error.message, "error"); return; }
+    $("#pm_new_label").value = "";
+    await reloadAll();
+    renderPaymentMethodsList();
+    showToast("Payment method added", "success");
+  }
+
   async function newCategory() {
     const label = prompt("New category label:");
     if (!label) return;
@@ -6993,6 +7139,14 @@
     $("#categoriesModalClose").onclick = closeCategoriesModal;
     $("#categoriesModalDone").onclick  = closeCategoriesModal;
     $("#categoriesOverlay").onclick    = (e) => { if (e.target.id === "categoriesOverlay") closeCategoriesModal(); };
+
+    // T6c: payment-methods manage modal
+    const pmEditBtn = $("#t_payment_method_edit");
+    if (pmEditBtn) pmEditBtn.onclick = (e) => { e.preventDefault(); openPaymentMethodsModal(); };
+    $("#paymentMethodsClose").onclick = closePaymentMethodsModal;
+    $("#paymentMethodsDone").onclick  = closePaymentMethodsModal;
+    $("#paymentMethodsOverlay").onclick = (e) => { if (e.target.id === "paymentMethodsOverlay") closePaymentMethodsModal(); };
+    $("#pm_add_btn").onclick = addPaymentMethod;
     $("#newInfographicBtn").onclick = () => openIgEditor(null);
     $("#newTeacherBtn").onclick    = () => openTeacherEditor(null);
     const refreshParBtn = $("#refreshParLinksBtn");

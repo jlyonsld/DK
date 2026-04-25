@@ -159,6 +159,18 @@ response-console-v3/
     │                                      perms: manage_teacher_payments,
     │                                      manage_teacher_compliance. See
     │                                      §4.23.
+    ├── phase_t6c_payment_methods.sql    ← payment_methods table — super_admin-
+    │                                      managed list of options for
+    │                                      teachers.payment_method. SELECT
+    │                                      open to all authenticated; writes
+    │                                      gated on is_super_admin() directly
+    │                                      (no new permission). Drops the
+    │                                      legacy teachers_payment_method_check
+    │                                      constraint; the table is now the
+    │                                      source of truth. Each row's `kind`
+    │                                      ∈ {bank, handle, none} drives
+    │                                      personnel-modal sub-field
+    │                                      visibility.
     └── phase_t8_schools.sql             ← schools + class_cancellations
                                             tables, classes.school_id FK,
                                             mark_class_cancellation_notified
@@ -586,6 +598,8 @@ The modal renders the waiver `body_html` in a scrollable read-only block, requir
 
 **Curriculum suppression handlers are scoped to the modal subtree, not the document.** `installCurriculumViewerSuppression` adds `contextmenu` / `selectstart` / `copy` / `keydown` listeners only on `#curViewerModalOverlay`. They are removed in `closeCurriculumViewer` via the saved-handler reference (anonymous closures can't be removed, hence `state._curViewerHandlers`). **Don't add these as document-level listeners** — they would block right-click and Cmd-C across the entire app indefinitely if `closeCurriculumViewer` ever fails to fire (e.g., a rendering error).
 
+**Payment methods are super_admin-defined, not hardcoded.** T6c moved the list of payment methods (Direct deposit, Check, PayPal, Venmo, Zelle, Other, plus anything Sharon adds) into the `payment_methods` table. The personnel modal's dropdown populates from `state.paymentMethods` at modal-open. Each row's `kind` (one of `bank`, `handle`, `none`) drives whether the bank/routing/account block, the payment-handle field, or neither shows up below the dropdown — replacing the prior hardcoded string-matching in `applyPaymentMethodVisibility()`. Writes are RLS-gated to `is_super_admin()` (NOT a new `manage_payment_methods` permission, since the list rarely changes); the "⚙ Edit options" link next to the dropdown is hidden for non-super_admins. **Don't reintroduce the `teachers_payment_method_check` constraint** — it was deliberately dropped so super_admins can add methods through the UI without a SQL migration. Validation now lives in the dropdown (only valid slugs are written) plus the `kind` discriminator (which drives UX without needing the constraint). If a method is deleted from the list while a teacher still references it, the dropdown surfaces it as a disabled "(removed)" option so the admin can see what was previously set before reassigning.
+
 **`record_waiver_signature()` is the ONLY path that inserts into `liability_waiver_signatures`.** The signatures table has NO INSERT/UPDATE/DELETE policies. The RPC is `security definer` and gates either on caller-is-the-teacher (email match against `auth.jwt() ->> 'email'`) OR `manage_teacher_compliance`. **Don't add a self-INSERT policy on the table** — it would bypass the email-match check and let a teacher forge a signature on a coworker's behalf. The RPC pattern is the entire reason both the self-sign and admin-recorded paths can share one writer.
 
 **`teacher-documents` storage SELECT is gated, but `curriculum-assets` is not.** Both are private buckets but they handle reads differently. `teacher-documents` exposes a SELECT policy gated to `manage_teacher_compliance` because the compliance admins see ALL docs and there's no per-row authorization story (lead windows, assignments, etc.). `curriculum-assets` has NO SELECT policy because the per-teacher lead-window check needs to run server-side AND every read needs an audit-log row, both of which require the Edge Function intermediary. **Don't unify the two patterns** — adding an Edge Function for teacher-documents would just be ceremony with no security benefit; adding a SELECT policy to curriculum-assets would let teachers bypass the audit log and the lead-window gate.
@@ -617,7 +631,9 @@ The modal renders the waiver `body_html` in a scrollable read-only block, requir
 
 - **Phase T6b — sensitive PII split, document storage, e-signed liability waiver.** ✅ **Shipped.** Three new tables (`teacher_payment_details`, `teacher_documents`, `liability_waivers` + `liability_waiver_signatures`) plus the private `teacher-documents` Storage bucket, the `record_waiver_signature()` RPC, and two new permissions (`manage_teacher_payments`, `manage_teacher_compliance`). Personnel modal grows three new sections (bank/payment, documents, waiver) gated by those permissions; teacher home gets a self-sign banner. See `migrations/phase_t6b_personnel_payments_waivers.sql`, `T6B_VERIFICATION.md`, and §4.23.
 
-- **Phase T6c — role management UI + explicit `profiles.teacher_id` link + returning-user invitation redemption.** 🔲 Not started. Today, promotion is manual SQL (or auto via PAR org ownership). `handle_new_user` only redeems invitations on FIRST sign-in. T6c adds an RPC or UI flow for admins to (a) change roles via a UI, (b) manually redeem a pending invitation for a returning user, (c) link a profile to a teacher row explicitly via a new `profiles.teacher_id` foreign key column.
+- **Phase T6c — super_admin-managed payment_methods list.** ✅ **Shipped.** New `payment_methods` table replaces the hardcoded set of six options on `teachers.payment_method`. Super_admin gets a "⚙ Edit options" link next to the personnel-modal dropdown that opens a manage-list sub-modal (label, kind, active toggle, delete-if-not-in-use). The legacy `teachers_payment_method_check` constraint was dropped — the table is now the source of truth. See `migrations/phase_t6c_payment_methods.sql`.
+
+- **Phase T6d — role management UI + explicit `profiles.teacher_id` link + returning-user invitation redemption.** 🔲 Not started. Today, promotion is manual SQL (or auto via PAR org ownership). `handle_new_user` only redeems invitations on FIRST sign-in. T6c adds an RPC or UI flow for admins to (a) change roles via a UI, (b) manually redeem a pending invitation for a returning user, (c) link a profile to a teacher row explicitly via a new `profiles.teacher_id` foreign key column.
 
 - **Phase T7 — freemium upgrade prompt + conversion tracking.** PAR card on teacher bento with context-aware CTA, click-through analytics, usage-based triggers ("you've taken attendance 20 times, want PAR for your family too?"). The current teacher bento already has a simple "On PAR" card; T7 makes it smarter.
 
@@ -686,5 +702,6 @@ JACKRABBIT_ORG_ID                # "551000" for the Charleston franchise
 | T5c — Watermarked viewer + audit log | ✅ Shipped |
 | T6a — Personnel fields on `teachers` (DOB, address, payroll, background-check) | ✅ Shipped |
 | T6b — Payment details + tax/cert documents + e-signed liability waiver | ✅ Shipped |
-| T6c — Role management UI + profiles.teacher_id + returning-user invitation redemption | 🔲 Not started |
+| T6c — Super_admin-managed payment_methods list (replaces hardcoded enum) | ✅ Shipped |
+| T6d — Role management UI + profiles.teacher_id + returning-user invitation redemption | 🔲 Not started |
 | T7 — Freemium conversion tracking | 🔲 Not started |
