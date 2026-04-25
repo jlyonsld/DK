@@ -3759,6 +3759,7 @@
     const showPay    = hasPerm("view_pay_rates");
     const showEdit   = hasPerm("edit_teachers");
     const showInvite = isAdminOrAbove();
+    const rowClickEdit = isAdminOrAbove();
     const colCount = 4 + (showPay ? 1 : 0) + (showEdit || showInvite ? 1 : 0);
 
     const rows = state.teachers.map((t) => {
@@ -3788,8 +3789,12 @@
       }
       const actionCell = (showEdit || showInvite) ? `<td class="row-actions" style="white-space:nowrap">${actions.join(" ")}</td>` : "";
 
+      const rowAttrs = rowClickEdit
+        ? ` data-act="row-edit-teacher" data-id="${escapeHtml(t.id)}" style="cursor:pointer" title="Edit teacher"`
+        : "";
+
       return `
-        <tr>
+        <tr${rowAttrs}>
           <td><b>${escapeHtml(t.full_name)}</b>${parBadge}${inviteBadge}${t.email ? `<div style="font-size:11.5px;color:var(--ink-dim)">${escapeHtml(t.email)}</div>` : `<div style="font-size:11.5px;color:var(--ink-mute);font-style:italic">no email \u2014 can't resolve PAR</div>`}</td>
           <td>${escapeHtml(t.phone || "")}</td>
           ${showPay  ? `<td>${escapeHtml(t.pay_rate || "")}</td>` : ""}
@@ -3806,10 +3811,13 @@
       </table>
     `;
     if (showEdit) {
-      $$('[data-act="edit-teacher"]', el).forEach((btn) => btn.onclick = () => openTeacherEditor(btn.dataset.id));
+      $$('[data-act="edit-teacher"]', el).forEach((btn) => btn.onclick = (e) => { e.stopPropagation(); openTeacherEditor(btn.dataset.id); });
     }
     if (showInvite) {
-      $$('[data-act="invite-teacher"]', el).forEach((btn) => btn.onclick = () => onInviteTeacherClick(btn.dataset.id, btn.dataset.email));
+      $$('[data-act="invite-teacher"]', el).forEach((btn) => btn.onclick = (e) => { e.stopPropagation(); onInviteTeacherClick(btn.dataset.id, btn.dataset.email); });
+    }
+    if (rowClickEdit) {
+      $$('[data-act="row-edit-teacher"]', el).forEach((tr) => tr.onclick = () => openTeacherEditor(tr.dataset.id));
     }
   }
 
