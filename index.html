@@ -872,6 +872,11 @@
       </div>
       <div class="modal-foot">
         <button class="btn danger small" id="cu_archiveBtn" style="margin-right:auto;display:none">Archive</button>
+        <!-- T5c: curator preview. Only shown for bucket-stored types
+             (pdf/video/image) on saved items — gated client-side in
+             openCurriculumEditor; the Edge Function also re-checks the
+             caller's role and logs the access to curriculum_access_log. -->
+        <button class="btn ghost small" id="cu_previewBtn" style="display:none">Preview (watermarked)</button>
         <button class="btn" id="curriculumCancel">Cancel</button>
         <button class="btn primary" id="curriculumSave">Save</button>
       </div>
@@ -929,15 +934,21 @@
     </div>
   </div>
 
-  <!-- Curriculum viewer modal (Phase T5b — script + link types only).
-       PDF/video/image viewer with watermark + audit log lands in T5c. -->
+  <!-- Curriculum viewer modal (T5b: script/link · T5c: pdf/video/image
+       with signed URLs from curriculum-fetch + watermark overlay).
+       The watermark overlay sits on top of #curViewerBody with
+       pointer-events:none so scrolling/page-flips on the underlying
+       content still work — see styles.css .cur-viewer-watermark. -->
   <div class="modal-overlay" id="curViewerModalOverlay">
-    <div class="modal" style="max-width:720px">
+    <div class="modal" id="curViewerModal" style="max-width:920px">
       <div class="modal-head">
         <h3 id="curViewerTitle">Curriculum item</h3>
         <button class="btn ghost small" id="curViewerModalClose">✕</button>
       </div>
-      <div class="modal-body" id="curViewerBody"></div>
+      <div class="modal-body cur-viewer-stage" id="curViewerStage">
+        <div class="modal-body" id="curViewerBody" style="padding:0;position:relative;min-height:60vh"></div>
+        <div class="cur-viewer-watermark" id="curViewerWatermark" aria-hidden="true"></div>
+      </div>
       <div class="modal-foot">
         <button class="btn primary" id="curViewerDone">Done</button>
       </div>
@@ -1216,6 +1227,13 @@
 
   <!-- Supabase client -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <!-- PDF.js for the T5c watermarked curriculum viewer. CDN-only, no
+       build step (CLAUDE.md no-bundler principle). Use the legacy UMD
+       build so `pdfjsLib` is exposed on window — the ES module build
+       (`pdf.min.mjs`) won't pollute globals. The companion worker URL
+       must be set on pdfjsLib.GlobalWorkerOptions.workerSrc before any
+       document is loaded; see openCurriculumWatermarkedViewer in app.js. -->
+  <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/legacy/build/pdf.min.js"></script>
   <script src="config.js"></script>
   <script src="app.js"></script>
 

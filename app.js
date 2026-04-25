@@ -1141,10 +1141,15 @@
     showToast("Notes saved", "success");
   }
 
-  /* Curriculum viewer (T5b — link & script types only).
-   * For pdf/video/image, the watermarked viewer + signed-URL fetch
-   * land in T5c. Here we just render link/script content directly
-   * since neither requires a bucket fetch or watermarking. */
+  /* Curriculum viewer (T5b: link/script · T5c: pdf/video/image).
+   * For link/script we render directly — no bucket fetch, nothing to
+   * watermark. For pdf/video/image we call the curriculum-fetch Edge
+   * Function (verify_jwt:true), which re-runs the lead-window check
+   * server-side, mints a 5-min signed URL against the private
+   * curriculum-assets bucket, and writes a row to curriculum_access_log.
+   * The signed URL is then rendered behind a CSS-tiled watermark
+   * overlay. None of the suppression is unbreakable — see CLAUDE.md
+   * §4.22 — but a leaked screenshot is trivially traceable. */
   function openCurriculumViewer(assignmentId) {
     const a = (state.curriculumAssignments || []).find((x) => x.id === assignmentId);
     if (!a) { showToast("Assignment not found", "error"); return; }
@@ -1152,8 +1157,8 @@
     const cls  = (state.classes || []).find((c) => c.id === a.class_id);
     if (!item || !cls) { showToast("Item not found", "error"); return; }
 
-    // Defense-in-depth: re-check the lead window before opening. The same
-    // check fires in the T5c Edge Function for bucket-stored types.
+    // Defense-in-depth: re-check the lead window before opening. The
+    // Edge Function will also refuse with 403 if locked.
     const win = curriculumLeadWindowState(a, item, cls, new Date());
     if (!win.unlocked) {
       showToast(`Locked — unlocks in ${win.daysUntilUnlock}d`, "error"); return;
@@ -1168,33 +1173,226 @@
       return;
     }
     if (item.asset_type === "script") {
-      $("#curViewerTitle").textContent = item.title;
-      const body = $("#curViewerBody");
-      if (body) {
-        body.innerHTML = `
-          <div class="cur-viewer-script">${escapeHtml(item.script_content || "").replace(/\n/g, "<br/>")}</div>
-          <div class="cur-viewer-meta">Script · ${escapeHtml(cls.name)} · ${escapeHtml(item.dk_approved ? "DK approved" : "")}</div>
-        `;
-      }
-      $("#curViewerModalOverlay").classList.add("open");
+      openCurriculumScriptViewer(item, cls);
       return;
     }
-    // pdf / video / image → T5c
+    // pdf / video / image → call the Edge Function for a signed URL,
+    // then render in the watermarked stage.
+    openCurriculumWatermarkedViewer({
+      kind: "view",
+      title: item.title,
+      assetType: item.asset_type,
+      payload: { assignment_id: a.id, kind: "view" },
+      contextLabel: `${cls.name}${item.dk_approved ? " · DK approved" : ""}`,
+    });
+  }
+
+  // Script-only viewer path — no bucket fetch, no watermark needed (the
+  // user could just retype the script). Kept identical to T5b behavior.
+  function openCurriculumScriptViewer(item, cls) {
     $("#curViewerTitle").textContent = item.title;
     const body = $("#curViewerBody");
     if (body) {
       body.innerHTML = `
-        <div class="cur-viewer-stub">
-          <p style="margin:0 0 8px 0">📦 <b>${escapeHtml(CURRICULUM_TYPE_META[item.asset_type]?.label || item.asset_type)}</b> viewer ships in Phase T5c.</p>
-          <p style="margin:0;color:var(--ink-dim);font-size:12.5px">T5c adds a watermarked viewer with signed URLs and an audit log. For now, ask Sharon if you need this file.</p>
-        </div>
+        <div class="cur-viewer-script" style="padding:18px 22px">${escapeHtml(item.script_content || "").replace(/\n/g, "<br/>")}</div>
+        <div class="cur-viewer-meta" style="padding:0 22px 16px">Script · ${escapeHtml(cls.name)} · ${escapeHtml(item.dk_approved ? "DK approved" : "")}</div>
       `;
     }
+    // Hide the watermark overlay — script content isn't bucket-fetched
+    // and doesn't need it.
+    const wm = $("#curViewerWatermark");
+    if (wm) wm.style.display = "none";
     $("#curViewerModalOverlay").classList.add("open");
+  }
+
+  /* Admin curator preview (T5c). Open from the curriculum edit modal's
+   * "Preview (watermarked)" button. Same Edge Function path, kind='preview',
+   * gated server-side on edit_curriculum/assign_curriculum and logged to
+   * curriculum_access_log so curators are also auditable (CLAUDE.md §4.22). */
+  async function openCurriculumPreview() {
+    if (!hasPerm("edit_curriculum") && !hasPerm("assign_curriculum")) {
+      showToast("Preview requires curriculum edit access", "error"); return;
+    }
+    const editingId = state.curState.editingId;
+    if (!editingId) { showToast("Save the item first", "error"); return; }
+    const item = (state.curriculumItems || []).find((x) => x.id === editingId);
+    if (!item) { showToast("Item not found", "error"); return; }
+    if (!["pdf","video","image"].includes(item.asset_type)) {
+      showToast("Preview only applies to PDF/video/image items", "error"); return;
+    }
+    if (!item.storage_path) {
+      showToast("This item has no uploaded file yet", "error"); return;
+    }
+    openCurriculumWatermarkedViewer({
+      kind: "preview",
+      title: item.title,
+      assetType: item.asset_type,
+      payload: { item_id: item.id, kind: "preview" },
+      contextLabel: "Curator preview · audit-logged",
+    });
+  }
+
+  /* The actual signed-URL + watermark renderer. Used by both teacher
+   * view and admin preview paths.
+   *
+   * Steps:
+   *   1. POST to the curriculum-fetch Edge Function. It returns a 5-min
+   *      signed URL or a 403 with a lock message.
+   *   2. Render the asset inside #curViewerBody:
+   *        - pdf   → PDF.js canvas pages (one canvas per page)
+   *        - video → <video controlsList="nodownload" disablePictureInPicture>
+   *        - image → <img>
+   *   3. Build the CSS-tiled watermark overlay with the user's identity
+   *      + ISO timestamp.
+   *   4. Wire suppression: contextmenu / selectstart / copy + Cmd-S/P/C
+   *      keydown handlers on the modal. Cleared in closeCurriculumViewer.
+   */
+  async function openCurriculumWatermarkedViewer(opts) {
+    const { title, assetType, payload, contextLabel } = opts;
+    $("#curViewerTitle").textContent = title || "Curriculum item";
+    const body = $("#curViewerBody");
+    if (body) body.innerHTML = `<div style="padding:32px;text-align:center;color:var(--ink-dim)">Loading…</div>`;
+    const wm = $("#curViewerWatermark");
+    if (wm) { wm.style.display = ""; wm.innerHTML = ""; }
+    $("#curViewerModalOverlay").classList.add("open");
+
+    showLoader(true);
+    let resp;
+    try {
+      resp = await sb.functions.invoke("curriculum-fetch", { body: payload });
+    } catch (e) {
+      showLoader(false);
+      if (body) body.innerHTML = `<div style="padding:32px;text-align:center;color:var(--ink-dim)">Failed to load: ${escapeHtml(String(e.message || e))}</div>`;
+      return;
+    }
+    showLoader(false);
+
+    if (resp.error || !resp.data?.url) {
+      const msg = resp.data?.error || resp.error?.message || "Failed to fetch curriculum item";
+      if (body) body.innerHTML = `<div style="padding:32px;text-align:center;color:var(--ink-dim)">${escapeHtml(msg)}</div>`;
+      return;
+    }
+    const { url } = resp.data;
+
+    // Render the asset.
+    if (body) {
+      if (assetType === "image") {
+        body.innerHTML = `<div class="cur-viewer-imgwrap" style="display:flex;justify-content:center;align-items:center;padding:16px;min-height:60vh"><img src="${escapeHtml(url)}" alt="" style="max-width:100%;max-height:78vh;display:block" draggable="false"/></div>`;
+      } else if (assetType === "video") {
+        body.innerHTML = `<div class="cur-viewer-videowrap" style="display:flex;justify-content:center;align-items:center;padding:16px;min-height:60vh"><video src="${escapeHtml(url)}" controls controlsList="nodownload noremoteplayback" disablePictureInPicture playsinline style="max-width:100%;max-height:78vh;display:block;background:#000"></video></div>`;
+      } else if (assetType === "pdf") {
+        body.innerHTML = `<div class="cur-viewer-pdf" id="curViewerPdfPages" style="overflow:auto;max-height:78vh;padding:16px;background:#222"></div>`;
+        await renderPdfIntoContainer(url, document.getElementById("curViewerPdfPages"));
+      } else {
+        body.innerHTML = `<div style="padding:32px;text-align:center;color:var(--ink-dim)">Unsupported asset type: ${escapeHtml(assetType)}</div>`;
+      }
+    }
+
+    // Build watermark tile content.
+    if (wm) {
+      const u = state.session?.user || {};
+      const tname = state.profile?.full_name || mySignedInTeacher()?.full_name || u.email || "user";
+      const temail = u.email || "";
+      const stamp = new Date().toISOString().replace("T", " ").slice(0, 19) + " UTC";
+      const ctx = contextLabel ? ` · ${contextLabel}` : "";
+      // Rendered as repeating tiles via CSS background-image: we
+      // generate a single .cur-viewer-watermark-tile and let CSS
+      // repeat. Using inline-spaced spans inside a tiled flex grid
+      // would also work; this keeps the markup simple.
+      const text = `${tname} · ${temail} · ${stamp}${ctx}`;
+      // Build a grid of repeated labels so the entire surface is
+      // covered regardless of viewport. 8 rows × 4 cols = 32 tiles.
+      const tiles = [];
+      for (let i = 0; i < 32; i++) tiles.push(`<span class="cur-viewer-watermark-tile">${escapeHtml(text)}</span>`);
+      wm.innerHTML = tiles.join("");
+    }
+
+    // Wire suppression handlers (best-effort — see CLAUDE.md §4.22).
+    installCurriculumViewerSuppression();
+  }
+
+  // PDF.js render — load pdfjsLib (UMD global from index.html), set
+  // workerSrc to the matching CDN URL, render every page into the
+  // container as a separate canvas. The worker URL MUST match the
+  // pdf.min.js version exactly or PDF.js refuses with a version
+  // mismatch error.
+  async function renderPdfIntoContainer(url, container) {
+    if (!container) return;
+    const pdfjsLib = window.pdfjsLib;
+    if (!pdfjsLib) {
+      container.innerHTML = `<div style="padding:32px;text-align:center;color:#fff">PDF.js failed to load</div>`;
+      return;
+    }
+    if (!pdfjsLib.GlobalWorkerOptions.workerSrc) {
+      pdfjsLib.GlobalWorkerOptions.workerSrc =
+        "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/legacy/build/pdf.worker.min.js";
+    }
+    try {
+      const loadingTask = pdfjsLib.getDocument({ url });
+      const pdf = await loadingTask.promise;
+      container.innerHTML = "";
+      for (let i = 1; i <= pdf.numPages; i++) {
+        const page = await pdf.getPage(i);
+        const viewport = page.getViewport({ scale: 1.5 });
+        const canvas = document.createElement("canvas");
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        canvas.style.cssText = "display:block;margin:0 auto 12px auto;max-width:100%;height:auto;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.4)";
+        container.appendChild(canvas);
+        await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
+      }
+    } catch (e) {
+      container.innerHTML = `<div style="padding:32px;text-align:center;color:#fff">PDF render failed: ${escapeHtml(String(e.message || e))}</div>`;
+    }
+  }
+
+  // Suppression: contextmenu / selectstart / copy + Cmd/Ctrl-S/P/C
+  // keydowns on the viewer modal. Stored on a state slot so we can
+  // remove the exact same listeners on close (anonymous functions
+  // can't be removed). Doesn't prevent screenshots — the watermark
+  // is the actual deterrent. Doesn't capture global events; only the
+  // viewer modal's own subtree.
+  function installCurriculumViewerSuppression() {
+    const modal = $("#curViewerModalOverlay");
+    if (!modal) return;
+    removeCurriculumViewerSuppression();
+    const block = (e) => { e.preventDefault(); return false; };
+    const blockKeys = (e) => {
+      const k = (e.key || "").toLowerCase();
+      const mod = e.metaKey || e.ctrlKey;
+      if (mod && (k === "s" || k === "p" || k === "c")) {
+        e.preventDefault();
+        return false;
+      }
+    };
+    state._curViewerHandlers = { block, blockKeys };
+    modal.addEventListener("contextmenu", block);
+    modal.addEventListener("selectstart", block);
+    modal.addEventListener("copy",        block);
+    modal.addEventListener("keydown",     blockKeys);
+  }
+
+  function removeCurriculumViewerSuppression() {
+    const modal = $("#curViewerModalOverlay");
+    const h = state._curViewerHandlers;
+    if (!modal || !h) return;
+    modal.removeEventListener("contextmenu", h.block);
+    modal.removeEventListener("selectstart", h.block);
+    modal.removeEventListener("copy",        h.block);
+    modal.removeEventListener("keydown",     h.blockKeys);
+    state._curViewerHandlers = null;
   }
 
   function closeCurriculumViewer() {
     $("#curViewerModalOverlay").classList.remove("open");
+    removeCurriculumViewerSuppression();
+    // Stop any playing video / clear large pdf canvases so we don't
+    // hang on to the signed-URL response in memory after the modal
+    // closes.
+    const body = $("#curViewerBody");
+    if (body) body.innerHTML = "";
+    const wm = $("#curViewerWatermark");
+    if (wm) wm.innerHTML = "";
   }
 
   function renderTeacherWelcomeCard(teacherRow) {
@@ -4601,6 +4799,14 @@
       archiveBtn.textContent = it && it.is_archived ? "Restore" : "Archive";
     }
 
+    // T5c: Preview is only meaningful for saved bucket-stored items.
+    // Hide for new items (no storage_path yet), link, and script types.
+    const previewBtn = $("#cu_previewBtn");
+    if (previewBtn) {
+      const showPreview = !!(it && it.storage_path && ["pdf","video","image"].includes(it.asset_type));
+      previewBtn.style.display = showPreview ? "" : "none";
+    }
+
     syncCurriculumTypeFields();
     $("#curriculumModalOverlay").classList.add("open");
   }
@@ -6346,6 +6552,8 @@
     if (cuOverlay) cuOverlay.onclick = (e) => { if (e.target.id === "curriculumModalOverlay") closeCurriculumEditor(); };
     if (cuSave)    cuSave.onclick    = saveCurriculumItem;
     if (cuArchive) cuArchive.onclick = toggleCurriculumArchive;
+    const cuPreview = $("#cu_previewBtn");
+    if (cuPreview) cuPreview.onclick = openCurriculumPreview;
 
     // Curriculum assign modal (T5b)
     const acClose   = $("#assignCurModalClose");
