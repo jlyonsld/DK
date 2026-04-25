@@ -2294,7 +2294,7 @@
       return `<span style="font-size:11px">${Math.round(diffMin/1440)}d ago</span>`;
     };
 
-    const rows = visible.map((c) => {
+    const cards = visible.map((c) => {
       const sourceBadge = c.is_test
         ? '<span class="source-badge source-test">TEST</span>'
         : c.source === "jackrabbit"
@@ -2304,65 +2304,64 @@
         ? ' <span class="sync-state-dropped_from_source">dropped from JR</span>'
         : "";
       const isOpen = state.cState.openClassId === c.id;
-      const classTeacherRows = state.classTeachers.filter((ct) => ct.class_id === c.id)
-        .map((ct) => ({ ...ct, teacher: state.teachers.find((t) => t.id === ct.teacher_id) }))
-        .filter((x) => x.teacher);
-      const primary = classTeacherRows.find((x) => x.role === "primary");
-      const subs    = classTeacherRows.filter((x) => x.role !== "primary");
-      const teacherCount = classTeacherRows.length;
-      const igCount = state.classInfographics.filter((ci) => ci.class_id === c.id).length;
       const activeEnrollments = state.enrollments.filter((e) => e.class_id === c.id && e.status === "active").length;
+      const initials = classInitialsString(c.id);
 
-      const teacherCell = (() => {
-        if (!classTeacherRows.length) {
-          return '<span style="font-size:11.5px;color:var(--ink-mute);font-style:italic">unassigned</span>';
-        }
-        const parts = [];
-        if (primary) parts.push(`<span style="font-size:12.5px;color:var(--ink)"><b>${escapeHtml(primary.teacher.full_name)}</b></span>`);
-        if (subs.length) {
-          parts.push(`<div style="font-size:11px;color:var(--ink-dim)">+ ${subs.length} ${subs.length === 1 ? "other" : "others"}</div>`);
-        }
-        if (!primary && classTeacherRows[0]) {
-          parts.push(`<span style="font-size:12.5px;color:var(--ink)">${escapeHtml(classTeacherRows[0].teacher.full_name)} <span style="font-size:10px;color:var(--ink-dim)">(${escapeHtml(classTeacherRows[0].role)})</span></span>`);
-        }
-        return parts.join("");
-      })();
+      const dayTimeChip = c.day_time
+        ? `<span class="cm-chip"><span class="ico">📅</span><span class="val">${escapeHtml(c.day_time)}</span></span>`
+        : "";
+      const locationChip = c.location
+        ? `<span class="cm-chip"><span class="ico">📍</span><span class="val">${escapeHtml(c.location)}</span></span>`
+        : "";
+      const teacherChip = initials
+        ? `<span class="cm-chip"><span class="ico">👤</span><span class="val">${escapeHtml(initials)}</span></span>`
+        : `<span class="cm-chip muted"><span class="ico">👤</span><span class="val">unassigned</span></span>`;
+      const enrollChip = `<span class="cm-chip"><span class="ico">👥</span><span class="val">${activeEnrollments} enrolled</span></span>`;
 
-      const enrichSummary = (teacherCount || igCount || activeEnrollments)
-        ? ` <span style="font-size:10.5px;color:var(--ink-dim)">· ${activeEnrollments} enrolled · ${teacherCount} teacher${teacherCount === 1 ? "" : "s"} · ${igCount} graphic${igCount === 1 ? "" : "s"}</span>`
-        : ' <span style="font-size:10.5px;color:var(--ink-dim)">· no enrichment yet</span>';
-      const mainRow = `
-        <tr class="class-row${isOpen ? " open" : ""}" data-id="${escapeHtml(c.id)}"${c.is_test ? ' style="opacity:.6"' : ""}>
-          <td><b>${escapeHtml(c.name)}</b>${sourceBadge}${stateTag}${enrichSummary}${c.age_range ? `<div style="font-size:11.5px;color:var(--ink-dim)">Ages ${escapeHtml(c.age_range)}</div>` : ""}</td>
-          <td>${escapeHtml(c.day_time || "")}</td>
-          <td>${escapeHtml(c.location || "")}</td>
-          <td>${teacherCell}</td>
-          <td><span class="type-badge type-${escapeHtml(c.type || "weekly")}">${typeLabel[c.type] || c.type || "—"}</span>${c.active === false ? ' <span style="color:var(--ink-dim);font-size:11px">(inactive)</span>' : ""}</td>
-          <td>${c.registration_link ? `<a href="${escapeHtml(c.registration_link)}" target="_blank" rel="noopener" style="font-size:12px;color:var(--accent);" onclick="event.stopPropagation()">Link ↗</a>` : '<span style="color:var(--ink-dim);font-size:12px">—</span>'}</td>
-          <td>${fmtSync(c.last_synced_at)}</td>
-          ${showClassEdit ? `<td class="row-actions"><button class="btn small ghost" data-act="edit-class" data-id="${escapeHtml(c.id)}">Edit</button></td>` : ""}
-        </tr>
-        <tr class="class-detail${isOpen ? " open" : ""}" data-detail-for="${escapeHtml(c.id)}">
-          <td colspan="${showClassEdit ? 8 : 7}"><div class="class-detail-body" data-class-id="${escapeHtml(c.id)}"></div></td>
-        </tr>
+      const typeBadge = `<span class="type-badge type-${escapeHtml(c.type || "weekly")}">${typeLabel[c.type] || c.type || "—"}</span>`;
+      const inactiveTag = c.active === false ? '<span style="color:var(--ink-dim);font-size:11px">(inactive)</span>' : "";
+      const regLink = c.registration_link
+        ? `<a href="${escapeHtml(c.registration_link)}" target="_blank" rel="noopener" style="font-size:12px;color:var(--accent);" onclick="event.stopPropagation()">Link ↗</a>`
+        : "";
+      const editBtn = showClassEdit
+        ? `<button class="btn small ghost" data-act="edit-class" data-id="${escapeHtml(c.id)}">Edit</button>`
+        : "";
+
+      return `
+        <article class="class-card${isOpen ? " open" : ""}${c.is_test ? " is-test" : ""}" data-id="${escapeHtml(c.id)}">
+          <div class="class-card-head">
+            <div class="class-card-title">
+              <b>${escapeHtml(c.name)}</b> ${sourceBadge}${stateTag}
+              ${c.age_range ? `<span class="age-sub">Ages ${escapeHtml(c.age_range)}</span>` : ""}
+            </div>
+            <div class="class-card-actions">${regLink}${editBtn}</div>
+          </div>
+          <div class="class-card-meta">
+            ${dayTimeChip}${locationChip}${teacherChip}${enrollChip}
+          </div>
+          <div class="class-card-foot">
+            <div class="left">${typeBadge}${inactiveTag}</div>
+            <div class="right">${fmtSync(c.last_synced_at)}</div>
+          </div>
+          <div class="class-card-body">
+            <div class="class-detail-body class-detail" data-class-id="${escapeHtml(c.id)}"></div>
+          </div>
+        </article>
       `;
-      return mainRow;
     }).join("");
-    const colSpan = showClassEdit ? 8 : 7;
     el.innerHTML = `
-      <table>
-        <thead><tr><th>Name</th><th>Day / Time</th><th>Location</th><th>Teacher</th><th>Type</th><th>Reg. link</th><th>Synced</th>${showClassEdit ? "<th></th>" : ""}</tr></thead>
-        <tbody>${rows || `<tr><td colspan="${colSpan}" style="text-align:center;color:var(--ink-dim);padding:24px">No classes to show.${showClassEdit ? " Click <b>⟳ Sync now</b> to pull from Jackrabbit, or <b>＋ New class</b>." : ""}</td></tr>`}</tbody>
-      </table>
+      <div class="classes-grid">${cards || `<div style="grid-column:1/-1;text-align:center;color:var(--ink-dim);padding:24px">No classes to show.${showClassEdit ? " Click <b>⟳ Sync now</b> to pull from Jackrabbit, or <b>＋ New class</b>." : ""}</div>`}</div>
     `;
     if (showClassEdit) {
       $$('[data-act="edit-class"]', el).forEach((btn) => {
         btn.onclick = (e) => { e.stopPropagation(); openClassEditor(btn.dataset.id); };
       });
     }
-    $$(".class-row", el).forEach((row) => {
-      row.onclick = () => {
-        const id = row.dataset.id;
+    $$(".class-card", el).forEach((card) => {
+      card.onclick = (e) => {
+        if (e.target.closest('.class-card-body')) return;
+        if (e.target.closest('a, button, input, select, textarea, [data-act]')) return;
+        const id = card.dataset.id;
         state.cState.openClassId = (state.cState.openClassId === id) ? null : id;
         renderClassesTab();
       };
