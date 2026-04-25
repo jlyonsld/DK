@@ -1279,22 +1279,32 @@
     if (resp.error || !resp.data?.url) {
       // supabase-js v2 wraps non-2xx responses in a FunctionsHttpError
       // whose `message` is the generic "Edge Function returned a non-2xx
-      // status code". The actual JSON body lives on `error.context` (a
-      // Response object) — read it so the user sees the real reason
-      // (locked, no teacher row, wrong owner, etc.).
+      // status code". The actual Response body lives in different places
+      // depending on the client version: pre-2.50 puts it on
+      // `error.context`, 2.50+ exposes it as a top-level `response`. We
+      // try both, plus any pre-parsed JSON on `data`.
       let msg = resp.data?.error || resp.error?.message || "Failed to fetch curriculum item";
-      try {
-        const ctx = resp.error?.context;
-        if (ctx && typeof ctx.json === "function") {
-          const parsed = await ctx.clone().json();
-          if (parsed && parsed.error) msg = parsed.error;
-        } else if (ctx && typeof ctx.text === "function") {
-          const txt = await ctx.clone().text();
-          if (txt) msg = txt;
+      let status = null;
+      const respObj = resp.response || resp.error?.context || null;
+      if (respObj) {
+        status = respObj.status ?? null;
+        try {
+          const parsed = await respObj.clone().json();
+          if (parsed) {
+            msg = parsed.error || parsed.message || JSON.stringify(parsed);
+          }
+        } catch {
+          try {
+            const txt = await respObj.clone().text();
+            if (txt) msg = txt;
+          } catch (textErr) {
+            console.warn("[curriculum-fetch] could not read response body", textErr);
+          }
         }
-      } catch { /* fall through with the generic message */ }
-      console.error("[curriculum-fetch]", msg, resp);
-      if (body) body.innerHTML = `<div style="padding:32px;text-align:center;color:var(--ink-dim)">${escapeHtml(msg)}</div>`;
+      }
+      console.error("[curriculum-fetch] status=" + status, msg, resp);
+      const display = status ? `${status} · ${msg}` : msg;
+      if (body) body.innerHTML = `<div style="padding:32px;text-align:center;color:var(--ink-dim)">${escapeHtml(display)}</div>`;
       return;
     }
     const { url } = resp.data;
