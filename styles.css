@@ -2452,6 +2452,186 @@ footer code {
   .sr-actions { gap: 6px; }
 }
 
+/* ═════════════ Schools / class cancellations / notifications (Phase T8) ═════════════
+ * Schools tab card grid, school editor modal sections, notify modal,
+ * and the "cancelled" overlay style for schedule blocks.
+ */
+
+.schools-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+.schools-unlinked-banner {
+  margin: 8px 0 4px;
+  padding: 8px 12px;
+  background: #fff7e6;
+  border: 1px solid #f0d88a;
+  border-radius: 8px;
+  font-size: 12.5px;
+  color: #7a5b00;
+}
+
+.school-card {
+  background: var(--surface, #fff);
+  border: 1px solid var(--border, #d8d8d8);
+  border-radius: 10px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.school-card.inactive { opacity: .7; }
+.school-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+}
+.school-name {
+  font-weight: 600;
+  font-size: 14.5px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.school-addr {
+  font-size: 12px;
+  color: var(--ink-dim, #6b6b6b);
+}
+.school-inactive-pill {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface-alt, #fafafa);
+  color: var(--ink-dim, #6b6b6b);
+  border: 1px solid var(--border, #d8d8d8);
+}
+.school-meta-row {
+  font-size: 12px;
+  color: var(--ink-dim, #6b6b6b);
+}
+.school-class-count {
+  display: inline-block;
+  padding: 2px 8px;
+  background: var(--surface-alt, #fafafa);
+  border: 1px solid var(--border-subtle, #eee);
+  border-radius: 999px;
+  font-size: 11.5px;
+}
+.school-contacts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid var(--border-subtle, #eee);
+  padding-top: 8px;
+}
+.school-contact {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.school-contact-label {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--ink-dim, #6b6b6b);
+  font-weight: 600;
+}
+.school-contact-name { font-size: 13px; font-weight: 500; }
+.school-contact-line { font-size: 12.5px; color: var(--ink-dim, #6b6b6b); }
+.school-contact-line a { color: inherit; text-decoration: underline; text-decoration-color: rgba(0,0,0,.2); }
+.school-contact-missing {
+  font-size: 12.5px;
+  color: var(--ink-dim, #6b6b6b);
+  font-style: italic;
+}
+
+/* School-editor modal — group primary / daily contact rows visually. */
+.schools-modal-section {
+  border: 1px solid var(--border-subtle, #eee);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-top: 10px;
+  background: var(--surface-alt, #fafafa);
+}
+.schools-modal-section-head {
+  display: flex;
+  align-items: center;
+  font-size: 11.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--ink-dim, #6b6b6b);
+}
+.schools-modal-section-hint {
+  font-size: 11.5px;
+  color: var(--ink-dim, #6b6b6b);
+  margin-bottom: 8px;
+}
+
+/* Notify modal */
+.notify-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12.5px;
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  background: var(--surface-alt, #fafafa);
+  border: 1px solid var(--border-subtle, #eee);
+  border-radius: 6px;
+}
+.notify-meta-label {
+  display: inline-block;
+  min-width: 60px;
+  color: var(--ink-dim, #6b6b6b);
+  font-weight: 600;
+}
+.notify-meta input[type="email"] {
+  font-size: 12.5px;
+  padding: 3px 6px;
+  border: 1px solid var(--border, #d8d8d8);
+  border-radius: 4px;
+  background: var(--surface, #fff);
+  min-width: 220px;
+}
+.notify-warn {
+  padding: 8px 12px;
+  background: #fff7e6;
+  border: 1px solid #f0d88a;
+  border-radius: 6px;
+  font-size: 12px;
+  color: #7a5b00;
+  margin-bottom: 10px;
+}
+
+/* Schedule view: cancelled session styling */
+.sched-week-block.sched-cancelled,
+.sched-month-row.sched-cancelled {
+  opacity: .55;
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+.sched-week-block.sched-cancelled .sched-week-block-title,
+.sched-week-block.sched-cancelled .sched-week-block-sub,
+.sched-month-row.sched-cancelled .sched-month-row-name {
+  text-decoration: line-through;
+}
+.sched-cancelled-badge {
+  color: #b3341c;
+  font-weight: 700;
+}
+
+@media (max-width: 720px) {
+  .schools-grid { grid-template-columns: 1fr; }
+  .schools-modal-section { padding: 8px 10px; }
+}
+
 /* ═════════════ Mobile bottom nav (≤720px) — mirrors PAR's lower menu ═════════════
  * Hidden by default; shown only on narrow viewports. Replaces the horizontal
  * tab bar when CSS hides .tabs at ≤720px (see below).
