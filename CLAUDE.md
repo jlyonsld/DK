@@ -54,7 +54,7 @@ response-console-v3/
 │                                 - Home bento (admin variant + teacher variant)
 │                                 - Schedule Day/Week/Month renderers
 │                                 - Templates (list, edit modal, card body)
-│                                 - Classes (table + detail expand panel)
+│                                 - Classes (card grid + detail expand panel)
 │                                 - Teachers (table + edit modal)
 │                                 - Categories (inline editor)
 │                                 - Infographics (sidebar + management table)
