@@ -4391,11 +4391,11 @@
     }
 
     syncCurriculumTypeFields();
-    $("#curriculumModalOverlay").classList.add("show");
+    $("#curriculumModalOverlay").classList.add("open");
   }
 
   function closeCurriculumEditor() {
-    $("#curriculumModalOverlay").classList.remove("show");
+    $("#curriculumModalOverlay").classList.remove("open");
     state.curState.editingId = null;
   }
 
