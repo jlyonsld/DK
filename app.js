@@ -1336,9 +1336,11 @@
       // would also work; this keeps the markup simple.
       const text = `${tname} · ${temail} · ${stamp}${ctx}`;
       // Build a grid of repeated labels so the entire surface is
-      // covered regardless of viewport. 8 rows × 4 cols = 32 tiles.
+      // covered regardless of viewport. 5 rows × 3 cols = 15 tiles —
+      // sparser than the original 32-tile pack so each instance is
+      // more visually distinct (CSS sets the 3-col grid to match).
       const tiles = [];
-      for (let i = 0; i < 32; i++) tiles.push(`<span class="cur-viewer-watermark-tile">${escapeHtml(text)}</span>`);
+      for (let i = 0; i < 15; i++) tiles.push(`<span class="cur-viewer-watermark-tile">${escapeHtml(text)}</span>`);
       wm.innerHTML = tiles.join("");
     }
 
