@@ -3986,13 +3986,56 @@
     editingTeacherId = id || null;
     const t = id ? state.teachers.find((x) => x.id === id) : null;
     $("#teacherModalTitle").textContent = t ? "Edit teacher" : "New teacher";
-    $("#t_name").value      = t ? t.full_name : "";
-    $("#t_email").value     = t ? (t.email || "") : "";
-    $("#t_phone").value     = t ? (t.phone || "") : "";
-    $("#t_pay_rate").value  = t ? (t.pay_rate || "") : "";
-    $("#t_status").value    = t ? (t.status || "active") : "active";
-    $("#t_hire_date").value = t ? (t.hire_date || "") : "";
-    $("#t_notes").value     = t ? (t.notes || "") : "";
+
+    // Role gating: PII / address / emergency contact / employment
+    // classification / DOB / background+compliance are admin-only.
+    // Payroll (pay_rate, pay_type, payment method, W-9) is gated on
+    // view_pay_rates so the per-user grant story still works.
+    const showPersonnel = isAdminOrAbove();
+    const showPayroll   = hasPerm("view_pay_rates");
+    $$('#teacherModalOverlay .personnel-only').forEach((el) => el.style.display = showPersonnel ? "" : "none");
+    $$('#teacherModalOverlay .payroll-only').forEach((el) => el.style.display = showPayroll ? "" : "none");
+
+    // Always-visible fields
+    $("#t_name").value           = t ? (t.full_name || "") : "";
+    $("#t_preferred_name").value = t ? (t.preferred_name || "") : "";
+    $("#t_email").value          = t ? (t.email || "") : "";
+    $("#t_phone").value          = t ? (t.phone || "") : "";
+    $("#t_title").value          = t ? (t.title || "") : "";
+    $("#t_status").value         = t ? (t.status || "active") : "active";
+    $("#t_hire_date").value      = t ? (t.hire_date || "") : "";
+    $("#t_notes").value          = t ? (t.notes || "") : "";
+
+    // Personnel section (admin/super_admin)
+    $("#t_dob").value                = t ? (t.date_of_birth || "") : "";
+    $("#t_address1").value           = t ? (t.address_line1 || "") : "";
+    $("#t_address2").value           = t ? (t.address_line2 || "") : "";
+    $("#t_city").value               = t ? (t.city || "") : "";
+    $("#t_state").value              = t ? (t.state || "") : "";
+    $("#t_postal").value             = t ? (t.postal_code || "") : "";
+    $("#t_ec_name").value            = t ? (t.emergency_contact_name || "") : "";
+    $("#t_ec_phone").value           = t ? (t.emergency_contact_phone || "") : "";
+    $("#t_ec_relationship").value    = t ? (t.emergency_contact_relationship || "") : "";
+    $("#t_term_date").value          = t ? (t.termination_date || "") : "";
+    $("#t_employment_type").value    = t ? (t.employment_type || "") : "";
+    $("#t_bg_status").value          = t ? (t.background_check_status || "") : "";
+    $("#t_bg_provider").value        = t ? (t.background_check_provider || "") : "";
+    $("#t_bg_date").value            = t ? (t.background_check_date || "") : "";
+    $("#t_bg_expires").value         = t ? (t.background_check_expires_date || "") : "";
+    $("#t_cpr").checked              = t ? !!t.cpr_certified : false;
+    $("#t_cpr_expires").value        = t ? (t.cpr_expires_date || "") : "";
+    $("#t_first_aid").checked        = t ? !!t.first_aid_certified : false;
+    $("#t_first_aid_expires").value  = t ? (t.first_aid_expires_date || "") : "";
+    $("#t_waiver").checked           = t ? !!t.liability_waiver_signed : false;
+    $("#t_waiver_date").value        = t ? (t.liability_waiver_date || "") : "";
+
+    // Payroll section (view_pay_rates)
+    $("#t_pay_type").value        = t ? (t.pay_type || "") : "";
+    $("#t_pay_rate").value        = t ? (t.pay_rate || "") : "";
+    $("#t_payment_method").value  = t ? (t.payment_method || "") : "";
+    $("#t_w9_date").value         = t ? (t.w9_received_date || "") : "";
+    $("#t_w9_on_file").checked    = t ? !!t.w9_on_file : false;
+
     $("#deleteTeacherBtn").style.display = t ? "" : "none";
     $("#teacherModalOverlay").classList.add("open");
     setTimeout(() => $("#t_name").focus(), 50);
@@ -4002,15 +4045,57 @@
   async function saveTeacher() {
     const name = $("#t_name").value.trim();
     if (!name) { showToast("Name is required", "error"); return; }
+    const showPersonnel = isAdminOrAbove();
+    const showPayroll   = hasPerm("view_pay_rates");
+
+    // Always-saved fields. Managers using the Edit button save just these
+    // — admin-only fields aren't included so a manager save can't null
+    // out personnel data they couldn't see.
     const payload = {
       full_name: name,
+      preferred_name: $("#t_preferred_name").value.trim() || null,
       email: $("#t_email").value.trim() || null,
       phone: $("#t_phone").value.trim() || null,
-      pay_rate: $("#t_pay_rate").value.trim() || null,
+      title: $("#t_title").value.trim() || null,
       status: $("#t_status").value,
       hire_date: $("#t_hire_date").value || null,
       notes: $("#t_notes").value || null,
     };
+    if (showPersonnel) {
+      Object.assign(payload, {
+        date_of_birth: $("#t_dob").value || null,
+        address_line1: $("#t_address1").value.trim() || null,
+        address_line2: $("#t_address2").value.trim() || null,
+        city: $("#t_city").value.trim() || null,
+        state: $("#t_state").value.trim() || null,
+        postal_code: $("#t_postal").value.trim() || null,
+        emergency_contact_name: $("#t_ec_name").value.trim() || null,
+        emergency_contact_phone: $("#t_ec_phone").value.trim() || null,
+        emergency_contact_relationship: $("#t_ec_relationship").value.trim() || null,
+        termination_date: $("#t_term_date").value || null,
+        employment_type: $("#t_employment_type").value || null,
+        background_check_status: $("#t_bg_status").value || null,
+        background_check_provider: $("#t_bg_provider").value.trim() || null,
+        background_check_date: $("#t_bg_date").value || null,
+        background_check_expires_date: $("#t_bg_expires").value || null,
+        cpr_certified: $("#t_cpr").checked,
+        cpr_expires_date: $("#t_cpr_expires").value || null,
+        first_aid_certified: $("#t_first_aid").checked,
+        first_aid_expires_date: $("#t_first_aid_expires").value || null,
+        liability_waiver_signed: $("#t_waiver").checked,
+        liability_waiver_date: $("#t_waiver_date").value || null,
+      });
+    }
+    if (showPayroll) {
+      Object.assign(payload, {
+        pay_type: $("#t_pay_type").value || null,
+        pay_rate: $("#t_pay_rate").value.trim() || null,
+        payment_method: $("#t_payment_method").value || null,
+        w9_on_file: $("#t_w9_on_file").checked,
+        w9_received_date: $("#t_w9_date").value || null,
+      });
+    }
+
     showLoader(true);
     let resp;
     if (editingTeacherId) {

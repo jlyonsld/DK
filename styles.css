@@ -1417,6 +1417,52 @@ section.content { min-width: 0; }
 .field-hint { font-size: 11.5px; color: var(--ink-dim); margin-top: 5px; }
 .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 
+.modal-section-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  color: var(--ink-mute);
+  margin: 22px 0 14px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+.modal-body > .modal-section-title:first-child,
+.modal-body > .modal-section-title:first-of-type {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+.personnel-only > .modal-section-title:first-child,
+.payroll-only   > .modal-section-title:first-child {
+  margin-top: 0;
+}
+
+.field .checkbox-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--ink-soft);
+  cursor: pointer;
+  margin-top: 22px;
+}
+.field .checkbox-label input[type=checkbox] {
+  width: auto;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.field .notes-textarea {
+  min-height: 90px;
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
 .image-rows { display: flex; flex-direction: column; gap: 6px; }
 .image-row {
   display: grid;

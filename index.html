@@ -411,9 +411,20 @@
         <button class="btn ghost small" id="teacherModalClose">✕</button>
       </div>
       <div class="modal-body">
+        <h4 class="modal-section-title">Personal</h4>
         <div class="field">
           <label>Full name</label>
           <input type="text" id="t_name" placeholder="e.g. Katarina Fradenburg" />
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>Preferred name <span class="field-sub">(optional)</span></label>
+            <input type="text" id="t_preferred_name" placeholder="Kat" />
+          </div>
+          <div class="field personnel-only">
+            <label>Date of birth</label>
+            <input type="date" id="t_dob" />
+          </div>
         </div>
         <div class="field-row">
           <div class="field">
@@ -425,10 +436,54 @@
             <input type="text" id="t_phone" placeholder="(843) …" />
           </div>
         </div>
+
+        <div class="personnel-only">
+          <h4 class="modal-section-title">Mailing address</h4>
+          <div class="field">
+            <label>Street</label>
+            <input type="text" id="t_address1" placeholder="123 Main St" />
+          </div>
+          <div class="field">
+            <label>Apt / suite <span class="field-sub">(optional)</span></label>
+            <input type="text" id="t_address2" />
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label>City</label>
+              <input type="text" id="t_city" />
+            </div>
+            <div class="field">
+              <label>State</label>
+              <input type="text" id="t_state" placeholder="SC" />
+            </div>
+          </div>
+          <div class="field">
+            <label>Postal code</label>
+            <input type="text" id="t_postal" placeholder="29401" />
+          </div>
+
+          <h4 class="modal-section-title">Emergency contact</h4>
+          <div class="field">
+            <label>Name</label>
+            <input type="text" id="t_ec_name" />
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label>Phone</label>
+              <input type="text" id="t_ec_phone" />
+            </div>
+            <div class="field">
+              <label>Relationship</label>
+              <input type="text" id="t_ec_relationship" placeholder="Spouse, parent, …" />
+            </div>
+          </div>
+        </div>
+
+        <h4 class="modal-section-title">Employment</h4>
         <div class="field-row">
           <div class="field">
-            <label>Pay rate <span class="field-sub">(free-form)</span></label>
-            <input type="text" id="t_pay_rate" placeholder="e.g. $35/class, $20/hour" />
+            <label>Title</label>
+            <input type="text" id="t_title" placeholder="e.g. Lead drama teacher" />
           </div>
           <div class="field">
             <label>Status</label>
@@ -439,13 +494,131 @@
             </select>
           </div>
         </div>
-        <div class="field">
-          <label>Hire date</label>
-          <input type="date" id="t_hire_date" />
+        <div class="field-row">
+          <div class="field">
+            <label>Hire date</label>
+            <input type="date" id="t_hire_date" />
+          </div>
+          <div class="field personnel-only">
+            <label>Termination date</label>
+            <input type="date" id="t_term_date" />
+          </div>
         </div>
+        <div class="field personnel-only">
+          <label>Employment type</label>
+          <select id="t_employment_type">
+            <option value="">—</option>
+            <option value="w2">W-2 employee</option>
+            <option value="1099">1099 contractor</option>
+            <option value="volunteer">Volunteer</option>
+            <option value="intern">Intern</option>
+            <option value="other">Other</option>
+          </select>
+        </div>
+
+        <div class="payroll-only">
+          <h4 class="modal-section-title">Payroll</h4>
+          <div class="field-row">
+            <div class="field">
+              <label>Pay type</label>
+              <select id="t_pay_type">
+                <option value="">—</option>
+                <option value="per_class">Per class</option>
+                <option value="hourly">Hourly</option>
+                <option value="salary">Salary</option>
+                <option value="stipend">Stipend</option>
+                <option value="other">Other</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>Pay rate <span class="field-sub">(free-form)</span></label>
+              <input type="text" id="t_pay_rate" placeholder="e.g. $35/class, $20/hour" />
+            </div>
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label>Payment method</label>
+              <select id="t_payment_method">
+                <option value="">—</option>
+                <option value="direct_deposit">Direct deposit</option>
+                <option value="check">Check</option>
+                <option value="paypal">PayPal</option>
+                <option value="venmo">Venmo</option>
+                <option value="zelle">Zelle</option>
+                <option value="other">Other</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>W-9 received</label>
+              <input type="date" id="t_w9_date" />
+            </div>
+          </div>
+          <div class="field">
+            <label class="checkbox-label"><input type="checkbox" id="t_w9_on_file" /> W-9 on file</label>
+          </div>
+        </div>
+
+        <div class="personnel-only">
+          <h4 class="modal-section-title">Compliance &amp; background</h4>
+          <div class="field-row">
+            <div class="field">
+              <label>Background check status</label>
+              <select id="t_bg_status">
+                <option value="">—</option>
+                <option value="none">None</option>
+                <option value="pending">Pending</option>
+                <option value="cleared">Cleared</option>
+                <option value="flagged">Flagged</option>
+                <option value="expired">Expired</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>Provider</label>
+              <input type="text" id="t_bg_provider" placeholder="e.g. Sterling, Checkr" />
+            </div>
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label>Check date</label>
+              <input type="date" id="t_bg_date" />
+            </div>
+            <div class="field">
+              <label>Expires</label>
+              <input type="date" id="t_bg_expires" />
+            </div>
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label class="checkbox-label"><input type="checkbox" id="t_cpr" /> CPR certified</label>
+            </div>
+            <div class="field">
+              <label>CPR expires</label>
+              <input type="date" id="t_cpr_expires" />
+            </div>
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label class="checkbox-label"><input type="checkbox" id="t_first_aid" /> First aid certified</label>
+            </div>
+            <div class="field">
+              <label>First aid expires</label>
+              <input type="date" id="t_first_aid_expires" />
+            </div>
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label class="checkbox-label"><input type="checkbox" id="t_waiver" /> Liability waiver signed</label>
+            </div>
+            <div class="field">
+              <label>Waiver date</label>
+              <input type="date" id="t_waiver_date" />
+            </div>
+          </div>
+        </div>
+
+        <h4 class="modal-section-title">Notes</h4>
         <div class="field">
-          <label>Notes</label>
-          <input type="text" id="t_notes" />
+          <textarea id="t_notes" class="notes-textarea" rows="4" placeholder="Internal personnel notes…"></textarea>
         </div>
       </div>
       <div class="modal-foot">
