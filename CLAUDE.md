@@ -73,7 +73,21 @@ response-console-v3/
 ├── config.js                 ← Supabase URL + publishable key. The
 │                               publishable key is safe in the browser —
 │                               every write is RLS-gated.
-├── logo.png                  ← Brand asset.
+├── logo.png                  ← 1024² PAR DK brand mark. Also the source
+│                               for the PWA icon set below — regenerate
+│                               via `sips` if you replace it (see §4.18).
+├── manifest.webmanifest      ← PWA manifest. Name, short_name ("PAR DK"),
+│                               navy theme/background (#0b1638), and the
+│                               three icon entries. See §4.18.
+├── sw.js                     ← Minimal pass-through service worker.
+│                               No caching — exists only to satisfy PWA
+│                               install criteria. See §4.18 + §5.
+├── apple-touch-icon.png      ← 180×180 — iOS home-screen icon.
+├── icon-192.png              ← 192×192 — Android home-screen / manifest.
+├── icon-512.png              ← 512×512 — Android splash / manifest.
+├── icon-maskable-512.png     ← 512×512 maskable — Android adaptive icon.
+├── favicon-32.png            ← 32×32 browser tab.
+├── favicon-16.png            ← 16×16 browser tab.
 ├── README.md                 ← Older. May be stale.
 │
 ├── CLAUDE.md                 ← This file.
@@ -309,6 +323,18 @@ Body gets `padding-bottom: calc(76px + env(safe-area-inset-bottom))` at ≤720px
 
 **When you add a new tab,** update three places together: `index.html` (top `.tabs` + either an `.mtab` for a first-class mobile slot OR a `.mobile-tools-item` for an overflow-sheet entry), `ROLE_TAB_VISIBILITY` in `app.js` (add the new tab name to every role Set that should see it), and the Tools-button auto-hide list in `applyRoleVisibility()` if the tab belongs in the overflow sheet.
 
+### 4.18 Installable PWA — minimal manifest, pass-through service worker
+
+DK installs to iOS / Android home screens and macOS / Windows desktops as a standalone PWA. The wiring is in three places:
+
+1. **`manifest.webmanifest`** declares `name` ("PAR DK · Response Console"), `short_name` ("PAR DK" — what shows under the home-screen icon, kept short for iOS truncation), navy `background_color` and `theme_color` (`#0b1638`, matching the logo's baked-in background), `display: standalone`, and three icon entries (192 any, 512 any, 512 maskable).
+2. **`<head>` of `index.html` AND `install.html`** carries the icon links (32/16 favicon, apple-touch), the manifest link, `theme-color`, and the four `apple-mobile-web-app-*` meta tags. `install.html` is included so a user clicking through PAR's spoke install flow on a fresh device gets the same icons / standalone behavior end-to-end.
+3. **`sw.js`** is a deliberately minimal pass-through service worker — `skipWaiting` + `clients.claim` + a fetch handler that just calls `fetch(event.request)` with a 503 fallback. It does no caching and stores nothing. It exists for two reasons: (a) Chrome's installability check requires a SW with a fetch handler, (b) iOS treats sites with any SW as "real" web apps with better standalone behavior. Registered from `index.html` via a tiny inline script after `app.js` loads.
+
+**Why pass-through, not a caching SW.** Per §5, Vercel redeploys reach the live site in ~30s — aggressive SW caching would gate that visibility behind a registration update + reload, which is exactly the failure mode that makes "did my push deploy?" investigations painful. The browser's HTTP cache + Vercel's CDN are sufficient. If you ever need offline support, design a versioning + force-update story first.
+
+**Regenerating icons.** All six PNG sizes derive from the 1024² `logo.png` source via macOS `sips` (`sips -z <size> <size> logo.png --out <name>.png`). Keep them in sync — a stale icon size will silently win on whichever platform happens to prefer it. The maskable variant uses the same source as `icon-512.png` because the logo's navy background fills the square (no transparent corners to clip).
+
 ---
 
 ## 5. Gotchas, quirks, and "don't touch this"
@@ -358,6 +384,8 @@ Body gets `padding-bottom: calc(76px + env(safe-area-inset-bottom))` at ≤720px
 **Student INSERTs use client-side `crypto.randomUUID()` ids.** Because teacher-scoped RLS on `students` only allows SELECT once the student is enrolled in one of the teacher's classes, `.insert().select().single()` would fail to read back the just-inserted row. The "+ Add student" flow pre-generates the UUID in JS so it can chain the enrollment INSERT without reading the student back.
 
 **Attendance status enum still accepts `late` and `excused`.** The UI only writes `present` / `absent` / `unknown`, but the check constraint is kept permissive so historical rows and future states survive a schema change without a migration. Renderers fold `late` → Present and `excused` → Absent.
+
+**`sw.js` is pass-through, not caching.** It exists only to satisfy PWA install criteria (§4.18). Don't add caching casually — caching the static shell would gate Vercel deploys behind a SW registration update + reload, undoing the "push hits prod in ~30s" property the rest of this codebase relies on. If you genuinely need offline support, design versioning + a forced-update path first.
 
 ---
 
