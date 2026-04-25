@@ -1311,21 +1311,34 @@
     installCurriculumViewerSuppression();
   }
 
-  // PDF.js render — load pdfjsLib (UMD global from index.html), set
-  // workerSrc to the matching CDN URL, render every page into the
-  // container as a separate canvas. The worker URL MUST match the
-  // pdf.min.js version exactly or PDF.js refuses with a version
-  // mismatch error.
+  // PDF.js render — lazy-load via dynamic import() (no build step,
+  // no global pollution). v4 ships an ESM-only default build, so we
+  // import the module namespace directly. workerSrc MUST match the
+  // bundle URL's version exactly or v4 throws "API version does not
+  // match Worker version" — keep the constant in one place.
+  const PDFJS_CDN = "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build";
+  let _pdfjsModule = null;
+
+  async function loadPdfJs() {
+    if (_pdfjsModule) return _pdfjsModule;
+    // dynamic import — Safari + Chrome + FF support this natively as
+    // of all currently shipping versions.
+    const mod = await import(/* @vite-ignore */ `${PDFJS_CDN}/pdf.min.mjs`);
+    if (!mod.GlobalWorkerOptions.workerSrc) {
+      mod.GlobalWorkerOptions.workerSrc = `${PDFJS_CDN}/pdf.worker.min.mjs`;
+    }
+    _pdfjsModule = mod;
+    return mod;
+  }
+
   async function renderPdfIntoContainer(url, container) {
     if (!container) return;
-    const pdfjsLib = window.pdfjsLib;
-    if (!pdfjsLib) {
-      container.innerHTML = `<div style="padding:32px;text-align:center;color:#fff">PDF.js failed to load</div>`;
+    let pdfjsLib;
+    try {
+      pdfjsLib = await loadPdfJs();
+    } catch (e) {
+      container.innerHTML = `<div style="padding:32px;text-align:center;color:#fff">PDF.js failed to load: ${escapeHtml(String(e.message || e))}</div>`;
       return;
-    }
-    if (!pdfjsLib.GlobalWorkerOptions.workerSrc) {
-      pdfjsLib.GlobalWorkerOptions.workerSrc =
-        "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/legacy/build/pdf.worker.min.js";
     }
     try {
       const loadingTask = pdfjsLib.getDocument({ url });

@@ -1227,13 +1227,11 @@
 
   <!-- Supabase client -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-  <!-- PDF.js for the T5c watermarked curriculum viewer. CDN-only, no
-       build step (CLAUDE.md no-bundler principle). Use the legacy UMD
-       build so `pdfjsLib` is exposed on window — the ES module build
-       (`pdf.min.mjs`) won't pollute globals. The companion worker URL
-       must be set on pdfjsLib.GlobalWorkerOptions.workerSrc before any
-       document is loaded; see openCurriculumWatermarkedViewer in app.js. -->
-  <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/legacy/build/pdf.min.js"></script>
+  <!-- PDF.js for the T5c watermarked curriculum viewer is loaded
+       lazily via a dynamic import() inside app.js (renderPdfIntoContainer)
+       — see CLAUDE.md §5. We deliberately don't preload it here so the
+       initial page weight stays small for the 99% of sessions that
+       never open a PDF. -->
   <script src="config.js"></script>
   <script src="app.js"></script>
 
