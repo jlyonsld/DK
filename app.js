@@ -5738,6 +5738,8 @@
     $("#c_registration_link").value = c ? (c.registration_link || "") : "";
     $("#c_age_range").value         = c ? (c.age_range || "") : "";
     $("#c_type").value              = c ? (c.type || "weekly") : "weekly";
+    $("#c_start_date").value        = c ? (c.start_date || "") : "";
+    $("#c_end_date").value          = c ? (c.end_date || "") : "";
     $("#c_active").value            = (c && c.active === false) ? "false" : "true";
     $("#c_notes").value             = c ? (c.notes || "") : "";
     $("#deleteClassBtn").style.display = c ? "" : "none";
@@ -5759,6 +5761,8 @@
       age_range: $("#c_age_range").value.trim() || null,
       type: $("#c_type").value,
       active: $("#c_active").value !== "false",
+      start_date: $("#c_start_date").value || null,
+      end_date: $("#c_end_date").value || null,
       notes: $("#c_notes").value || null
     };
     showLoader(true);
