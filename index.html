@@ -878,6 +878,72 @@
     </div>
   </div>
 
+  <!-- Assign curriculum modal (Phase T5b). Open from the per-row "Assign…"
+       button on the Curriculum tab. Lists current assignments + an inline
+       form to add a new (class, teacher) pair with optional lead-day override
+       and curator notes. -->
+  <div class="modal-overlay" id="assignCurModalOverlay">
+    <div class="modal" style="max-width:640px">
+      <div class="modal-head">
+        <h3 id="assignCurModalTitle">Assign curriculum</h3>
+        <button class="btn ghost small" id="assignCurModalClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <p style="margin:0 0 12px 0;font-size:12.5px;color:var(--ink-dim)">
+          Default lead time on this item: <b id="assignCurDefaultLead">7d</b>. Override below per assignment if a particular teacher needs more or less prep time.
+        </p>
+
+        <div class="field"><label>Current assignments</label></div>
+        <div id="assignCurList" class="assign-cur-list"></div>
+
+        <hr style="margin:16px 0;border:none;border-top:1px solid var(--border-subtle,#eee)" />
+
+        <div class="field"><label>Add an assignment</label></div>
+        <div class="field-row">
+          <div class="field">
+            <label>Class *</label>
+            <select id="assignCurClass"></select>
+          </div>
+          <div class="field">
+            <label>Teacher *</label>
+            <select id="assignCurTeacher"></select>
+          </div>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>Lead-day override <span class="field-sub">(blank = use default)</span></label>
+            <input type="number" id="assignCurLeadOverride" min="0" max="60" placeholder="—" />
+          </div>
+          <div class="field" style="flex:2">
+            <label>Curator note <span class="field-sub">(visible to the teacher)</span></label>
+            <input type="text" id="assignCurNotes" placeholder="e.g. Use the warmup pages only with the older cohort" />
+          </div>
+        </div>
+        <div style="display:flex;justify-content:flex-end;margin-top:8px">
+          <button class="btn primary small" id="assignCurAddBtn" disabled>+ Add assignment</button>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn primary" id="assignCurDone">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Curriculum viewer modal (Phase T5b — script + link types only).
+       PDF/video/image viewer with watermark + audit log lands in T5c. -->
+  <div class="modal-overlay" id="curViewerModalOverlay">
+    <div class="modal" style="max-width:720px">
+      <div class="modal-head">
+        <h3 id="curViewerTitle">Curriculum item</h3>
+        <button class="btn ghost small" id="curViewerModalClose">✕</button>
+      </div>
+      <div class="modal-body" id="curViewerBody"></div>
+      <div class="modal-foot">
+        <button class="btn primary" id="curViewerDone">Done</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Reconcile duplicate modal (admin resolves a student_match_candidate) -->
   <div class="modal-overlay" id="reconcileModalOverlay">
     <div class="modal" style="max-width:640px">

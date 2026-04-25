@@ -44,6 +44,8 @@
     classCancellations: [], // class_cancellations rows (one per cancelled session)
     closures: [],
     curriculumItems: [],
+    curriculumAssignments: [],   // (curriculum_item_id, class_id, teacher_id) rows
+                                 // RLS: admin/manager see all; teacher sees own.
     dkConfig: null,
     latestSyncLog: null,
     tState: { query: "", category: "all", filled: {} },
@@ -59,6 +61,9 @@
     // Sub-requests tab filter: "open" (default), "mine" (created/filled by me),
     // "all" (admin/manager only).
     srState: { filter: "open" },
+    // Assign-curriculum modal state. itemId = which curriculum item is being
+    // managed; the form fields below capture the next row to insert.
+    assignCurState: { itemId: null, formClassId: "", formTeacherId: "", formLeadOverride: "", formNotes: "" },
     // Schools tab state — search + active toggle.
     schState: { query: "", showInactive: false },
     router: "home"
@@ -392,7 +397,7 @@
       "student_match_candidates",
       "sub_requests", "sub_claims",
       "schools", "class_cancellations",
-      "curriculum_items"
+      "curriculum_items", "curriculum_assignments"
     ];
     realtimeChannel = sb.channel("dk-realtime");
     tablesToWatch.forEach((table) => {
@@ -543,7 +548,7 @@
   async function reloadAll() {
     showLoader(true);
     try {
-      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches, att, clk, subs, subClm, schs, canc, cur] = await Promise.all([
+      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches, att, clk, subs, subClm, schs, canc, cur, curA] = await Promise.all([
         sb.from("categories").select("*").order("sort_order", { ascending: true }),
         sb.from("templates").select("*").order("created_at", { ascending: true }),
         sb.from("classes").select("*").order("name", { ascending: true }),
@@ -564,7 +569,8 @@
         sb.from("sub_claims").select("*").order("created_at", { ascending: false }),
         sb.from("schools").select("*").order("name", { ascending: true }),
         sb.from("class_cancellations").select("*").order("session_date", { ascending: false }),
-        sb.from("curriculum_items").select("*").order("created_at", { ascending: false })
+        sb.from("curriculum_items").select("*").order("created_at", { ascending: false }),
+        sb.from("curriculum_assignments").select("*").order("assigned_at", { ascending: false })
       ]);
       for (const r of [cats, tpls, cls, igs, tch, ct, ci, stu, enr]) if (r.error) throw r.error;
       // Non-admin roles may not have SELECT access to teacher_invitations /
@@ -602,9 +608,12 @@
       // applied; tolerate the error so the rest of the app stays usable.
       state.schools          = (schs && !schs.error) ? schs.data : [];
       state.classCancellations = (canc && !canc.error) ? canc.data : [];
-      // Curriculum items: T5a RLS gates SELECT to edit_curriculum / assign_curriculum.
-      // Teachers/viewers see empty here; their gated view lands in T5b.
+      // Curriculum items: T5a admin/manager SELECT path; T5b widens to teachers
+      // who hold ≥1 assignment for the item. Viewers stay blind.
       state.curriculumItems  = (cur && !cur.error) ? cur.data : [];
+      // Curriculum assignments (T5b): admin/manager see all; teachers see own
+      // rows via teachers.email join. Viewers fall back to empty.
+      state.curriculumAssignments = (curA && !curA.error) ? curA.data : [];
     } catch (e) {
       console.error(e);
       showToast("Failed to load: " + e.message, "error");
@@ -763,10 +772,7 @@
         <div class="bento-card bento-span-12">
           ${renderTeacherWelcomeCard(null)}
         </div>
-        <div class="bento-card bento-span-6">
-          ${renderTeacherComingSoonCard()}
-        </div>
-        <div class="bento-card bento-span-6">
+        <div class="bento-card bento-span-12">
           ${renderParBridgeCard()}
         </div>
       `;
@@ -801,6 +807,7 @@
       <div class="bento-card bento-span-8">${renderTeacherScheduleCard(todayClasses, now)}</div>
       <div class="bento-card bento-span-4">${renderTeacherAttendanceCard(todayClasses, now)}</div>
       <div class="bento-card bento-span-12">${renderTeacherShiftsCard(me, todayClasses, now)}</div>
+      <div class="bento-card bento-span-12">${renderTeacherCurriculumCard(me, myClasses, now)}</div>
       <div class="bento-card bento-span-8">${renderTeacherWelcomeCard(me)}</div>
       <div class="bento-card bento-span-4">${renderParBridgeCard()}</div>
     `;
@@ -1015,6 +1022,179 @@
         <p style="margin:0;color:var(--ink-dim);font-size:11.5px">For now, your schedule view is read-only. Contact Sharon for any sub or schedule changes.</p>
       </div>
     `;
+  }
+
+  /* T5b: teacher curriculum card.
+   *
+   * Lists curriculum items assigned to this teacher, grouped by class.
+   * Each item shows a lock/unlock state computed from the rolling per-
+   * session lead window — locked items show "Unlocks in Nd"; unlocked
+   * items show "Available now" + a View button. Each row also carries
+   * a Notes textarea that travels with the (item, class, teacher)
+   * assignment row, written via the set_curriculum_assignment_notes
+   * RPC so teachers can only mutate their own teacher_notes column.
+   *
+   * For T5b, the View button handles `link` (opens external URL) and
+   * `script` (renders inline content modal) directly. PDF / video /
+   * image require the watermarked viewer in T5c, so for those types
+   * View shows a "Coming in T5c" placeholder.
+   */
+  function renderTeacherCurriculumCard(me, myClasses, now) {
+    const myAssignments = (state.curriculumAssignments || []).filter((a) => a.teacher_id === me.id);
+    if (myAssignments.length === 0) {
+      return `
+        <div class="bento-label"><span>Your curriculum</span></div>
+        <div class="bento-attention-empty" style="text-align:left;padding:8px 0">
+          <p style="margin:0;color:var(--ink-dim);font-size:12px">No curriculum items assigned to you yet. Sharon will assign lesson PDFs, scripts, and videos as terms come up.</p>
+        </div>
+      `;
+    }
+
+    // Group by class — render a tiny per-class section with its assigned items.
+    const byClass = new Map();
+    myAssignments.forEach((a) => {
+      const arr = byClass.get(a.class_id) || [];
+      arr.push(a);
+      byClass.set(a.class_id, arr);
+    });
+
+    const sections = Array.from(byClass.entries()).map(([classId, assigns]) => {
+      const cls = state.classes.find((c) => c.id === classId);
+      if (!cls) return ""; // class deleted — hide gracefully
+      const rows = assigns.map((a) => {
+        const item = state.curriculumItems.find((x) => x.id === a.curriculum_item_id);
+        if (!item) return ""; // item not visible (RLS) or removed
+        const meta = CURRICULUM_TYPE_META[item.asset_type] || { label: item.asset_type, ico: "📦" };
+        const win  = curriculumLeadWindowState(a, item, cls, now);
+        let chip;
+        if (win.unlocked) {
+          chip = `<span class="cur-lock-chip cur-lock-unlocked">🔓 Available now</span>`;
+        } else if (win.daysUntilUnlock == null) {
+          chip = `<span class="cur-lock-chip cur-lock-pending">No upcoming session</span>`;
+        } else {
+          chip = `<span class="cur-lock-chip cur-lock-locked" title="Lead window: ${win.leadDays}d before each session">🔒 Unlocks in ${win.daysUntilUnlock}d</span>`;
+        }
+        const approved = item.dk_approved
+          ? `<span class="cur-badge cur-badge-approved" title="DK Corporate approved">✓ DK approved</span>` : "";
+        const adminNote = a.notes
+          ? `<div class="cur-admin-note"><b>From Sharon:</b> ${escapeHtml(a.notes)}</div>` : "";
+        const notesSavedHint = a.teacher_notes_updated_at
+          ? ` <span class="cur-notes-saved">Saved ${escapeHtml(formatRelativePast(new Date(a.teacher_notes_updated_at)))}</span>` : "";
+        const viewBtn = win.unlocked
+          ? `<button class="btn primary small" data-cur-view="${escapeHtml(a.id)}">View</button>`
+          : "";
+        return `
+          <div class="cur-teach-row">
+            <div class="cur-teach-row-ico" aria-hidden="true">${meta.ico}</div>
+            <div class="cur-teach-row-main">
+              <div class="cur-teach-row-head">
+                <span class="cur-teach-row-title">${escapeHtml(item.title)}</span>
+                <span class="cur-pill">${escapeHtml(meta.label)}</span>
+                ${approved}
+                ${chip}
+              </div>
+              ${item.description ? `<div class="cur-desc">${escapeHtml(item.description)}</div>` : ""}
+              ${adminNote}
+              <div class="cur-notes-block">
+                <label class="cur-notes-label" for="cur_notes_${escapeHtml(a.id)}">My notes ${notesSavedHint}</label>
+                <textarea id="cur_notes_${escapeHtml(a.id)}" class="cur-notes-textarea"
+                  placeholder="Cohort observations, what worked, what to repeat next term…">${escapeHtml(a.teacher_notes || "")}</textarea>
+                <div class="cur-notes-actions">
+                  <button class="btn ghost small" data-cur-save-notes="${escapeHtml(a.id)}">Save notes</button>
+                </div>
+              </div>
+            </div>
+            <div class="cur-teach-row-actions">${viewBtn}</div>
+          </div>`;
+      }).filter(Boolean).join("");
+
+      if (!rows) return "";
+      return `
+        <div class="cur-teach-class-section">
+          <div class="cur-teach-class-head">
+            <span class="cur-teach-class-name">${escapeHtml(cls.name)}</span>
+            ${cls.location ? `<span class="cur-teach-class-meta">· ${escapeHtml(cls.location)}</span>` : ""}
+          </div>
+          <div class="cur-teach-rows">${rows}</div>
+        </div>`;
+    }).filter(Boolean).join("");
+
+    return `
+      <div class="bento-label"><span>Your curriculum</span><span style="font-weight:400;color:var(--ink-dim);text-transform:none;letter-spacing:0">${myAssignments.length} item${myAssignments.length === 1 ? "" : "s"} assigned</span></div>
+      <div class="cur-teach-grid">${sections || `<div class="bento-attention-empty" style="text-align:left;padding:8px 0"><p style="margin:0;color:var(--ink-dim);font-size:12px">Assigned items aren't visible yet — check with Sharon.</p></div>`}</div>
+    `;
+  }
+
+  async function saveTeacherCurriculumNotes(assignmentId) {
+    if (!assignmentId) return;
+    const ta = document.getElementById(`cur_notes_${assignmentId}`);
+    if (!ta) return;
+    const notes = ta.value;
+    showLoader(true);
+    const { error } = await sb.rpc("set_curriculum_assignment_notes", {
+      p_assignment_id: assignmentId,
+      p_notes:         notes
+    });
+    showLoader(false);
+    if (error) { showToast("Save failed: " + error.message, "error"); return; }
+    await reloadAll(); renderAll();
+    showToast("Notes saved", "success");
+  }
+
+  /* Curriculum viewer (T5b — link & script types only).
+   * For pdf/video/image, the watermarked viewer + signed-URL fetch
+   * land in T5c. Here we just render link/script content directly
+   * since neither requires a bucket fetch or watermarking. */
+  function openCurriculumViewer(assignmentId) {
+    const a = (state.curriculumAssignments || []).find((x) => x.id === assignmentId);
+    if (!a) { showToast("Assignment not found", "error"); return; }
+    const item = (state.curriculumItems || []).find((x) => x.id === a.curriculum_item_id);
+    const cls  = (state.classes || []).find((c) => c.id === a.class_id);
+    if (!item || !cls) { showToast("Item not found", "error"); return; }
+
+    // Defense-in-depth: re-check the lead window before opening. The same
+    // check fires in the T5c Edge Function for bucket-stored types.
+    const win = curriculumLeadWindowState(a, item, cls, new Date());
+    if (!win.unlocked) {
+      showToast(`Locked — unlocks in ${win.daysUntilUnlock}d`, "error"); return;
+    }
+
+    if (item.asset_type === "link") {
+      if (item.external_url) {
+        window.open(item.external_url, "_blank", "noopener");
+      } else {
+        showToast("Link is missing a URL", "error");
+      }
+      return;
+    }
+    if (item.asset_type === "script") {
+      $("#curViewerTitle").textContent = item.title;
+      const body = $("#curViewerBody");
+      if (body) {
+        body.innerHTML = `
+          <div class="cur-viewer-script">${escapeHtml(item.script_content || "").replace(/\n/g, "<br/>")}</div>
+          <div class="cur-viewer-meta">Script · ${escapeHtml(cls.name)} · ${escapeHtml(item.dk_approved ? "DK approved" : "")}</div>
+        `;
+      }
+      $("#curViewerModalOverlay").classList.add("open");
+      return;
+    }
+    // pdf / video / image → T5c
+    $("#curViewerTitle").textContent = item.title;
+    const body = $("#curViewerBody");
+    if (body) {
+      body.innerHTML = `
+        <div class="cur-viewer-stub">
+          <p style="margin:0 0 8px 0">📦 <b>${escapeHtml(CURRICULUM_TYPE_META[item.asset_type]?.label || item.asset_type)}</b> viewer ships in Phase T5c.</p>
+          <p style="margin:0;color:var(--ink-dim);font-size:12.5px">T5c adds a watermarked viewer with signed URLs and an audit log. For now, ask Sharon if you need this file.</p>
+        </div>
+      `;
+    }
+    $("#curViewerModalOverlay").classList.add("open");
+  }
+
+  function closeCurriculumViewer() {
+    $("#curViewerModalOverlay").classList.remove("open");
   }
 
   function renderTeacherWelcomeCard(teacherRow) {
@@ -1363,6 +1543,13 @@
     });
     $$('[data-act="clock-out"]', $("#bentoGrid")).forEach((btn) => {
       btn.onclick = (e) => { e.stopPropagation(); doClockOut(btn.dataset.clockId); };
+    });
+    // T5b: teacher curriculum card actions
+    $$('[data-cur-view]', $("#bentoGrid")).forEach((btn) => {
+      btn.onclick = (e) => { e.stopPropagation(); openCurriculumViewer(btn.dataset.curView); };
+    });
+    $$('[data-cur-save-notes]', $("#bentoGrid")).forEach((btn) => {
+      btn.onclick = (e) => { e.stopPropagation(); saveTeacherCurriculumNotes(btn.dataset.curSaveNotes); };
     });
   }
 
@@ -4330,7 +4517,12 @@
           : "";
       const desc = it.description
         ? `<div class="cur-desc">${escapeHtml(it.description)}</div>` : "";
-      const canEdit = hasPerm("edit_curriculum");
+      const canEdit   = hasPerm("edit_curriculum");
+      const canAssign = hasPerm("assign_curriculum");
+      const assignCount = (state.curriculumAssignments || []).filter((a) => a.curriculum_item_id === it.id).length;
+      const assignChip = canAssign
+        ? `<span class="cur-assign-chip" title="Assignments to teacher+class pairs">👥 ${assignCount} assigned</span>`
+        : "";
       return `
         <div class="cur-row" data-cur-id="${escapeHtml(it.id)}">
           <div class="cur-row-ico" aria-hidden="true">${meta.ico}</div>
@@ -4345,9 +4537,11 @@
             <div class="cur-row-meta">
               <span title="Default lead time">⏱ ${it.default_lead_days}d default</span>
               ${assetLabel}
+              ${assignChip}
             </div>
           </div>
           <div class="cur-row-actions">
+            ${canAssign && !it.is_archived ? `<button class="btn ghost small" data-cur-assign="${escapeHtml(it.id)}">Assign…</button>` : ""}
             ${canEdit ? `<button class="btn ghost small" data-cur-edit="${escapeHtml(it.id)}">Edit</button>` : ""}
           </div>
         </div>`;
@@ -4355,6 +4549,9 @@
 
     tbl.querySelectorAll("[data-cur-edit]").forEach((b) => {
       b.onclick = () => openCurriculumEditor(b.getAttribute("data-cur-edit"));
+    });
+    tbl.querySelectorAll("[data-cur-assign]").forEach((b) => {
+      b.onclick = () => openAssignCurriculumModal(b.getAttribute("data-cur-assign"));
     });
   }
 
@@ -4526,6 +4723,206 @@
     await reloadAll(); renderAll();
     closeCurriculumEditor();
     showToast(next ? "Archived" : "Restored", "success");
+  }
+
+  /* ═════════════ Curriculum assignments (T5b) ═════════════
+   *
+   * Each curriculum item can be assigned to many (class, teacher) pairs.
+   * The "Assign…" button on each curriculum row opens this modal, which
+   * shows current assignments + an inline form to add another.
+   *
+   * Lead-window math is client-side per CLAUDE.md §4.22: RLS only
+   * verifies the assignment exists; the rolling per-session unlock
+   * countdown is computed by `curriculumLeadWindowState()` against
+   * `nextSessionDateForClass()`. T5c will re-verify in an Edge Function
+   * before minting signed URLs and append to curriculum_access_log.
+   */
+
+  // Effective lead days for an assignment. Override wins; otherwise
+  // fall back to the parent item's default.
+  function effectiveLeadDays(assignment, item) {
+    if (assignment && assignment.lead_days_override != null) return assignment.lead_days_override;
+    return item ? (item.default_lead_days ?? 7) : 7;
+  }
+
+  // Returns { unlocked, nextSessionIso, daysUntilUnlock }.
+  // unlocked = true when now is past (nextSession - leadDays).
+  // nextSessionIso = ISO date of the next session (or null if none in 60d).
+  // daysUntilUnlock = whole days from today to the unlock moment (>= 0 only
+  // meaningful when locked).
+  function curriculumLeadWindowState(assignment, item, cls, now) {
+    const lead = effectiveLeadDays(assignment, item);
+    const today = new Date(now); today.setHours(0, 0, 0, 0);
+    const nextIso = nextSessionDateForClass(cls, today);
+    if (!nextIso) {
+      return { unlocked: false, nextSessionIso: null, daysUntilUnlock: null, leadDays: lead };
+    }
+    const next = new Date(nextIso + "T00:00:00");
+    const unlockAt = new Date(next); unlockAt.setDate(unlockAt.getDate() - lead);
+    const unlocked = today >= unlockAt;
+    const days = Math.max(0, Math.round((unlockAt - today) / 86400000));
+    return { unlocked, nextSessionIso: nextIso, daysUntilUnlock: days, leadDays: lead };
+  }
+
+  function openAssignCurriculumModal(itemId) {
+    if (!hasPerm("assign_curriculum")) return;
+    const item = (state.curriculumItems || []).find((x) => x.id === itemId);
+    if (!item) { showToast("Item not found", "error"); return; }
+
+    state.assignCurState = {
+      itemId,
+      formClassId: "",
+      formTeacherId: "",
+      formLeadOverride: "",
+      formNotes: ""
+    };
+
+    $("#assignCurModalTitle").textContent = `Assign · ${item.title}`;
+    $("#assignCurDefaultLead").textContent = `${item.default_lead_days}d`;
+    renderAssignCurriculumModal();
+    $("#assignCurModalOverlay").classList.add("open");
+  }
+
+  function closeAssignCurriculumModal() {
+    $("#assignCurModalOverlay").classList.remove("open");
+    state.assignCurState.itemId = null;
+  }
+
+  function renderAssignCurriculumModal() {
+    const itemId = state.assignCurState.itemId;
+    if (!itemId) return;
+
+    const rows = (state.curriculumAssignments || []).filter((a) => a.curriculum_item_id === itemId);
+    const list = $("#assignCurList");
+    if (list) {
+      if (rows.length === 0) {
+        list.innerHTML = `<div style="padding:16px;text-align:center;color:var(--ink-dim);font-size:12.5px">No assignments yet. Use the form below to add one.</div>`;
+      } else {
+        list.innerHTML = rows.map((a) => {
+          const cls = state.classes.find((c) => c.id === a.class_id);
+          const tch = state.teachers.find((t) => t.id === a.teacher_id);
+          const item = state.curriculumItems.find((x) => x.id === a.curriculum_item_id);
+          const leadStr = a.lead_days_override != null
+            ? `${a.lead_days_override}d (override)`
+            : `${item?.default_lead_days ?? 7}d (default)`;
+          const adminNote = a.notes
+            ? `<div style="font-size:11.5px;color:var(--ink-dim);margin-top:3px">${escapeHtml(a.notes)}</div>` : "";
+          return `
+            <div class="assign-cur-row">
+              <div class="assign-cur-row-main">
+                <div class="assign-cur-row-head">
+                  <span class="assign-cur-class">${escapeHtml(cls?.name || "(deleted class)")}</span>
+                  <span class="assign-cur-sep">→</span>
+                  <span class="assign-cur-teacher">${escapeHtml(tch?.full_name || "(deleted teacher)")}</span>
+                </div>
+                <div class="assign-cur-row-meta">⏱ ${escapeHtml(leadStr)}</div>
+                ${adminNote}
+              </div>
+              <button class="btn ghost small" data-assign-remove="${escapeHtml(a.id)}">Remove</button>
+            </div>`;
+        }).join("");
+      }
+      list.querySelectorAll("[data-assign-remove]").forEach((b) => {
+        b.onclick = () => removeCurriculumAssignment(b.getAttribute("data-assign-remove"));
+      });
+    }
+
+    // Class dropdown — every active class.
+    const classSel = $("#assignCurClass");
+    if (classSel) {
+      const cur = state.assignCurState.formClassId;
+      const opts = state.classes
+        .filter((c) => includeTestClass(c) && c.active !== false)
+        .sort((a, b) => (a.name || "").localeCompare(b.name || ""))
+        .map((c) => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.name)}${c.location ? " · " + escapeHtml(c.location) : ""}</option>`)
+        .join("");
+      classSel.innerHTML = `<option value="">— pick a class —</option>${opts}`;
+      classSel.value = cur;
+    }
+
+    // Teacher dropdown — narrow to teachers actually assigned to the chosen
+    // class via class_teachers (so admins don't accidentally hand out
+    // curriculum to a teacher who isn't on that class). If no class chosen
+    // yet, show all active teachers.
+    const teacherSel = $("#assignCurTeacher");
+    if (teacherSel) {
+      const cls = state.assignCurState.formClassId;
+      const linkedIds = cls
+        ? new Set(state.classTeachers.filter((ct) => ct.class_id === cls).map((ct) => ct.teacher_id))
+        : null;
+      const teacherList = state.teachers
+        .filter((t) => t.status === "active")
+        .filter((t) => !linkedIds || linkedIds.has(t.id))
+        .sort((a, b) => (a.full_name || "").localeCompare(b.full_name || ""));
+      const cur = state.assignCurState.formTeacherId;
+      const opts = teacherList
+        .map((t) => `<option value="${escapeHtml(t.id)}">${escapeHtml(t.full_name)}${t.email ? " · " + escapeHtml(t.email) : ""}</option>`)
+        .join("");
+      const hint = cls && teacherList.length === 0
+        ? `<option value="" disabled>No teachers linked to this class — assign one in the Classes tab first.</option>`
+        : `<option value="">— pick a teacher —</option>`;
+      teacherSel.innerHTML = `${hint}${opts}`;
+      teacherSel.value = cur;
+    }
+
+    const leadInp = $("#assignCurLeadOverride");
+    if (leadInp) leadInp.value = state.assignCurState.formLeadOverride;
+    const notesInp = $("#assignCurNotes");
+    if (notesInp) notesInp.value = state.assignCurState.formNotes;
+
+    // Disable Add button until both class+teacher chosen.
+    const addBtn = $("#assignCurAddBtn");
+    if (addBtn) {
+      addBtn.disabled = !(state.assignCurState.formClassId && state.assignCurState.formTeacherId);
+    }
+  }
+
+  async function addCurriculumAssignment() {
+    if (!hasPerm("assign_curriculum")) return;
+    const { itemId, formClassId, formTeacherId, formLeadOverride, formNotes } = state.assignCurState;
+    if (!itemId || !formClassId || !formTeacherId) return;
+
+    const dup = (state.curriculumAssignments || []).find((a) =>
+      a.curriculum_item_id === itemId && a.class_id === formClassId && a.teacher_id === formTeacherId);
+    if (dup) { showToast("Already assigned to that class+teacher", "error"); return; }
+
+    const lead = formLeadOverride === "" ? null : parseInt(formLeadOverride, 10);
+    if (lead !== null && (Number.isNaN(lead) || lead < 0 || lead > 60)) {
+      showToast("Lead override must be 0–60 days (or blank)", "error"); return;
+    }
+
+    showLoader(true);
+    const { error } = await sb.from("curriculum_assignments").insert({
+      curriculum_item_id: itemId,
+      class_id:           formClassId,
+      teacher_id:         formTeacherId,
+      lead_days_override: lead,
+      notes:              (formNotes || "").trim() || null,
+      assigned_by:        state.profile?.id || null
+    });
+    showLoader(false);
+    if (error) { showToast("Assign failed: " + error.message, "error"); return; }
+
+    state.assignCurState.formClassId = "";
+    state.assignCurState.formTeacherId = "";
+    state.assignCurState.formLeadOverride = "";
+    state.assignCurState.formNotes = "";
+
+    await reloadAll(); renderAll();
+    renderAssignCurriculumModal();
+    showToast("Assignment added", "success");
+  }
+
+  async function removeCurriculumAssignment(assignmentId) {
+    if (!hasPerm("assign_curriculum")) return;
+    if (!confirm("Remove this assignment? The teacher will lose access to this item for that class.")) return;
+    showLoader(true);
+    const { error } = await sb.from("curriculum_assignments").delete().eq("id", assignmentId);
+    showLoader(false);
+    if (error) { showToast("Remove failed: " + error.message, "error"); return; }
+    await reloadAll(); renderAll();
+    renderAssignCurriculumModal();
+    showToast("Assignment removed", "success");
   }
 
   /* ═════════════ Reports tab ═════════════
@@ -5949,6 +6346,40 @@
     if (cuOverlay) cuOverlay.onclick = (e) => { if (e.target.id === "curriculumModalOverlay") closeCurriculumEditor(); };
     if (cuSave)    cuSave.onclick    = saveCurriculumItem;
     if (cuArchive) cuArchive.onclick = toggleCurriculumArchive;
+
+    // Curriculum assign modal (T5b)
+    const acClose   = $("#assignCurModalClose");
+    const acDone    = $("#assignCurDone");
+    const acOverlay = $("#assignCurModalOverlay");
+    const acClass   = $("#assignCurClass");
+    const acTeacher = $("#assignCurTeacher");
+    const acLead    = $("#assignCurLeadOverride");
+    const acNotes   = $("#assignCurNotes");
+    const acAdd     = $("#assignCurAddBtn");
+    if (acClose)   acClose.onclick   = closeAssignCurriculumModal;
+    if (acDone)    acDone.onclick    = closeAssignCurriculumModal;
+    if (acOverlay) acOverlay.onclick = (e) => { if (e.target.id === "assignCurModalOverlay") closeAssignCurriculumModal(); };
+    if (acClass)   acClass.onchange  = (e) => {
+      state.assignCurState.formClassId = e.target.value;
+      // Reset teacher when class changes — the dropdown narrows to that class's teachers.
+      state.assignCurState.formTeacherId = "";
+      renderAssignCurriculumModal();
+    };
+    if (acTeacher) acTeacher.onchange = (e) => {
+      state.assignCurState.formTeacherId = e.target.value;
+      renderAssignCurriculumModal();
+    };
+    if (acLead)    acLead.oninput    = (e) => { state.assignCurState.formLeadOverride = e.target.value; };
+    if (acNotes)   acNotes.oninput   = (e) => { state.assignCurState.formNotes = e.target.value; };
+    if (acAdd)     acAdd.onclick     = addCurriculumAssignment;
+
+    // Curriculum script-viewer modal (T5b — script & link types only)
+    const cvClose = $("#curViewerModalClose");
+    const cvDone  = $("#curViewerDone");
+    const cvOver  = $("#curViewerModalOverlay");
+    if (cvClose) cvClose.onclick = closeCurriculumViewer;
+    if (cvDone)  cvDone.onclick  = closeCurriculumViewer;
+    if (cvOver)  cvOver.onclick  = (e) => { if (e.target.id === "curViewerModalOverlay") closeCurriculumViewer(); };
 
     // Schedule toolbar
     $$(".sched-mode").forEach((b) => {

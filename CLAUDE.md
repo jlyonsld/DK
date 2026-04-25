@@ -130,6 +130,13 @@ response-console-v3/
     │                                      bucket. New perms:
     │                                      edit_curriculum,
     │                                      assign_curriculum. See §4.22.
+    ├── phase_t5b_curriculum_assignments.sql ← curriculum_assignments
+    │                                      (item × class × teacher) +
+    │                                      widened curriculum_items
+    │                                      SELECT for assigned
+    │                                      teachers + the
+    │                                      set_curriculum_assignment_notes
+    │                                      RPC. See §4.22.
     ├── phase_t6_teacher_personnel.sql   ← Adds personnel fields to
     │                                      teachers (DOB, address, payroll,
     │                                      background-check). Backs the
@@ -202,9 +209,20 @@ infographics             — image assets in Supabase Storage bucket
 curriculum_items         — DK-curated lesson library (PDFs, videos,
                            images, scripts, links). Stored in the
                            private `curriculum-assets` bucket. T5b
-                           adds curriculum_assignments + teacher
-                           visibility; T5c adds the watermarked
-                           viewer + audit log. See §4.22.
+                           widens SELECT to assigned teachers; T5c
+                           adds the watermarked viewer + audit log.
+                           See §4.22.
+curriculum_assignments   — (curriculum_item_id, class_id, teacher_id)
+                           rows linking items to specific teacher+
+                           class pairs. lead_days_override is per-
+                           assignment; null inherits from the parent
+                           item's default. teacher_notes is the
+                           teacher's private scratchpad on this
+                           item-in-this-class, written via the
+                           set_curriculum_assignment_notes RPC
+                           (security definer, identity-checked) so
+                           teachers can mutate only that one column
+                           on rows they own. See §4.22.
 teacher_invitations      — DK-side mirror of PAR invitations (see §4.6)
 schools                  — first-class school records with primary +
                            daily contacts. classes.school_id is the FK;
@@ -429,7 +447,7 @@ Permissions: schools and class_cancellations writes are gated on the existing `e
 DK corporate is serious about access to its curriculum, so the library is built as a layered cake instead of a single feature. Each slice ships independently:
 
 - **T5a (✅ shipped):** `curriculum_items` table + admin/manager CRUD on the **Curriculum** tab. Five asset types — `pdf` / `video` / `image` / `script` / `link`. Items live in a private `curriculum-assets` Storage bucket (writes gated on `edit_curriculum`, **no SELECT policy at all** — direct browser reads of the bucket are blocked by RLS denying everything that isn't whitelisted). `default_lead_days` is admin-configurable per item; `dk_approved` is a soft badge. Two new permissions: `edit_curriculum` (admin/manager/super_admin) and `assign_curriculum` (same — managers can assign within scope per franchise direction).
-- **T5b (🔲 next):** `curriculum_assignments` table keyed `(curriculum_item_id, class_id, teacher_id)` with `lead_days` override. Admin/manager UI to assign items to specific teacher+class combos. Teacher home gets a locked-card view: items they're assigned to but whose lead window hasn't opened yet show a countdown chip; passed-window items unlock.
+- **T5b (✅ shipped):** `curriculum_assignments` table keyed `(curriculum_item_id, class_id, teacher_id)` with optional `lead_days_override` (null = inherit `curriculum_items.default_lead_days`). Admin/manager **Assign…** modal off each curriculum row lists current pairings and an inline "+ Add assignment" form whose teacher dropdown narrows to teachers actually on the chosen class via `class_teachers`. Curriculum tab grows a `👥 N assigned` chip per row. Teacher home gets a **Your curriculum** bento card grouped by class: each item shows a 🔒 / 🔓 lock chip computed by `curriculumLeadWindowState()` against `nextSessionDateForClass()` (rolling per-session — `now >= nextSession - leadDays`). Unlocked `link` items open in a new tab; unlocked `script` items render in a read-only viewer modal; `pdf` / `video` / `image` show a "Coming in T5c" placeholder so the watermarked-viewer path stays a single landing in T5c. Teacher visibility on `curriculum_items` widens via a second permissive SELECT policy that joins through `curriculum_assignments` + `teachers.email` (CLAUDE.md §5 pattern). **Teacher notes travel with the assignment** — every card has a `My notes` textarea backed by `curriculum_assignments.teacher_notes`, written via the `set_curriculum_assignment_notes(p_assignment_id, p_notes)` RPC (`security definer`, identity-checked against `auth.jwt() ->> 'email'`) so teachers can mutate only that column on rows they own and can't reassign or re-target their own assignment via raw UPDATE. Curators can leave a `notes` (admin-side) string on any assignment that the teacher sees as a "From Sharon:" callout. No new permissions — `assign_curriculum` (T5a) and `view_own_curriculum` (T0) cover everything. See `migrations/phase_t5b_curriculum_assignments.sql` and `T5B_VERIFICATION.md`.
 - **T5c (🔲 final):** `curriculum_access_log` (append-only audit) + Edge Function `curriculum-fetch` (verify_jwt true) that gates every read — verifies assignment + lead-window + logs the access + returns a short-TTL signed URL. Plus the watermarked viewer: PDFs render via PDF.js, videos via `<video controlsList="nodownload">`, all wrapped in a CSS-tiled overlay with the teacher's name + email + timestamp, with `contextmenu` / `selectstart` / Cmd-S/P/C suppressed. None of this is unbreakable — but it makes any leaked screenshot trivially traceable, which is the corporate-sensitivity ask. **Also: surface a "Preview (watermarked)" button in the admin/super_admin curriculum edit modal so curators can verify what they uploaded without leaving the editor — same viewer + watermark + audit-log path as the teacher viewer.**
 
 **Lead-window is enforced at three layers, not RLS.** The user-confirmed semantic is "rolling per-session" (a teacher gets access N days before *each* upcoming session, not once at the start of the term). Encoding that in RLS would require evaluating the class's recurring `days`/`times` strings inside SQL — brittle and slow. So the gate lives in (a) the client UI (lock icons + countdown chips), (b) T5c's Edge Function (refuses to mint a signed URL until `now() >= next_session - lead_days`), and (c) the audit log (every fetched URL records who saw what when). RLS only verifies "an assignment exists" — read access alone tells corporate nothing without the access-log entry to match it.
@@ -508,8 +526,8 @@ DK corporate is serious about access to its curriculum, so the library is built 
 
 - **Phase T5 — curriculum / scripts / materials library.** Three slices documented in §4.22.
   - **T5a (✅ shipped):** `curriculum_items` + private `curriculum-assets` Storage bucket + admin/manager Curriculum tab with full CRUD on the library. New perms `edit_curriculum` + `assign_curriculum` added to both SQL `has_permission()` and JS `PERM_BUNDLES`. See `migrations/phase_t5a_curriculum_library.sql`.
-  - **T5b (🔲 next):** `curriculum_assignments` (per-teacher per-class) + assignment UI + teacher locked-card view.
-  - **T5c (🔲 final):** `curriculum_access_log` + Edge Function `curriculum-fetch` (signed-URL gate + audit) + watermarked viewer (PDF.js + CSS-tiled overlay with teacher identity + suppressed copy/save/print).
+  - **T5b (✅ shipped):** `curriculum_assignments` (item × class × teacher) + Assign… modal off each curriculum row + teacher **Your curriculum** bento card with rolling per-session lock/unlock chips + per-assignment teacher notes (RPC-gated). Teacher visibility on `curriculum_items` widens through a second permissive SELECT policy joining `curriculum_assignments` + `teachers.email`. No new permissions. See `migrations/phase_t5b_curriculum_assignments.sql` and `T5B_VERIFICATION.md`.
+  - **T5c (🔲 final):** `curriculum_access_log` + Edge Function `curriculum-fetch` (signed-URL gate + audit) + watermarked viewer (PDF.js + CSS-tiled overlay with teacher identity + suppressed copy/save/print). Replaces the "Coming in T5c" placeholder T5b shows for `pdf` / `video` / `image` types.
 
 - **Phase T6 — role management UI + explicit `profiles.teacher_id` link + returning-user invitation redemption.** Today, promotion is manual SQL (or auto via PAR org ownership). `handle_new_user` only redeems invitations on FIRST sign-in. T6 adds an RPC or UI flow for admins to (a) change roles via a UI, (b) manually redeem a pending invitation for a returning user, (c) link a profile to a teacher row explicitly via a new `profiles.teacher_id` foreign key column.
 
@@ -576,7 +594,7 @@ JACKRABBIT_ORG_ID                # "551000" for the Charleston franchise
 | T4 — Sub requests / shift trades | ✅ Shipped |
 | T8 — Schools + class cancellations + notify-daily-contact | ✅ Shipped |
 | T5a — Curriculum library (admin CRUD) | ✅ Shipped |
-| T5b — Curriculum assignments + teacher view | 🔲 Not started |
+| T5b — Curriculum assignments + teacher view + teacher notes | ✅ Shipped |
 | T5c — Watermarked viewer + audit log | 🔲 Not started |
 | T6 — Role management UI + profiles.teacher_id | 🔲 Not started |
 | T7 — Freemium conversion tracking | 🔲 Not started |
