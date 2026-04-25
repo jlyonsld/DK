@@ -107,47 +107,59 @@ response-console-v3/
 ├── INSTALL_FLOW_VERIFICATION.md ← End-to-end test plan for the spoke install
 │                               flow: share-the-secret, do-a-test-install,
 │                               verify auto-promote, SQL spot checks.
-└── SHARON_ONBOARDING_WALKTHROUGH.md ← The step-by-step for walking Sharon
-                                through her first PAR + PAR DK setup,
-                                including the personal/work email split.
+├── SHARON_ONBOARDING_WALKTHROUGH.md ← The step-by-step for walking Sharon
+│                               through her first PAR + PAR DK setup,
+│                               including the personal/work email split.
+│
+└── migrations/               ← SQL migrations applied to Supabase in order.
+    │                           **Lives inside the deployed repo as of
+    │                           T4** so PR review and history sit alongside
+    │                           the code that depends on them. Vercel
+    │                           ignores .sql files — they don't ship to
+    │                           the browser, they're just colocated.
+    │                           Apply via the Supabase MCP `apply_migration`
+    │                           or via the Supabase dashboard SQL editor.
+    │                           Earlier migrations (T0–T3d) were applied
+    │                           before this convention; their .sql sources
+    │                           live in the parent `DK Optimization/`
+    │                           folder and are NOT in this repo.
+    ├── phase_t4_sub_requests.sql        ← Sub requests + claims schema +
+    │                                      RLS + RPCs. See §4.20.
+    ├── phase_t5a_curriculum_library.sql ← curriculum_items table +
+    │                                      private curriculum-assets
+    │                                      bucket. New perms:
+    │                                      edit_curriculum,
+    │                                      assign_curriculum. See §4.22.
+    ├── phase_t6_teacher_personnel.sql   ← Adds personnel fields to
+    │                                      teachers (DOB, address, payroll,
+    │                                      background-check). Backs the
+    │                                      full-record teacher edit modal.
+    └── phase_t8_schools.sql             ← schools + class_cancellations
+                                            tables, classes.school_id FK,
+                                            mark_class_cancellation_notified
+                                            RPC. See §4.21.
 ```
 
-**Adjacent folders (in the DK Optimization parent, not deployed):**
+**Pre-T4 migrations (not in repo) live at the parent folder:**
 
 ```
-DK Optimization/
-├── migrations/               ← SQL migrations, applied to Supabase in order.
+DK Optimization/                ← parent folder, NOT a git repo
+├── migrations/                 ← legacy SQL sources for T0–T3d.
 │   ├── phase_t0_role_foundation.sql
+│   ├── phase_t1_5_manager_writes.sql
 │   ├── phase_t2_teacher_invitations.sql
 │   ├── phase_s1_closures.sql
-│   ├── phase_t3_permissions.sql         ← Adds reconcile_students +
-│   │                                      view_own_roster +
-│   │                                      manage_own_roster_students +
-│   │                                      manage_own_enrollments perms.
-│   ├── phase_t3a_student_adds.sql       ← Teacher-added students,
-│   │                                      dk_local vs jackrabbit source,
-│   │                                      student_match_candidates,
-│   │                                      reconcile_students RPC.
-│   ├── phase_t3b_attendance.sql         ← Attendance RLS + take_attendance
-│   │                                      RPC (enrollment-scoped).
-│   ├── phase_t3c_late_pickup.sql        ← attendance.late_pickup_minutes
-│   │                                      + RPC persist.
-│   ├── phase_t3d_clock_in_out.sql       ← clock_ins table, clock_in /
-│   │                                      clock_out RPCs, teacher-scoped
-│   │                                      RLS, 2-day grace window.
-│   ├── phase_t4_sub_requests.sql        ← Sub requests + claims schema +
-│   │                                      RLS + RPCs. UI not yet built.
-│   └── phase_t5a_curriculum_library.sql ← curriculum_items table +
-│                                          private curriculum-assets
-│                                          bucket. New perms:
-│                                          edit_curriculum,
-│                                          assign_curriculum.
-├── edge-functions/           ← Deno sources for Edge Functions deployed to
-│   │                           DK's Supabase project.
+│   ├── phase_t3_permissions.sql
+│   ├── phase_t3a_student_adds.sql
+│   ├── phase_t3b_attendance.sql
+│   ├── phase_t3c_late_pickup.sql
+│   └── phase_t3d_clock_in_out.sql
+├── edge-functions/             ← Deno sources for Edge Functions deployed
+│   │                             to DK's Supabase project.
 │   └── dk-invite-teacher/index.ts
-└── plans/                    ← Strategy + spec docs. Authoritative for
-                                 product intent; the migrations / code are
-                                 the authoritative state of the build.
+└── plans/                      ← Strategy + spec docs. Authoritative for
+                                  product intent; the migrations / code are
+                                  the authoritative state of the build.
 ```
 
 **Edge Functions deployed to DK's Supabase project:**
@@ -192,7 +204,7 @@ curriculum_items         — DK-curated lesson library (PDFs, videos,
                            private `curriculum-assets` bucket. T5b
                            adds curriculum_assignments + teacher
                            visibility; T5c adds the watermarked
-                           viewer + audit log. See §4.20.
+                           viewer + audit log. See §4.22.
 teacher_invitations      — DK-side mirror of PAR invitations (see §4.6)
 schools                  — first-class school records with primary +
                            daily contacts. classes.school_id is the FK;
@@ -476,6 +488,8 @@ DK corporate is serious about access to its curriculum, so the library is built 
 
 **`sw.js` is pass-through, not caching.** It exists only to satisfy PWA install criteria (§4.18). Don't add caching casually — caching the static shell would gate Vercel deploys behind a SW registration update + reload, undoing the "push hits prod in ~30s" property the rest of this codebase relies on. If you genuinely need offline support, design versioning + a forced-update path first.
 
+**Migrations live inside the deployed repo as of T4** (at `response-console-v3/migrations/*.sql`). Earlier phases (T0–T3d) were applied with their .sql sources living in the parent `DK Optimization/migrations/` folder, which is NOT a git repo and has no PR review trail. The convention shifted because PR reviewers want to see the schema change next to the code that depends on it. **When you write a new migration, put it in the in-repo folder, not the parent.** Vercel ignores .sql files (no build step touches them), so colocation is safe — they don't ship to the browser, they're just there for review and history.
+
 **The `curriculum-assets` storage bucket has NO SELECT policy and that is intentional.** RLS on `storage.objects` is permissive — every read goes through whichever policies match. The T5a migration creates INSERT/UPDATE/DELETE policies scoped to this bucket but deliberately omits SELECT. With no matching SELECT policy, all direct browser reads of this bucket are denied. Reads happen exclusively via T5c's `curriculum-fetch` Edge Function using the service-role key (which bypasses RLS) after the function verifies an active assignment + lead-window. **Don't add a SELECT policy to this bucket** — it would let any teacher with a Supabase URL bypass the audit log and the lead-window gate. If the bucket ever needs admin-direct preview, do it through a dedicated Edge Function that still logs the access, not a SELECT policy.
 
 ---
@@ -493,7 +507,7 @@ DK corporate is serious about access to its curriculum, so the library is built 
 - **Phase T4 — sub requests / shift trades.** ✅ **Shipped.** Teachers (or admins on a teacher's behalf) open a `sub_requests` row for a specific class+session_date; other teachers offer to cover via `sub_claims`; admins/managers `fill_sub_request(req, teacher)` which atomically marks the request `filled` and flips the chosen claim to `accepted` (sibling pending claims auto-`declined`). Cancellation by the requester or admin auto-declines outstanding claims. Two new permissions — `claim_sub_requests` (teacher+), `manage_all_sub_requests` (manager+) — layered onto the existing `request_sub` permission. The "Sub requests" tab is visible to every signed-in role with a status filter (Open / Mine / All-for-admins) and per-card claim/withdraw/fill/cancel actions. The class detail panel grows a "Request sub" button next to "Take attendance" / "Clock in" that pre-fills the next session date; week + month schedule blocks badge classes with an active request (🔄 open, ✓ filled). All RPCs (`create_sub_request`, `create_sub_request_for`, `claim_sub_request`, `withdraw_sub_claim`, `fill_sub_request`, `cancel_sub_request`) are `security invoker` so RLS fires per row. See `migrations/phase_t4_sub_requests.sql` and `T4_VERIFICATION.md`.
 
 - **Phase T5 — curriculum / scripts / materials library.** Three slices documented in §4.22.
-  - **T5a (✅ shipped):** `curriculum_items` + private `curriculum-assets` Storage bucket + admin/manager Curriculum tab with full CRUD on the library. New perms `edit_curriculum` + `assign_curriculum` added to both SQL `has_permission()` and JS `PERM_BUNDLES`.
+  - **T5a (✅ shipped):** `curriculum_items` + private `curriculum-assets` Storage bucket + admin/manager Curriculum tab with full CRUD on the library. New perms `edit_curriculum` + `assign_curriculum` added to both SQL `has_permission()` and JS `PERM_BUNDLES`. See `migrations/phase_t5a_curriculum_library.sql`.
   - **T5b (🔲 next):** `curriculum_assignments` (per-teacher per-class) + assignment UI + teacher locked-card view.
   - **T5c (🔲 final):** `curriculum_access_log` + Edge Function `curriculum-fetch` (signed-URL gate + audit) + watermarked viewer (PDF.js + CSS-tiled overlay with teacher identity + suppressed copy/save/print).
 
