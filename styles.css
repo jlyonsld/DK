@@ -2258,6 +2258,200 @@ footer code {
   .header-actions .btn.primary { padding: 6px 10px; font-size: 12px; }
 }
 
+/* ═════════════ Sub requests / shift trades (Phase T4) ═════════════
+ * Tab body, filter chips, request cards, claim rows, status pills, and
+ * the schedule overlay badge that flags classes with an active request.
+ */
+
+.sr-filter-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 6px 0 12px;
+}
+.sr-filter-chip {
+  appearance: none;
+  border: 1px solid var(--border, #d8d8d8);
+  background: var(--surface, #fff);
+  color: var(--ink, #1f1f1f);
+  border-radius: 999px;
+  padding: 4px 14px;
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background .12s, border-color .12s, color .12s;
+}
+.sr-filter-chip:hover { background: var(--surface-hover, #f6f6f6); }
+.sr-filter-chip.active {
+  background: var(--accent, #2d2d2d);
+  border-color: var(--accent, #2d2d2d);
+  color: #fff;
+}
+
+.sr-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.sr-empty {
+  padding: 24px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--ink-dim, #6b6b6b);
+  border: 1px dashed var(--border, #ddd);
+  border-radius: 8px;
+  background: var(--surface, #fff);
+}
+
+.sr-card {
+  background: var(--surface, #fff);
+  border: 1px solid var(--border, #d8d8d8);
+  border-radius: 10px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.sr-status-card-cancelled { opacity: .7; }
+.sr-status-card-filled    { background: #f6fbf6; }
+
+.sr-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.sr-card-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.sr-class-name { font-weight: 600; font-size: 14.5px; }
+.sr-session-date { font-size: 12.5px; color: var(--ink-dim, #6b6b6b); }
+
+.sr-card-meta {
+  font-size: 12px;
+  color: var(--ink-dim, #6b6b6b);
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.sr-meta-dot { opacity: .5; }
+
+.sr-reason {
+  font-size: 13px;
+  background: var(--surface-alt, #fafafa);
+  border: 1px solid var(--border-subtle, #eee);
+  border-radius: 6px;
+  padding: 8px 10px;
+  white-space: pre-wrap;
+}
+
+.sr-filled-line {
+  font-size: 12.5px;
+  color: #2f7d3a;
+}
+.sr-cancelled-line {
+  font-size: 12.5px;
+  color: var(--ink-dim, #6b6b6b);
+  font-style: italic;
+}
+
+.sr-claims {
+  background: var(--surface-alt, #fafafa);
+  border: 1px solid var(--border-subtle, #eee);
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sr-claims-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--ink-dim, #6b6b6b);
+  font-weight: 600;
+}
+.sr-claim-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 4px 0;
+  border-top: 1px solid var(--border-subtle, #eee);
+}
+.sr-claim-row:first-of-type { border-top: 0; padding-top: 2px; }
+.sr-claim-name { flex: 1; font-size: 13px; min-width: 140px; }
+.sr-claim-note { color: var(--ink-dim, #6b6b6b); font-size: 12.5px; }
+
+.sr-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-top: 2px;
+}
+.sr-direct-fill select {
+  font-size: 12.5px;
+  padding: 4px 6px;
+  border: 1px solid var(--border, #d8d8d8);
+  border-radius: 6px;
+  background: var(--surface, #fff);
+}
+
+/* Status pills — used both on cards and on the class detail panel button row. */
+.sr-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+}
+.sr-status-open       { color: #a36a00; background: #fff7e6; border-color: #f0d88a; }
+.sr-status-filled     { color: #2f7d3a; background: #eaf6ec; border-color: #b8dabd; }
+.sr-status-cancelled  { color: var(--ink-dim, #6b6b6b); background: var(--surface-alt, #fafafa); border-color: var(--border, #d8d8d8); }
+
+.sr-claim-status {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  padding: 2px 7px;
+  border-radius: 999px;
+}
+.sr-claim-status-pending   { color: #a36a00; background: #fff7e6; }
+.sr-claim-status-accepted  { color: #2f7d3a; background: #eaf6ec; }
+.sr-claim-status-declined  { color: var(--ink-dim, #6b6b6b); background: var(--surface-alt, #fafafa); }
+.sr-claim-status-withdrawn { color: var(--ink-dim, #6b6b6b); background: var(--surface-alt, #fafafa); font-style: italic; }
+
+/* Schedule overlay badge — appears on week / month class blocks when a
+ * sub request exists for that class+date. Subtle so it doesn't fight
+ * the teacher color stripe. */
+.sched-sub-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 4px;
+  font-size: 10px;
+  line-height: 1;
+}
+.sched-sub-open    { filter: saturate(1.4); }
+.sched-sub-filled  { opacity: .85; }
+
+@media (max-width: 720px) {
+  .sr-card { padding: 10px 12px; }
+  .sr-actions { gap: 6px; }
+}
+
 /* ═════════════ Mobile bottom nav (≤720px) — mirrors PAR's lower menu ═════════════
  * Hidden by default; shown only on narrow viewports. Replaces the horizontal
  * tab bar when CSS hides .tabs at ≤720px (see below).

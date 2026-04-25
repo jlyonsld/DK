@@ -97,6 +97,9 @@ response-console-v3/
 ├── T2_VERIFICATION.md        ← Setup + test steps for the teacher invitation
 │                               flow (what Sharon must configure + how to test
 │                               that the invite/redemption round-trip works).
+├── T4_VERIFICATION.md        ← End-to-end test plan for sub requests:
+│                               create / claim / fill / cancel round-trip,
+│                               RLS spot checks, schedule badge sanity.
 ├── INSTALL_FLOW_VERIFICATION.md ← End-to-end test plan for the spoke install
 │                               flow: share-the-secret, do-a-test-install,
 │                               verify auto-promote, SQL spot checks.
@@ -174,6 +177,14 @@ clock_ins                — teacher shift timestamps (one row per
                            report for payroll. See §4.16.
 infographics             — image assets in Supabase Storage bucket
 teacher_invitations      — DK-side mirror of PAR invitations (see §4.6)
+sub_requests             — open / filled / cancelled requests for a teacher
+                           sub on a specific class+session_date. Created via
+                           create_sub_request RPC; filled via fill_sub_request.
+                           See §4.20.
+sub_claims               — teachers' offers to cover an open sub_request.
+                           Status pending → accepted | declined | withdrawn,
+                           transitions are atomic with sub_requests fills.
+                           See §4.20.
 closures                 — holidays / non-class dates rendered on Schedule views
 dk_config                — singleton row for franchise-level config
                            (par_franchise_org_id, sender_email, sender_name)
@@ -347,6 +358,21 @@ If you change the viewport meta, the `html` background, or the header padding, r
 
 The only buttons in `<header>` `.header-actions` are user-chip and Sign out — controls that apply across every tab. Tab-specific actions (`＋ New template`, `＋ New class`, `＋ New teacher`, `＋ New category`, `＋ Upload / add image`, `⟳ Sync now`, `✉ Invite user`, `⟳ Refresh PAR links`) all live inside their own tab panel's `.tab-head` row, so they only show when their tab is active. Role gating for them is consolidated in `applyRoleVisibility()` in `app.js` — one `if (btn) btn.style.display = hasPerm(...) ? "" : "none"` line per button. **When you add a new tab-scoped action**, follow the pattern: button inside the panel's `.tab-head`, gating line in the per-tab block of `applyRoleVisibility()`. Don't put it in the global header — every other tab will get visual clutter for an action they can't use.
 
+### 4.20 Sub requests are class+session-scoped with claim/fill atomicity
+
+A `sub_requests` row keys on `(class_id, session_date)` — one open or filled request per session, enforced by a partial unique index that excludes cancelled rows so a fresh request can be reopened after a cancellation. Teachers, managers, and admins can all create requests; teachers must be assigned to the class (RLS check via `class_teachers` + `auth.jwt() ->> 'email'` join, mirroring §4.14's attendance pattern), admins/managers can file on a teacher's behalf via the separate `create_sub_request_for(class_id, session_date, teacher_id, reason)` RPC.
+
+Other teachers offer to cover via `claim_sub_request(req_id, note)`, which `INSERT … ON CONFLICT (sub_request_id, claimed_by_teacher_id) DO UPDATE` so re-offering after a withdraw resets the claim back to `pending` instead of erroring. **The `fill_sub_request(req_id, teacher_id)` RPC is the only place a request transitions to `filled`** — and in the same transaction it flips the chosen teacher's claim to `accepted` and any sibling pending claims to `declined`. This means the UI never has to reconcile "request says filled but claims still show pending" — they always agree. `cancel_sub_request` does the symmetric cleanup: marks the request `cancelled` and any pending claims `declined`.
+
+UI surfaces:
+- **"Sub requests" tab** — visible to every signed-in role (teachers see `Open` and `Mine` filters; managers/admins also see `All`). Cards group by status with per-card `Offer to cover` / `Withdraw` (claimer) and `Pick this teacher` / `Cancel request` (admin) actions. Admins also get a "Assign teacher directly…" select that bypasses claims for emergency direct assignments.
+- **Class detail panel** — a `Request sub` button next to `Take attendance` / `Clock in`, pre-filled with `nextSessionDateForClass(cls)`. If a request already exists for that next session, the button is replaced by a clickable status pill that jumps straight to the Sub requests tab.
+- **Schedule week + month views** — a small badge (🔄 open, ✓ filled) overlays class blocks that have an active request for the rendered date, computed via `activeSubRequestForSession(cls.id, dateIso)`.
+
+Permissions: `request_sub` (teacher, manager, admin, super_admin) — already in T0's bundles, the file-on-behalf path layers `manage_all_sub_requests` on top. `claim_sub_requests` (teacher, manager, admin, super_admin) gates the Offer button. `manage_all_sub_requests` (manager, admin, super_admin) gates Fill / file-on-behalf / cancel-anyone-else. All three sit alongside the existing `has_permission()` flow — no new RLS pattern.
+
+The realtime channel watches `sub_requests` and `sub_claims` so a claim from another teacher's phone lights up the admin's open-card list inside the 300ms debounce window. Both tables are added to `supabase_realtime` by the migration.
+
 ---
 
 ## 5. Gotchas, quirks, and "don't touch this"
@@ -409,7 +435,7 @@ The only buttons in `<header>` `.header-actions` are user-chip and Sign out — 
 
 - **Phase T3 — attendance + clock-in/out + reports.** ✅ **All shipped.** Teachers and admins take per-session attendance (Present/Absent + late-pickup minutes) and clock in/out per class via the class detail panel or the teacher bento cards. Admin-only **Reports** tab ships with two entries: **Attendance** (summary, per-class breakdown, late-pickup log + CSV for billing) and **Teacher hours** (per-teacher payroll roll-up, shift log + CSV for payroll). See §4.13 – §4.16.
 
-- **Phase T4 — sub requests / shift trades.** No schema. Strategy doc sketches `sub_requests` + `sub_claims` tables.
+- **Phase T4 — sub requests / shift trades.** ✅ **Shipped.** Teachers (or admins on a teacher's behalf) open a `sub_requests` row for a specific class+session_date; other teachers offer to cover via `sub_claims`; admins/managers `fill_sub_request(req, teacher)` which atomically marks the request `filled` and flips the chosen claim to `accepted` (sibling pending claims auto-`declined`). Cancellation by the requester or admin auto-declines outstanding claims. Two new permissions — `claim_sub_requests` (teacher+), `manage_all_sub_requests` (manager+) — layered onto the existing `request_sub` permission. The "Sub requests" tab is visible to every signed-in role with a status filter (Open / Mine / All-for-admins) and per-card claim/withdraw/fill/cancel actions. The class detail panel grows a "Request sub" button next to "Take attendance" / "Clock in" that pre-fills the next session date; week + month schedule blocks badge classes with an active request (🔄 open, ✓ filled). All RPCs (`create_sub_request`, `create_sub_request_for`, `claim_sub_request`, `withdraw_sub_claim`, `fill_sub_request`, `cancel_sub_request`) are `security invoker` so RLS fires per row. See `migrations/phase_t4_sub_requests.sql` and `T4_VERIFICATION.md`.
 
 - **Phase T5 — curriculum / scripts / materials library.** No schema. Strategy doc sketches an admin-curated content library with optional DK-corporate-approval badges.
 
@@ -475,7 +501,7 @@ JACKRABBIT_ORG_ID                # "551000" for the Charleston franchise
 | Schedule tab (Day / Week / Month) + closures | ✅ Shipped |
 | Full responsive pass | ✅ Shipped |
 | T3 — Attendance + clock-in/out + Reports tab | ✅ Shipped |
-| T4 — Sub requests / shift trades | 🔲 Not started |
+| T4 — Sub requests / shift trades | ✅ Shipped |
 | T5 — Curriculum library | 🔲 Not started |
 | T6 — Role management UI + profiles.teacher_id | 🔲 Not started |
 | T7 — Freemium conversion tracking | 🔲 Not started |
