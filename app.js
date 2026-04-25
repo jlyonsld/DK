@@ -1361,11 +1361,8 @@
       toolsBtn.style.display = anyTool ? "" : "none";
     }
 
-    // Top-right "New template" header button — only when we can actually edit
-    const newTplBtn = $("#newTemplateBtn");
-    if (newTplBtn) newTplBtn.style.display = hasPerm("edit_templates") ? "" : "none";
-
     // Per-tab header action buttons
+    const newTplBtn         = $("#newTemplateBtn");
     const newClassBtn      = $("#newClassBtn");
     const syncJrBtn        = $("#syncJackrabbitBtn");
     const newTeacherBtn    = $("#newTeacherBtn");
@@ -1373,6 +1370,7 @@
     const newCategoryBtn   = $("#newCategoryBtn");
     const newInfographicBtn = $("#newInfographicBtn");
 
+    if (newTplBtn)         newTplBtn.style.display         = hasPerm("edit_templates")    ? "" : "none";
     if (newClassBtn)       newClassBtn.style.display       = hasPerm("edit_classes")       ? "" : "none";
     if (syncJrBtn)         syncJrBtn.style.display         = hasPerm("run_jackrabbit_sync") ? "" : "none";
     if (newTeacherBtn)     newTeacherBtn.style.display     = hasPerm("edit_teachers")      ? "" : "none";
