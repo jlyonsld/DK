@@ -46,6 +46,14 @@
     curriculumItems: [],
     curriculumAssignments: [],   // (curriculum_item_id, class_id, teacher_id) rows
                                  // RLS: admin/manager see all; teacher sees own.
+    teacherPaymentDetails: [],   // T6b: bank/routing/account/handle. RLS:
+                                 // manage_teacher_payments (admin+super_admin).
+    teacherDocuments: [],        // T6b: tax forms, certs metadata. RLS:
+                                 // manage_teacher_compliance (admin+super_admin).
+    liabilityWaivers: [],        // T6b: versioned waiver text rows. SELECT open
+                                 // to all authenticated; only one active at a time.
+    waiverSignatures: [],        // T6b: append-only signature audit. Admin sees
+                                 // all; teacher sees own (matched by email).
     dkConfig: null,
     latestSyncLog: null,
     tState: { query: "", category: "all", filled: {} },
@@ -99,6 +107,7 @@
       "edit_classes","edit_teachers","edit_students","edit_enrollments","edit_attendance",
       "edit_templates","edit_categories","edit_infographics","edit_closures",
       "edit_curriculum","assign_curriculum",
+      "manage_teacher_payments","manage_teacher_compliance",
       "view_pay_rates","view_billing_status","view_parent_contact",
       "run_jackrabbit_sync","respond_to_leads",
       "reconcile_students",
@@ -109,6 +118,7 @@
       "edit_classes","edit_teachers","edit_students","edit_enrollments","edit_attendance",
       "edit_templates","edit_categories","edit_infographics","edit_closures",
       "edit_curriculum","assign_curriculum",
+      "manage_teacher_payments","manage_teacher_compliance",
       "view_pay_rates","view_billing_status","view_parent_contact",
       "run_jackrabbit_sync","respond_to_leads",
       "reconcile_students",
@@ -158,11 +168,11 @@
   // Which tabs each role is allowed to see. (Role Management tab doesn't
   // exist in T1 — it lands in T6.)
   const ROLE_TAB_VISIBILITY = {
-    super_admin: new Set(["home","schedule","templates","classes","schools","teachers","categories","infographics","subrequests","curriculum","reports"]),
-    admin:       new Set(["home","schedule","templates","classes","schools","teachers","categories","infographics","subrequests","curriculum","reports"]),
-    manager:     new Set(["home","schedule","templates","classes","schools","teachers","categories","infographics","subrequests","curriculum"]),
+    super_admin: new Set(["home","schedule","templates","classes","schools","teachers","infographics","subrequests","curriculum","reports"]),
+    admin:       new Set(["home","schedule","templates","classes","schools","teachers","infographics","subrequests","curriculum","reports"]),
+    manager:     new Set(["home","schedule","templates","classes","schools","teachers","infographics","subrequests","curriculum"]),
     teacher:     new Set(["home","schedule","subrequests"]),
-    viewer:      new Set(["home","schedule","templates","classes","schools","teachers","categories","infographics","subrequests"])
+    viewer:      new Set(["home","schedule","templates","classes","schools","teachers","infographics","subrequests"])
   };
   function canSeeTab(tab) {
     const role = currentRole();
@@ -397,7 +407,9 @@
       "student_match_candidates",
       "sub_requests", "sub_claims",
       "schools", "class_cancellations",
-      "curriculum_items", "curriculum_assignments"
+      "curriculum_items", "curriculum_assignments",
+      "teacher_payment_details", "teacher_documents",
+      "liability_waivers", "liability_waiver_signatures"
     ];
     realtimeChannel = sb.channel("dk-realtime");
     tablesToWatch.forEach((table) => {
@@ -472,16 +484,54 @@
       badge.title = "Linked to PAR identity: " + (state.profile.par_primary_email || "");
       badge.textContent = "PAR \u2713";
       chip.appendChild(badge);
-    } else {
-      const cta = document.createElement("a");
-      cta.href = "https://get-on-par.com/?view=settings&tab=linked-accounts";
-      cta.target = "_blank";
-      cta.rel = "noopener";
-      cta.className = "par-connect-cta";
-      cta.title = "Opens PAR's Linked Accounts settings in a new tab";
-      cta.textContent = "Connect to PAR \u2192";
-      chip.appendChild(cta);
     }
+    // PAR-connect CTA used to live inside the chip; it now renders inside
+    // renderUserMenu() since the chip is a <button> (no nested <a> allowed).
+    renderUserMenu();
+  }
+
+  function renderUserMenu() {
+    if (!state.profile) return;
+    const nameEl  = $("#userMenuName");
+    const emailEl = $("#userMenuEmail");
+    const roleEl  = $("#userMenuRole");
+    if (!nameEl || !emailEl || !roleEl) return;
+    const displayName = state.profile.par_display_name || state.profile.full_name || state.session?.user?.email || "";
+    nameEl.textContent  = displayName;
+    emailEl.textContent = state.session?.user?.email || "";
+    const role = currentRole();
+    roleEl.innerHTML = "";
+    if (role) {
+      const rb = document.createElement("span");
+      rb.className = "role-badge role-" + role;
+      rb.textContent = roleLabel(role);
+      roleEl.appendChild(rb);
+    }
+    // Append-or-replace a Connect-to-PAR row if the user isn't linked yet.
+    const menu = $("#userMenu");
+    const prior = menu.querySelector(".user-menu-par-cta");
+    if (prior) prior.remove();
+    if (!state.profile.par_person_id) {
+      const a = document.createElement("a");
+      a.href = "https://get-on-par.com/?view=settings&tab=linked-accounts";
+      a.target = "_blank";
+      a.rel = "noopener";
+      a.className = "user-menu-item user-menu-par-cta";
+      a.textContent = "Connect to PAR \u2192";
+      a.title = "Opens PAR's Linked Accounts settings in a new tab";
+      // Insert before the Sign-out item
+      menu.insertBefore(a, $("#userMenuSignOut"));
+    }
+  }
+
+  function toggleUserMenu(force) {
+    const menu = $("#userMenu");
+    const chip = $("#userChip");
+    if (!menu || !chip) return;
+    const open = (typeof force === "boolean") ? force : !menu.classList.contains("open");
+    menu.classList.toggle("open", open);
+    menu.setAttribute("aria-hidden", open ? "false" : "true");
+    chip.setAttribute("aria-expanded", open ? "true" : "false");
   }
 
   $("#loginForm").addEventListener("submit", async (e) => {
@@ -548,7 +598,7 @@
   async function reloadAll() {
     showLoader(true);
     try {
-      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches, att, clk, subs, subClm, schs, canc, cur, curA] = await Promise.all([
+      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches, att, clk, subs, subClm, schs, canc, cur, curA, tpd, tdocs, waivers, wSigs] = await Promise.all([
         sb.from("categories").select("*").order("sort_order", { ascending: true }),
         sb.from("templates").select("*").order("created_at", { ascending: true }),
         sb.from("classes").select("*").order("name", { ascending: true }),
@@ -570,7 +620,11 @@
         sb.from("schools").select("*").order("name", { ascending: true }),
         sb.from("class_cancellations").select("*").order("session_date", { ascending: false }),
         sb.from("curriculum_items").select("*").order("created_at", { ascending: false }),
-        sb.from("curriculum_assignments").select("*").order("assigned_at", { ascending: false })
+        sb.from("curriculum_assignments").select("*").order("assigned_at", { ascending: false }),
+        sb.from("teacher_payment_details").select("*"),
+        sb.from("teacher_documents").select("*").order("uploaded_at", { ascending: false }),
+        sb.from("liability_waivers").select("*").order("version", { ascending: false }),
+        sb.from("liability_waiver_signatures").select("*").order("signed_at", { ascending: false })
       ]);
       for (const r of [cats, tpls, cls, igs, tch, ct, ci, stu, enr]) if (r.error) throw r.error;
       // Non-admin roles may not have SELECT access to teacher_invitations /
@@ -614,6 +668,14 @@
       // Curriculum assignments (T5b): admin/manager see all; teachers see own
       // rows via teachers.email join. Viewers fall back to empty.
       state.curriculumAssignments = (curA && !curA.error) ? curA.data : [];
+      // T6b: payment details RLS gates SELECT to manage_teacher_payments
+      // (admin+super_admin); other roles get empty. Same for documents and
+      // signature audit (manage_teacher_compliance). Active waiver SELECT
+      // is open to all signed-in users so teachers can read what they sign.
+      state.teacherPaymentDetails = (tpd && !tpd.error) ? tpd.data : [];
+      state.teacherDocuments      = (tdocs && !tdocs.error) ? tdocs.data : [];
+      state.liabilityWaivers      = (waivers && !waivers.error) ? waivers.data : [];
+      state.waiverSignatures      = (wSigs && !wSigs.error) ? wSigs.data : [];
     } catch (e) {
       console.error(e);
       showToast("Failed to load: " + e.message, "error");
@@ -801,7 +863,24 @@
       weekCount += myClasses.filter((c) => classRunsOnDay(c, d)).length;
     }
 
+    // T6b: prompt teacher to sign the active waiver if they haven't.
+    const w = activeWaiver();
+    const sig = latestSignatureForTeacher(me.id);
+    const needsWaiver = w && (!sig || sig.waiver_id !== w.id);
+    const waiverBanner = needsWaiver
+      ? `<div class="bento-card bento-span-12 bento-waiver-banner">
+           <div class="banner-row">
+             <div>
+               <strong>Action required:</strong> please read &amp; sign the franchise liability waiver.
+               <div class="muted small">${escapeHtml(w.title)} — v${w.version}</div>
+             </div>
+             <button type="button" class="btn primary small" id="teacherSelfSignWaiverBtn">Read &amp; sign</button>
+           </div>
+         </div>`
+      : "";
+
     grid.innerHTML = `
+      ${waiverBanner}
       <div class="bento-card bento-span-8">${renderTeacherTodayCard(nextClass, todayClasses.length, now)}</div>
       <div class="bento-card bento-span-4">${renderTeacherWeekStatsCard(myClasses.length, weekCount)}</div>
       <div class="bento-card bento-span-8">${renderTeacherScheduleCard(todayClasses, now)}</div>
@@ -813,6 +892,8 @@
     `;
 
     wireHomeCardEvents();
+    const selfSignBtn = $("#teacherSelfSignWaiverBtn");
+    if (selfSignBtn) selfSignBtn.onclick = () => openSignWaiverModal({ mode: "self", teacher: me });
   }
 
   function renderTeacherTodayCard(nextClass, todayCount, now) {
@@ -1835,7 +1916,7 @@
     // visible mtabs will center themselves naturally.
     const toolsBtn = $("#mobileToolsBtn");
     if (toolsBtn) {
-      const anyTool = ["templates","categories","infographics","schools","subrequests","curriculum","reports"].some(canSeeTab);
+      const anyTool = ["templates","infographics","schools","subrequests","curriculum","reports"].some(canSeeTab);
       toolsBtn.style.display = anyTool ? "" : "none";
     }
 
@@ -1846,6 +1927,7 @@
     const newTeacherBtn    = $("#newTeacherBtn");
     const refreshParBtn    = $("#refreshParLinksBtn");
     const newCategoryBtn   = $("#newCategoryBtn");
+    const manageCategoriesBtn = $("#manageCategoriesBtn");
     const newInfographicBtn = $("#newInfographicBtn");
 
     if (newTplBtn)         newTplBtn.style.display         = hasPerm("edit_templates")    ? "" : "none";
@@ -1854,6 +1936,11 @@
     if (newTeacherBtn)     newTeacherBtn.style.display     = hasPerm("edit_teachers")      ? "" : "none";
     if (refreshParBtn)     refreshParBtn.style.display     = hasPerm("edit_teachers")      ? "" : "none";
     if (newCategoryBtn)    newCategoryBtn.style.display    = hasPerm("edit_categories")    ? "" : "none";
+    // "Manage categories" is the modal-launcher in the Templates tab head;
+    // visible to anyone who can edit categories — bundled with edit_templates
+    // for a clean Templates-tab affordance, even though the modal itself
+    // is the same single source of truth.
+    if (manageCategoriesBtn) manageCategoriesBtn.style.display = hasPerm("edit_categories") ? "" : "none";
     if (newInfographicBtn) newInfographicBtn.style.display = hasPerm("edit_infographics")  ? "" : "none";
 
     const newCurriculumBtn = $("#newCurriculumBtn");
@@ -6045,8 +6132,12 @@
     // view_pay_rates so the per-user grant story still works.
     const showPersonnel = isAdminOrAbove();
     const showPayroll   = hasPerm("view_pay_rates");
+    const showPayments  = hasPerm("manage_teacher_payments");
+    const showCompliance = hasPerm("manage_teacher_compliance");
     $$('#teacherModalOverlay .personnel-only').forEach((el) => el.style.display = showPersonnel ? "" : "none");
     $$('#teacherModalOverlay .payroll-only').forEach((el) => el.style.display = showPayroll ? "" : "none");
+    $$('#teacherModalOverlay .payments-only').forEach((el) => el.style.display = showPayments ? "" : "none");
+    $$('#teacherModalOverlay .compliance-only').forEach((el) => el.style.display = showCompliance ? "" : "none");
 
     // Always-visible fields
     $("#t_name").value           = t ? (t.full_name || "") : "";
@@ -6078,8 +6169,6 @@
     $("#t_cpr_expires").value        = t ? (t.cpr_expires_date || "") : "";
     $("#t_first_aid").checked        = t ? !!t.first_aid_certified : false;
     $("#t_first_aid_expires").value  = t ? (t.first_aid_expires_date || "") : "";
-    $("#t_waiver").checked           = t ? !!t.liability_waiver_signed : false;
-    $("#t_waiver_date").value        = t ? (t.liability_waiver_date || "") : "";
 
     // Payroll section (view_pay_rates)
     $("#t_pay_type").value        = t ? (t.pay_type || "") : "";
@@ -6088,17 +6177,308 @@
     $("#t_w9_date").value         = t ? (t.w9_received_date || "") : "";
     $("#t_w9_on_file").checked    = t ? !!t.w9_on_file : false;
 
+    // T6b: payment details (super_admin/admin only). Only populated if the
+    // caller has SELECT — non-perm callers won't see the section anyway.
+    if (showPayments) {
+      const tpd = t ? state.teacherPaymentDetails.find((p) => p.teacher_id === t.id) : null;
+      $("#t_pay_bank_name").value     = tpd?.bank_name || "";
+      $("#t_pay_account_type").value  = tpd?.account_type || "";
+      $("#t_pay_routing").value       = tpd?.routing_number || "";
+      $("#t_pay_account").value       = tpd?.account_number || "";
+      $("#t_pay_handle").value        = tpd?.payment_handle || "";
+      $("#t_pay_notes").value         = tpd?.notes || "";
+      // Sub-row visibility tracks the payroll-section's payment_method —
+      // direct_deposit gets bank/routing/account, the digital wallets get
+      // a handle, check shows neither (falls back to mailing address).
+      applyPaymentMethodVisibility($("#t_payment_method").value);
+    }
+
+    // T6b: documents list + waiver status. Only populated if the caller
+    // holds manage_teacher_compliance.
+    if (showCompliance) {
+      renderTeacherDocList(t);
+      renderWaiverStatus(t);
+      // New teachers can't have docs uploaded yet (no teacher_id to FK to).
+      // Disable the upload button until the row is saved.
+      const newTeacher = !t;
+      $("#t_doc_upload_btn").disabled = newTeacher;
+      $("#t_doc_file").disabled = newTeacher;
+      $("#t_waiver_open_btn").disabled = newTeacher;
+    }
+
     $("#deleteTeacherBtn").style.display = t ? "" : "none";
     $("#teacherModalOverlay").classList.add("open");
     setTimeout(() => $("#t_name").focus(), 50);
   }
+
+  function applyPaymentMethodVisibility(method) {
+    const isDD = method === "direct_deposit";
+    const isHandle = method === "paypal" || method === "venmo" || method === "zelle";
+    const dd1 = $("#t_pay_dd_block");
+    const dd2 = $("#t_pay_dd_block2");
+    const handle = $("#t_pay_handle_block");
+    if (dd1) dd1.style.display = isDD ? "" : "none";
+    if (dd2) dd2.style.display = isDD ? "" : "none";
+    if (handle) handle.style.display = isHandle ? "" : "none";
+  }
   function closeTeacherEditor() { $("#teacherModalOverlay").classList.remove("open"); editingTeacherId = null; }
+
+  /* ═════════════ T6b: documents + waiver helpers ═════════════ */
+
+  const DOC_KIND_LABEL = {
+    tax_w9: "W-9",
+    tax_w4: "W-4",
+    tax_1099: "1099",
+    certification_cpr: "CPR cert",
+    certification_first_aid: "First-aid cert",
+    certification_background: "Background check",
+    certification_other: "Certification",
+    other: "Document",
+  };
+
+  function renderTeacherDocList(t) {
+    const wrap = $("#t_doc_list");
+    if (!wrap) return;
+    if (!t) {
+      wrap.innerHTML = `<div class="muted small">Save the teacher first, then upload documents.</div>`;
+      return;
+    }
+    const docs = state.teacherDocuments.filter((d) => d.teacher_id === t.id);
+    if (!docs.length) {
+      wrap.innerHTML = `<div class="muted small">No documents on file.</div>`;
+      return;
+    }
+    const today = isoDate(new Date());
+    wrap.innerHTML = docs.map((d) => {
+      const expires = d.expires_on ? new Date(d.expires_on) : null;
+      let expBadge = "";
+      if (expires) {
+        const expIso = d.expires_on;
+        if (expIso < today) expBadge = `<span class="doc-badge expired">Expired</span>`;
+        else {
+          const dt = new Date(expIso); const now = new Date();
+          const days = Math.round((dt - now) / 86400000);
+          if (days <= 30) expBadge = `<span class="doc-badge soon">Expires ${expIso}</span>`;
+          else expBadge = `<span class="doc-badge ok">Expires ${expIso}</span>`;
+        }
+      }
+      const fileName = (d.storage_path || "").split("/").pop();
+      return `
+        <div class="doc-row" data-doc-id="${d.id}">
+          <div class="doc-row-main">
+            <div class="doc-row-title">
+              <span class="doc-kind">${escapeHtml(DOC_KIND_LABEL[d.kind] || d.kind)}</span>
+              ${escapeHtml(d.label || fileName || "")}
+              ${expBadge}
+            </div>
+            <div class="doc-row-meta">
+              ${escapeHtml(fileName || "")} · uploaded ${new Date(d.uploaded_at).toLocaleDateString()}
+            </div>
+          </div>
+          <div class="doc-row-actions">
+            <button type="button" class="btn ghost small" data-doc-action="open" data-doc-id="${d.id}">Open</button>
+            <button type="button" class="btn danger ghost small" data-doc-action="delete" data-doc-id="${d.id}">Delete</button>
+          </div>
+        </div>`;
+    }).join("");
+    // Wire actions inline (re-rendered each time).
+    $$('#t_doc_list [data-doc-action="open"]').forEach((btn) => {
+      btn.onclick = () => openTeacherDocument(btn.dataset.docId);
+    });
+    $$('#t_doc_list [data-doc-action="delete"]').forEach((btn) => {
+      btn.onclick = () => deleteTeacherDocument(btn.dataset.docId);
+    });
+  }
+
+  async function uploadTeacherDocument() {
+    if (!editingTeacherId) { showToast("Save the teacher first", "error"); return; }
+    const fileInput = $("#t_doc_file");
+    const file = fileInput?.files?.[0];
+    if (!file) { showToast("Pick a file to upload", "error"); return; }
+    const kind = $("#t_doc_kind").value;
+    const label = $("#t_doc_label").value.trim() || null;
+    const expires = $("#t_doc_expires").value || null;
+    const ts = Date.now();
+    const safeName = file.name.replace(/[^A-Za-z0-9._-]+/g, "_");
+    const path = `${editingTeacherId}/${kind}-${ts}-${safeName}`;
+
+    showLoader(true);
+    const up = await sb.storage.from("teacher-documents").upload(path, file, {
+      contentType: file.type || "application/octet-stream",
+      upsert: false,
+    });
+    if (up.error) {
+      showLoader(false);
+      showToast("Upload failed: " + up.error.message, "error");
+      return;
+    }
+    const meta = await sb.from("teacher_documents").insert({
+      teacher_id:   editingTeacherId,
+      kind,
+      label,
+      storage_path: path,
+      mime_type:    file.type || null,
+      size_bytes:   file.size,
+      expires_on:   expires,
+    });
+    showLoader(false);
+    if (meta.error) {
+      // Try to clean up the orphaned object — best-effort.
+      sb.storage.from("teacher-documents").remove([path]).catch(() => {});
+      showToast("Metadata save failed: " + meta.error.message, "error");
+      return;
+    }
+    fileInput.value = "";
+    $("#t_doc_label").value = "";
+    $("#t_doc_expires").value = "";
+    await reloadAll();
+    const t = state.teachers.find((x) => x.id === editingTeacherId);
+    renderTeacherDocList(t);
+    showToast("Document uploaded", "success");
+  }
+
+  async function openTeacherDocument(docId) {
+    const d = state.teacherDocuments.find((x) => x.id === docId);
+    if (!d) return;
+    const signed = await sb.storage.from("teacher-documents")
+      .createSignedUrl(d.storage_path, 600);  // 10 min
+    if (signed.error) { showToast(signed.error.message, "error"); return; }
+    window.open(signed.data.signedUrl, "_blank", "noopener");
+  }
+
+  async function deleteTeacherDocument(docId) {
+    const d = state.teacherDocuments.find((x) => x.id === docId);
+    if (!d) return;
+    if (!confirm(`Delete "${d.label || d.storage_path.split("/").pop()}"? This cannot be undone.`)) return;
+    showLoader(true);
+    const objResp = await sb.storage.from("teacher-documents").remove([d.storage_path]);
+    if (objResp.error) {
+      showLoader(false);
+      showToast("Storage delete failed: " + objResp.error.message, "error");
+      return;
+    }
+    const metaResp = await sb.from("teacher_documents").delete().eq("id", docId);
+    showLoader(false);
+    if (metaResp.error) { showToast(metaResp.error.message, "error"); return; }
+    await reloadAll();
+    const t = state.teachers.find((x) => x.id === editingTeacherId);
+    renderTeacherDocList(t);
+    showToast("Document deleted", "success");
+  }
+
+  function activeWaiver() {
+    return state.liabilityWaivers.find((w) => w.is_active) || null;
+  }
+
+  function latestSignatureForTeacher(teacherId) {
+    return state.waiverSignatures
+      .filter((s) => s.teacher_id === teacherId)
+      .sort((a, b) => (b.signed_at || "").localeCompare(a.signed_at || ""))[0] || null;
+  }
+
+  function renderWaiverStatus(t) {
+    const node = $("#t_waiver_status");
+    if (!node) return;
+    if (!t) { node.innerHTML = `<span class="muted">Save the teacher first to record a signature.</span>`; return; }
+    const sig = latestSignatureForTeacher(t.id);
+    const w = activeWaiver();
+    if (!sig) {
+      node.innerHTML = `<span class="muted">No signature on file.</span>` +
+        (w ? ` <span class="muted small">Active waiver: v${w.version} · ${escapeHtml(w.title)}</span>` : "");
+      return;
+    }
+    const matchesActive = w && sig.waiver_id === w.id;
+    const dt = new Date(sig.signed_at);
+    node.innerHTML = `
+      <div>
+        <span class="waiver-signed-pill ${matchesActive ? "ok" : "stale"}">
+          ${matchesActive ? "Signed" : "Signed (older version)"}
+        </span>
+        ${escapeHtml(sig.typed_name)} · ${dt.toLocaleDateString()} ${dt.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}
+        ${sig.signed_by_self ? "" : `<span class="muted small">(recorded by admin)</span>`}
+      </div>
+      ${matchesActive ? "" : `<div class="muted small" style="margin-top:4px">Active waiver has been updated since this signature — re-signing recommended.</div>`}
+    `;
+  }
+
+  /* Open the read-and-sign modal. context is one of:
+       { mode: "admin",  teacher } — admin recording on a teacher's behalf
+       { mode: "self",   teacher } — teacher signing their own
+  */
+  let waiverSignContext = null;
+  function openSignWaiverModal(ctx) {
+    const w = activeWaiver();
+    if (!w) { showToast("No active waiver configured", "error"); return; }
+    if (!ctx?.teacher) { showToast("No teacher record", "error"); return; }
+    waiverSignContext = { ...ctx, waiver: w };
+    $("#waiverSignTitle").textContent = `${w.title} (v${w.version})`;
+    const ctxLabel = ctx.mode === "self"
+      ? `Signing as ${escapeHtml(ctx.teacher.full_name || ctx.teacher.email || "")}`
+      : `Recording signature for ${escapeHtml(ctx.teacher.full_name || ctx.teacher.email || "")}`;
+    $("#waiverSignContext").innerHTML = ctxLabel;
+    $("#waiverSignBody").innerHTML = w.body_html || "";
+    $("#waiverSignAgree").checked = false;
+    $("#waiverSignTypedName").value = "";
+    $("#waiverSignError").style.display = "none";
+    $("#waiverSignSubmit").disabled = true;
+    $("#waiverSignOverlay").classList.add("open");
+    setTimeout(() => $("#waiverSignTypedName").focus(), 50);
+  }
+  function closeSignWaiverModal() {
+    $("#waiverSignOverlay").classList.remove("open");
+    waiverSignContext = null;
+  }
+  function refreshWaiverSubmitState() {
+    const agreed = $("#waiverSignAgree").checked;
+    const typed  = ($("#waiverSignTypedName").value || "").trim();
+    $("#waiverSignSubmit").disabled = !(agreed && typed.length >= 2);
+  }
+  async function submitWaiverSignature() {
+    if (!waiverSignContext) return;
+    const agreed = $("#waiverSignAgree").checked;
+    const typed  = ($("#waiverSignTypedName").value || "").trim();
+    if (!agreed) { showWaiverError("You must check the box to agree."); return; }
+    if (!typed)  { showWaiverError("Type your full name to sign."); return; }
+    showLoader(true);
+    const resp = await sb.rpc("record_waiver_signature", {
+      p_teacher_id: waiverSignContext.teacher.id,
+      p_waiver_id:  waiverSignContext.waiver.id,
+      p_typed_name: typed,
+      p_signer_ip:  null,                    // browsers can't read their own IP
+      p_user_agent: navigator.userAgent || null,
+    });
+    showLoader(false);
+    if (resp.error) { showWaiverError(resp.error.message); return; }
+    closeSignWaiverModal();
+    await reloadAll();
+    // If the teacher modal is open for this teacher, refresh its status.
+    if (editingTeacherId === waiverSignContext?.teacher?.id) {
+      const t = state.teachers.find((x) => x.id === editingTeacherId);
+      renderWaiverStatus(t);
+    }
+    renderHomeTab();   // self-sign banner clears
+    showToast("Waiver signed", "success");
+  }
+  function showWaiverError(msg) {
+    const el = $("#waiverSignError");
+    el.textContent = msg;
+    el.style.display = "";
+  }
+
+  /* Match the signed-in user to a teachers row by email (case-insensitive).
+     Returns the teachers row or null. Used by the self-sign banner. */
+  function selfTeacherRow() {
+    const email = (state.session?.user?.email || "").toLowerCase();
+    if (!email) return null;
+    return state.teachers.find((t) => (t.email || "").toLowerCase() === email) || null;
+  }
 
   async function saveTeacher() {
     const name = $("#t_name").value.trim();
     if (!name) { showToast("Name is required", "error"); return; }
     const showPersonnel = isAdminOrAbove();
     const showPayroll   = hasPerm("view_pay_rates");
+    const showPayments  = hasPerm("manage_teacher_payments");
 
     // Always-saved fields. Managers using the Edit button save just these
     // — admin-only fields aren't included so a manager save can't null
@@ -6134,8 +6514,8 @@
         cpr_expires_date: $("#t_cpr_expires").value || null,
         first_aid_certified: $("#t_first_aid").checked,
         first_aid_expires_date: $("#t_first_aid_expires").value || null,
-        liability_waiver_signed: $("#t_waiver").checked,
-        liability_waiver_date: $("#t_waiver_date").value || null,
+        // liability_waiver_signed / liability_waiver_date are now stamped
+        // by record_waiver_signature() RPC; not editable from this modal.
       });
     }
     if (showPayroll) {
@@ -6160,6 +6540,35 @@
     showLoader(false);
     if (resp.error) { showToast(resp.error.message, "error"); return; }
     const savedTeacher = resp.data;
+
+    // T6b: upsert payment details if the caller can edit them. We always
+    // upsert the row (even if every input is empty) so the bookkeeper's
+    // touch_updated_by trigger fires. Empty strings → null. Storing nothing
+    // when nothing was entered is fine — the row just has all-null fields.
+    if (showPayments && savedTeacher) {
+      const tpdPayload = {
+        teacher_id:     savedTeacher.id,
+        bank_name:      $("#t_pay_bank_name").value.trim() || null,
+        account_type:   $("#t_pay_account_type").value || null,
+        routing_number: $("#t_pay_routing").value.trim() || null,
+        account_number: $("#t_pay_account").value.trim() || null,
+        payment_handle: $("#t_pay_handle").value.trim() || null,
+        notes:          $("#t_pay_notes").value.trim() || null,
+      };
+      const allEmpty = !tpdPayload.bank_name && !tpdPayload.account_type
+        && !tpdPayload.routing_number && !tpdPayload.account_number
+        && !tpdPayload.payment_handle && !tpdPayload.notes;
+      const existing = state.teacherPaymentDetails.find((p) => p.teacher_id === savedTeacher.id);
+      if (allEmpty && !existing) {
+        // No-op — never inserted, nothing to clean up.
+      } else {
+        const tpdResp = await sb.from("teacher_payment_details").upsert(tpdPayload, { onConflict: "teacher_id" });
+        if (tpdResp.error) {
+          showToast("Teacher saved, but payment details failed: " + tpdResp.error.message, "error");
+          // Don't bail — the teacher row is good; just warn.
+        }
+      }
+    }
 
     // Phase 3 — try to resolve this teacher's PAR identity if they have an email
     if (savedTeacher?.email) {
@@ -6276,6 +6685,14 @@
       }
       wrap.appendChild(row);
     });
+  }
+
+  function openCategoriesModal() {
+    renderCategoriesTab();
+    $("#categoriesOverlay").classList.add("open");
+  }
+  function closeCategoriesModal() {
+    $("#categoriesOverlay").classList.remove("open");
   }
 
   async function newCategory() {
@@ -6534,21 +6951,48 @@
     $("#search").addEventListener("input", (e) => { state.tState.query = e.target.value.trim(); renderTemplates(); });
     $("#igSearch").addEventListener("input", (e) => { state.igState.query = e.target.value.trim(); renderInfographicsSidebar(); });
 
-    // Sign out
-    $("#signOutBtn").onclick = async () => {
+    // Sign out — both the desktop button and the in-menu item run the same
+    // teardown. (At ≤720px, signOutBtn is hidden by CSS — the menu is the
+    // only entry point.)
+    const handleSignOut = async () => {
       if (realtimeChannel) {
         try { await sb.removeChannel(realtimeChannel); } catch (_) { /* ignore */ }
         realtimeChannel = null;
       }
       await sb.auth.signOut();
       state.session = null; state.profile = null;
+      toggleUserMenu(false);
       showLogin();
     };
+    $("#signOutBtn").onclick = handleSignOut;
+    $("#userMenuSignOut").onclick = handleSignOut;
+
+    // Phase D: chip is a tap-to-open menu trigger. Click toggles, outside
+    // click and Esc close it.
+    $("#userChip").addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleUserMenu();
+    });
+    document.addEventListener("click", (e) => {
+      const menu = $("#userMenu");
+      if (!menu || !menu.classList.contains("open")) return;
+      if (menu.contains(e.target) || $("#userChip").contains(e.target)) return;
+      toggleUserMenu(false);
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") toggleUserMenu(false);
+    });
 
     // New buttons
     $("#newTemplateBtn").onclick   = () => openTemplateEditor(null);
     $("#newClassBtn").onclick      = () => openClassEditor(null);
     $("#newCategoryBtn").onclick   = newCategory;
+    // Categories modal (replaces the standalone Categories tab)
+    const manageCatBtn = $("#manageCategoriesBtn");
+    if (manageCatBtn) manageCatBtn.onclick = openCategoriesModal;
+    $("#categoriesModalClose").onclick = closeCategoriesModal;
+    $("#categoriesModalDone").onclick  = closeCategoriesModal;
+    $("#categoriesOverlay").onclick    = (e) => { if (e.target.id === "categoriesOverlay") closeCategoriesModal(); };
     $("#newInfographicBtn").onclick = () => openIgEditor(null);
     $("#newTeacherBtn").onclick    = () => openTeacherEditor(null);
     const refreshParBtn = $("#refreshParLinksBtn");
@@ -6560,6 +7004,28 @@
     $("#teacherModalOverlay").onclick = (e) => { if (e.target.id === "teacherModalOverlay") closeTeacherEditor(); };
     $("#teacherSave").onclick      = saveTeacher;
     $("#deleteTeacherBtn").onclick = deleteTeacher;
+
+    // T6b: payment-method drives bank/handle sub-row visibility
+    const pmSel = $("#t_payment_method");
+    if (pmSel) pmSel.addEventListener("change", (e) => applyPaymentMethodVisibility(e.target.value));
+
+    // T6b: document upload + waiver sign-modal triggers
+    const docUploadBtn = $("#t_doc_upload_btn");
+    if (docUploadBtn) docUploadBtn.onclick = uploadTeacherDocument;
+    const waiverOpenBtn = $("#t_waiver_open_btn");
+    if (waiverOpenBtn) waiverOpenBtn.onclick = () => {
+      const t = state.teachers.find((x) => x.id === editingTeacherId);
+      if (!t) { showToast("Save the teacher first", "error"); return; }
+      openSignWaiverModal({ mode: "admin", teacher: t });
+    };
+
+    // T6b: waiver sign modal
+    $("#waiverSignClose").onclick  = closeSignWaiverModal;
+    $("#waiverSignCancel").onclick = closeSignWaiverModal;
+    $("#waiverSignOverlay").onclick = (e) => { if (e.target.id === "waiverSignOverlay") closeSignWaiverModal(); };
+    $("#waiverSignAgree").addEventListener("change", refreshWaiverSubmitState);
+    $("#waiverSignTypedName").addEventListener("input", refreshWaiverSubmitState);
+    $("#waiverSignSubmit").onclick = submitWaiverSignature;
 
     // Jackrabbit sync + test toggle
     const syncBtn = $("#syncJackrabbitBtn");

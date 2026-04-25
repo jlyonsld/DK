@@ -148,6 +148,17 @@ response-console-v3/
     │                                      teachers (DOB, address, payroll,
     │                                      background-check). Backs the
     │                                      full-record teacher edit modal.
+    ├── phase_t6b_personnel_payments_waivers.sql
+    │                                    ← teacher_payment_details (super_admin
+    │                                      + admin only), teacher_documents +
+    │                                      private teacher-documents bucket,
+    │                                      liability_waivers (versioned text)
+    │                                      + liability_waiver_signatures
+    │                                      (append-only audit) +
+    │                                      record_waiver_signature RPC. New
+    │                                      perms: manage_teacher_payments,
+    │                                      manage_teacher_compliance. See
+    │                                      §4.23.
     └── phase_t8_schools.sql             ← schools + class_cancellations
                                             tables, classes.school_id FK,
                                             mark_class_cancellation_notified
@@ -475,6 +486,32 @@ DK corporate is serious about access to its curriculum, so the library is built 
 
 **Why three permissions instead of one.** `edit_curriculum` covers writes to the library. `assign_curriculum` is a separate gate so a future role split can give one person curating powers without hand-out powers, or vice versa. `view_own_curriculum` already lived in the teacher bundle from Phase T0 — T5b uses it.
 
+### 4.23 Personnel — payment details, documents, e-signed waiver (T6b)
+
+T6a (`phase_t6_teacher_personnel.sql`) added basic personnel columns to `teachers` (DOB, address, emergency contact, employment classification, background-check). T6b layers the sensitive-PII tables on top — bank/routing/account, document storage, and the e-signed liability waiver — without further widening the `teachers` row itself. Sensitive PII lives in dedicated tables behind dedicated permissions; the existing `edit_teachers` (manager+) keeps writing only the classroom-relevant fields.
+
+Two new permissions, both currently at admin+super_admin:
+
+- **`manage_teacher_payments`** — gates `teacher_payment_details` and the bank/account fields on the personnel modal. Splitting the permission name lets a franchise owner later revoke payments from a specific admin (e.g. a non-bookkeeper ops admin) via `profiles.revoked_permissions` without losing their compliance access.
+- **`manage_teacher_compliance`** — gates `teacher_documents`, the `teacher-documents` storage bucket, the waiver-signing UI, and `liability_waiver_signatures` reads.
+
+Three storage / data layers:
+
+- **`teacher_payment_details`** — one row per teacher (PK = teacher_id). Holds `bank_name`, `account_type`, `routing_number`, `account_number`, `payment_handle` (PayPal/Venmo/Zelle), `notes`. Plaintext at the column level — Supabase encrypts at rest at the storage layer; a future hardening pass could move these to pgsodium-encrypted columns without changing the table shape. Touch trigger stamps `updated_at`/`updated_by` on insert/update so the bookkeeper's last-edit is always recorded. The personnel modal upserts this row only if at least one payment field is non-empty (or the row already exists).
+- **`teacher_documents` + private `teacher-documents` Storage bucket** — metadata table + uploaded files. `kind` enum covers tax forms (`tax_w9`/`tax_w4`/`tax_1099`), certifications (`certification_cpr`/`certification_first_aid`/`certification_background`/`certification_other`), and `other`. `expires_on` is for certifications, used by the UI to render expiring/expired badges in the doc list. Storage paths are `${teacher_id}/${kind}-${timestamp}-${safeName}`. **Unlike curriculum-assets** (T5a/c, which has NO SELECT policy because reads go through an Edge Function intermediary), `teacher-documents` DOES expose SELECT to authenticated callers who hold `manage_teacher_compliance` — admins read directly via `createSignedUrl()` (10-minute TTL). The metadata table already restricts visibility to those callers, so adding a parallel storage SELECT policy is consistent. No per-row authorization story is needed (admins can see everything; no Edge Function intermediary required).
+- **`liability_waivers` + `liability_waiver_signatures`** — versioned waiver text + append-only signature audit. The waivers table allows exactly one active row at a time (partial unique index `liability_waivers_one_active`). The signatures table has NO INSERT/UPDATE/DELETE policies — `record_waiver_signature(p_teacher_id, p_waiver_id, p_typed_name, p_signer_ip, p_user_agent)` is the only writer. The RPC is `security definer` and gates either on the caller being the teacher whose waiver is being signed (email match against `auth.jwt() ->> 'email'`) OR on the caller holding `manage_teacher_compliance` (admin recording in person). Side-effect: stamps `teachers.liability_waiver_signed = true` and `liability_waiver_date = current_date` so the existing personnel-modal flag keeps reading correctly without joining the signatures table.
+
+Two UI entry points use the same sign modal (`#waiverSignOverlay`):
+
+- **Admin-recorded path** — Teacher edit modal → Liability waiver section → "Read & sign waiver…" button. Opens the modal with `mode: "admin"`. Used when a teacher physically signs paperwork at onboarding and the admin records it.
+- **Teacher self-sign path** — Teacher home bento gets a top-row banner ("Action required: please read & sign…") if the signed-in teacher is missing a signature for the current active waiver (or signed an older version). Tap → modal with `mode: "self"`. Banner clears after the next reload following a successful sign.
+
+The modal renders the waiver `body_html` in a scrollable read-only block, requires both the agree-checkbox and a non-empty typed name (Submit button stays disabled otherwise), and posts to the RPC. A 401-style failure (caller is neither the teacher nor a compliance admin) surfaces as an inline error in the modal; the sign button stays clickable for retry.
+
+**Why `liability_waiver_signed`/`liability_waiver_date` stay on the teachers row.** They're a snapshot, not the source of truth. The signatures table is canonical; the booleans on `teachers` are a denormalized convenience for the personnel modal flag and any quick "has this teacher signed?" filters. The RPC writes both atomically, so they never drift. Don't try to compute the booleans from a JOIN at read-time — it'd add a query to every teacher list render for no benefit.
+
+**Lightweight (a) vs. heavyweight (b) for the e-signature.** v1 ships the lightweight path: typed name + checkbox + timestamp + IP + user-agent. Holds up legally for an internal employment waiver if the text is fixed and versioned (it is — `liability_waivers.version` is unique and the foreign key on signatures pins which version was signed). The seed waiver row v1 is placeholder text Sharon will edit through the UI before launch. If a heavyweight DocuSign/HelloSign integration is ever needed, the schema doesn't change — `liability_waiver_signatures` adds a column or a sibling table, the RPC's signing logic gets swapped, and the UI swaps the typed-name input for a redirect.
+
 ---
 
 ## 5. Gotchas, quirks, and "don't touch this"
@@ -549,6 +586,14 @@ DK corporate is serious about access to its curriculum, so the library is built 
 
 **Curriculum suppression handlers are scoped to the modal subtree, not the document.** `installCurriculumViewerSuppression` adds `contextmenu` / `selectstart` / `copy` / `keydown` listeners only on `#curViewerModalOverlay`. They are removed in `closeCurriculumViewer` via the saved-handler reference (anonymous closures can't be removed, hence `state._curViewerHandlers`). **Don't add these as document-level listeners** — they would block right-click and Cmd-C across the entire app indefinitely if `closeCurriculumViewer` ever fails to fire (e.g., a rendering error).
 
+**`record_waiver_signature()` is the ONLY path that inserts into `liability_waiver_signatures`.** The signatures table has NO INSERT/UPDATE/DELETE policies. The RPC is `security definer` and gates either on caller-is-the-teacher (email match against `auth.jwt() ->> 'email'`) OR `manage_teacher_compliance`. **Don't add a self-INSERT policy on the table** — it would bypass the email-match check and let a teacher forge a signature on a coworker's behalf. The RPC pattern is the entire reason both the self-sign and admin-recorded paths can share one writer.
+
+**`teacher-documents` storage SELECT is gated, but `curriculum-assets` is not.** Both are private buckets but they handle reads differently. `teacher-documents` exposes a SELECT policy gated to `manage_teacher_compliance` because the compliance admins see ALL docs and there's no per-row authorization story (lead windows, assignments, etc.). `curriculum-assets` has NO SELECT policy because the per-teacher lead-window check needs to run server-side AND every read needs an audit-log row, both of which require the Edge Function intermediary. **Don't unify the two patterns** — adding an Edge Function for teacher-documents would just be ceremony with no security benefit; adding a SELECT policy to curriculum-assets would let teachers bypass the audit log and the lead-window gate.
+
+**The Categories tab is gone — categories are managed via a modal off the Templates tab head.** The standalone Categories tab existed for years; it was retired during T6b's UI consolidation because it held a handful of inline-editable rows that didn't justify a top-level slot. The "⚙ Manage categories" button in the Templates tab head opens `#categoriesOverlay`; the existing `renderCategoriesTab()` + `newCategory()` functions stayed as-is — they now render into the modal's `#categoryList` instead of a tab panel, and the modal-open handler calls them. **`ROLE_TAB_VISIBILITY` no longer lists "categories"** for any role; the tools-overflow auto-hide check was updated to match. If you want to bring back a standalone Categories tab, restore those two strings AND add a tab panel to `index.html` AND add the panel id back to whatever bento/sidebar logic toggles tab visibility.
+
+**Mobile header collapses to a single row at ≤720px.** Brand text (the "PAR DK / Response Console" stack) hides — only the logo remains, scaled down to 28px. The standalone `#signOutBtn` is hidden via `display: none !important` and the user-chip becomes a `<button>` that opens a `.user-menu` popover. The popover holds the user's name/email/role/PAR-link CTA + a Sign-out menu item. **`<a>` cannot live inside a `<button>`** — that's why the legacy "Connect to PAR" anchor inside the chip moved to the menu. If you put HTML back inside `#userChip`, keep it span/text only or browsers will silently break the chip's click handling. The popover is positioned absolute against `.header-top` (which sets `position: relative`) — don't remove that or the menu floats relative to the wrong ancestor.
+
 ---
 
 ## 6. Open issues and half-built features
@@ -568,7 +613,11 @@ DK corporate is serious about access to its curriculum, so the library is built 
   - **T5b (✅ shipped):** `curriculum_assignments` (item × class × teacher) + Assign… modal off each curriculum row + teacher **Your curriculum** bento card with rolling per-session lock/unlock chips + per-assignment teacher notes (RPC-gated). Teacher visibility on `curriculum_items` widens through a second permissive SELECT policy joining `curriculum_assignments` + `teachers.email`. No new permissions. See `migrations/phase_t5b_curriculum_assignments.sql` and `T5B_VERIFICATION.md`.
   - **T5c (✅ shipped):** `curriculum_access_log` + Edge Function `curriculum-fetch` (verify_jwt: true, signed-URL gate + server-side lead-window re-check + audit log) + watermarked viewer (PDF.js v4 lazy-loaded via dynamic `import()`, native `<video>` / `<img>`, CSS-tiled overlay with user identity + ISO timestamp, suppressed copy/save/print/contextmenu). Admin curriculum edit modal grows a "Preview (watermarked)" button that uses the same path with `kind: 'preview'` — also audited.
 
-- **Phase T6 — role management UI + explicit `profiles.teacher_id` link + returning-user invitation redemption.** Today, promotion is manual SQL (or auto via PAR org ownership). `handle_new_user` only redeems invitations on FIRST sign-in. T6 adds an RPC or UI flow for admins to (a) change roles via a UI, (b) manually redeem a pending invitation for a returning user, (c) link a profile to a teacher row explicitly via a new `profiles.teacher_id` foreign key column.
+- **Phase T6a — personnel fields on `teachers` (DOB, address, employment, background).** ✅ **Shipped.** See `migrations/phase_t6_teacher_personnel.sql` and the personnel sections of the teacher edit modal.
+
+- **Phase T6b — sensitive PII split, document storage, e-signed liability waiver.** ✅ **Shipped.** Three new tables (`teacher_payment_details`, `teacher_documents`, `liability_waivers` + `liability_waiver_signatures`) plus the private `teacher-documents` Storage bucket, the `record_waiver_signature()` RPC, and two new permissions (`manage_teacher_payments`, `manage_teacher_compliance`). Personnel modal grows three new sections (bank/payment, documents, waiver) gated by those permissions; teacher home gets a self-sign banner. See `migrations/phase_t6b_personnel_payments_waivers.sql`, `T6B_VERIFICATION.md`, and §4.23.
+
+- **Phase T6c — role management UI + explicit `profiles.teacher_id` link + returning-user invitation redemption.** 🔲 Not started. Today, promotion is manual SQL (or auto via PAR org ownership). `handle_new_user` only redeems invitations on FIRST sign-in. T6c adds an RPC or UI flow for admins to (a) change roles via a UI, (b) manually redeem a pending invitation for a returning user, (c) link a profile to a teacher row explicitly via a new `profiles.teacher_id` foreign key column.
 
 - **Phase T7 — freemium upgrade prompt + conversion tracking.** PAR card on teacher bento with context-aware CTA, click-through analytics, usage-based triggers ("you've taken attendance 20 times, want PAR for your family too?"). The current teacher bento already has a simple "On PAR" card; T7 makes it smarter.
 
@@ -635,5 +684,7 @@ JACKRABBIT_ORG_ID                # "551000" for the Charleston franchise
 | T5a — Curriculum library (admin CRUD) | ✅ Shipped |
 | T5b — Curriculum assignments + teacher view + teacher notes | ✅ Shipped |
 | T5c — Watermarked viewer + audit log | ✅ Shipped |
-| T6 — Role management UI + profiles.teacher_id | 🔲 Not started |
+| T6a — Personnel fields on `teachers` (DOB, address, payroll, background-check) | ✅ Shipped |
+| T6b — Payment details + tax/cert documents + e-signed liability waiver | ✅ Shipped |
+| T6c — Role management UI + profiles.teacher_id + returning-user invitation redemption | 🔲 Not started |
 | T7 — Freemium conversion tracking | 🔲 Not started |

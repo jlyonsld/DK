@@ -90,8 +90,19 @@
           </div>
         </div>
         <div class="header-actions">
-          <span class="user-chip" id="userChip"></span>
+          <button type="button" class="user-chip" id="userChip" aria-haspopup="true" aria-expanded="false"></button>
           <button class="btn ghost small" id="signOutBtn" title="Sign out">Sign out</button>
+          <!-- Tap-to-open user menu. On mobile this is the ONLY way to sign
+               out (the standalone signOutBtn is hidden at ≤720px); on desktop
+               it's an alt entry point. Closed via outside-click or Esc. -->
+          <div class="user-menu" id="userMenu" role="menu" aria-hidden="true">
+            <div class="user-menu-head">
+              <div class="user-menu-name" id="userMenuName"></div>
+              <div class="user-menu-email" id="userMenuEmail"></div>
+              <div class="user-menu-role"  id="userMenuRole"></div>
+            </div>
+            <button class="user-menu-item" id="userMenuSignOut" role="menuitem">Sign out</button>
+          </div>
         </div>
       </div>
 
@@ -102,7 +113,6 @@
         <button class="tab" data-tab="classes">Classes</button>
         <button class="tab" data-tab="schools">Schools</button>
         <button class="tab" data-tab="teachers">Teachers</button>
-        <button class="tab" data-tab="categories">Categories</button>
         <button class="tab" data-tab="infographics">Infographics</button>
         <button class="tab" data-tab="subrequests">Sub requests</button>
         <button class="tab" data-tab="curriculum">Curriculum</button>
@@ -163,6 +173,7 @@
           <div class="tab-head">
             <div></div>
             <div style="display:flex; gap:8px; align-items:center;">
+              <button class="btn small" id="manageCategoriesBtn">⚙ Manage categories</button>
               <button class="btn primary small" id="newTemplateBtn">＋ New template</button>
             </div>
           </div>
@@ -199,14 +210,6 @@
             </div>
           </div>
           <div class="data-table" id="teacherTable"></div>
-        </div>
-
-        <div class="tab-panel" data-tab="categories" style="display:none">
-          <div class="tab-head">
-            <div class="results-meta">Edit labels inline. Categories in use can't be deleted until their templates are reassigned.</div>
-            <button class="btn primary small" id="newCategoryBtn">＋ New category</button>
-          </div>
-          <div class="category-list" id="categoryList"></div>
         </div>
 
         <div class="tab-panel" data-tab="infographics" style="display:none">
@@ -654,14 +657,86 @@
               <input type="date" id="t_first_aid_expires" />
             </div>
           </div>
-          <div class="field-row">
+        </div>
+
+        <!-- T6b: Bank account + payment details. Gated on manage_teacher_payments. -->
+        <div class="payments-only">
+          <h4 class="modal-section-title">Bank account &amp; payment details
+            <span class="modal-section-sub">Sensitive — admin / super_admin only</span>
+          </h4>
+          <div class="field-row" id="t_pay_dd_block">
             <div class="field">
-              <label class="checkbox-label"><input type="checkbox" id="t_waiver" /> Liability waiver signed</label>
+              <label>Bank name</label>
+              <input type="text" id="t_pay_bank_name" placeholder="e.g. South State Bank" />
             </div>
             <div class="field">
-              <label>Waiver date</label>
-              <input type="date" id="t_waiver_date" />
+              <label>Account type</label>
+              <select id="t_pay_account_type">
+                <option value="">—</option>
+                <option value="checking">Checking</option>
+                <option value="savings">Savings</option>
+              </select>
             </div>
+          </div>
+          <div class="field-row" id="t_pay_dd_block2">
+            <div class="field">
+              <label>Routing number</label>
+              <input type="text" id="t_pay_routing" inputmode="numeric" placeholder="9 digits" autocomplete="off" />
+            </div>
+            <div class="field">
+              <label>Account number</label>
+              <input type="text" id="t_pay_account" autocomplete="off" />
+            </div>
+          </div>
+          <div class="field" id="t_pay_handle_block">
+            <label>Payment handle <span class="field-sub">(email or phone for PayPal/Venmo/Zelle)</span></label>
+            <input type="text" id="t_pay_handle" autocomplete="off" />
+          </div>
+          <div class="field">
+            <label>Notes <span class="field-sub">(internal — bookkeeper only)</span></label>
+            <input type="text" id="t_pay_notes" placeholder="e.g. Use Zelle until October" />
+          </div>
+        </div>
+
+        <!-- T6b: Documents (tax forms, certs). Gated on manage_teacher_compliance. -->
+        <div class="compliance-only">
+          <h4 class="modal-section-title">Documents
+            <span class="modal-section-sub">Tax forms, certifications</span>
+          </h4>
+          <div id="t_doc_list" class="doc-list">
+            <div class="muted">No documents on file.</div>
+          </div>
+          <div class="doc-upload-row">
+            <select id="t_doc_kind">
+              <option value="tax_w9">W-9 (1099 contractor)</option>
+              <option value="tax_w4">W-4 (W-2 employee)</option>
+              <option value="tax_1099">1099 (year-end)</option>
+              <option value="certification_cpr">CPR certification</option>
+              <option value="certification_first_aid">First-aid certification</option>
+              <option value="certification_background">Background check report</option>
+              <option value="certification_other">Other certification</option>
+              <option value="other">Other document</option>
+            </select>
+            <input type="text" id="t_doc_label" placeholder="Label (optional)" />
+            <input type="date" id="t_doc_expires" title="Expires on (optional)" />
+            <input type="file" id="t_doc_file" />
+            <button type="button" class="btn small" id="t_doc_upload_btn">Upload</button>
+          </div>
+          <div class="muted small" style="margin-top:6px">
+            New teachers: save the teacher record first, then come back to upload documents.
+          </div>
+        </div>
+
+        <!-- T6b: Liability waiver signing. Gated on manage_teacher_compliance. -->
+        <div class="compliance-only">
+          <h4 class="modal-section-title">Liability waiver
+            <span class="modal-section-sub">Read &amp; sign — recorded with timestamp</span>
+          </h4>
+          <div id="t_waiver_status" class="waiver-status">
+            <span class="muted">No signature on file.</span>
+          </div>
+          <div style="margin-top:8px">
+            <button type="button" class="btn small" id="t_waiver_open_btn">Read &amp; sign waiver…</button>
           </div>
         </div>
 
@@ -1204,10 +1279,6 @@
           <span class="mobile-tools-ico" aria-hidden="true">📝</span>
           <span>Templates</span>
         </button>
-        <button class="mobile-tools-item" data-tab="categories" type="button">
-          <span class="mobile-tools-ico" aria-hidden="true">🏷</span>
-          <span>Categories</span>
-        </button>
         <button class="mobile-tools-item" data-tab="infographics" type="button">
           <span class="mobile-tools-ico" aria-hidden="true">🖼</span>
           <span>Infographics</span>
@@ -1228,6 +1299,59 @@
           <span class="mobile-tools-ico" aria-hidden="true">📊</span>
           <span>Reports</span>
         </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Categories editor modal — opened from the Templates tab head.
+       Replaces the standalone Categories tab; same inline-edit UX,
+       just relocated. -->
+  <div class="modal-overlay" id="categoriesOverlay">
+    <div class="modal" style="max-width:560px">
+      <div class="modal-head">
+        <h3>Manage categories</h3>
+        <button class="btn ghost small" id="categoriesModalClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="results-meta" style="margin-bottom:10px">
+          Edit labels inline. Categories in use can't be deleted until their templates are reassigned.
+        </div>
+        <div class="category-list" id="categoryList"></div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" id="categoriesModalDone">Done</button>
+        <button class="btn primary" id="newCategoryBtn">＋ New category</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- T6b: liability waiver read & sign modal. Drives both
+       admin-recorded-in-person and teacher-self-sign paths via
+       record_waiver_signature() RPC. -->
+  <div class="modal-overlay" id="waiverSignOverlay">
+    <div class="modal" style="max-width:680px">
+      <div class="modal-head">
+        <h3 id="waiverSignTitle">Liability waiver</h3>
+        <button class="btn ghost small" id="waiverSignClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="waiverSignContext" class="muted small" style="margin-bottom:8px"></div>
+        <div id="waiverSignBody" class="waiver-body"></div>
+        <div class="field" style="margin-top:14px">
+          <label class="checkbox-label">
+            <input type="checkbox" id="waiverSignAgree" />
+            I have read and agree to the terms above.
+          </label>
+        </div>
+        <div class="field">
+          <label>Type your full legal name as your signature</label>
+          <input type="text" id="waiverSignTypedName" placeholder="e.g. Katarina Fradenburg" autocomplete="off" />
+        </div>
+        <div id="waiverSignError" class="form-error" style="display:none;margin-top:8px"></div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" id="waiverSignCancel">Cancel</button>
+        <button class="btn primary" id="waiverSignSubmit" disabled>Sign waiver</button>
       </div>
     </div>
   </div>
