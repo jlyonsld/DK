@@ -171,6 +171,15 @@ response-console-v3/
     │                                      ∈ {bank, handle, none} drives
     │                                      personnel-modal sub-field
     │                                      visibility.
+    ├── phase_t6d_role_management.sql    ← profiles.teacher_id FK +
+    │                                      set_profile_role /
+    │                                      set_profile_permissions /
+    │                                      link_profile_to_teacher /
+    │                                      redeem_invitation_for RPCs +
+    │                                      profiles SELECT widening for
+    │                                      admin_or_above. Backs the new
+    │                                      Users tab (super_admin/admin
+    │                                      only). See §4.24.
     └── phase_t8_schools.sql             ← schools + class_cancellations
                                             tables, classes.school_id FK,
                                             mark_class_cancellation_notified
@@ -524,6 +533,27 @@ The modal renders the waiver `body_html` in a scrollable read-only block, requir
 
 **Lightweight (a) vs. heavyweight (b) for the e-signature.** v1 ships the lightweight path: typed name + checkbox + timestamp + IP + user-agent. Holds up legally for an internal employment waiver if the text is fixed and versioned (it is — `liability_waivers.version` is unique and the foreign key on signatures pins which version was signed). The seed waiver row v1 is placeholder text Sharon will edit through the UI before launch. If a heavyweight DocuSign/HelloSign integration is ever needed, the schema doesn't change — `liability_waiver_signatures` adds a column or a sibling table, the RPC's signing logic gets swapped, and the UI swaps the typed-name input for a redirect.
 
+### 4.24 Users tab — role management, profile↔teacher link, returning-user invite redemption (T6d)
+
+Until T6d, every promotion outside the install-flow auto-promote (par-identity-proxy, §4.8) and the first-sign-in invitation redemption (`handle_new_user`, §4.6) required Jason to run raw SQL. T6d closes the loop with a single admin-only **Users** tab + four `security definer` RPCs.
+
+**Users tab** — visible to super_admin and admin only (`ROLE_TAB_VISIBILITY` + the mobile tools-overflow auto-hide list). Lists every `profiles` row with name, email, role, linked teacher, PAR badge, and per-row Edit + (when applicable) "Redeem invite" buttons. Search filters across name / email / par_display_name; a "Show no-role users" toggle (default on) hides locked-out accounts. The table also surfaces a `+N/-M` chip on rows with per-user grant/revoke entries so admins can see at a glance who's diverging from the role bundle.
+
+The **role-management modal** edits role + linked teacher + granted permissions + revoked permissions + an optional reason in one save. All four RPCs run sequentially and only when the corresponding field actually changed (a no-op save makes zero RPC calls). Save errors surface inline in the modal — same pattern as the curriculum-fetch viewer (§5 "Reading the body of a non-2xx Edge Function response") — rather than a toast that disappears mid-read.
+
+**The four RPCs:**
+
+- **`set_profile_role(p_profile_id, p_new_role, p_reason)`** — server-side guards: caller must be `is_admin_or_above()`; only super_admin can grant or revoke the super_admin role; refuses to demote the LAST super_admin (counts other super_admins; raises if zero). The T0 `profiles_role_audit` trigger fires on the resulting UPDATE so every change lands in `role_audit` automatically. The reason text is logged via `raise notice` for ad-hoc inspection — a future migration could widen `role_audit` to carry it as a column if it turns out to matter for compliance.
+- **`set_profile_permissions(p_profile_id, p_granted, p_revoked)`** — overwrites the two text[] columns. Granted/revoked permission names aren't validated against the bundle: `has_permission()` is the runtime gate, so a typo'd name silently grants nothing rather than erroring. UI shows the canonical list of names; this RPC trusts what the UI sends. Same super_admin guard as `set_profile_role` (only super_admin can edit a super_admin row's permissions).
+- **`link_profile_to_teacher(p_profile_id, p_teacher_id)`** — links / unlinks (NULL = unlink). The unique partial index `profiles_teacher_id_unique` (where teacher_id is not null) enforces one-profile-per-teacher; the RPC just gates the write.
+- **`redeem_invitation_for(p_profile_id)`** — handles the case `handle_new_user` can't catch. The trigger only fires on `auth.users INSERT` (first-ever sign-in). If a user already has a DK profile when an admin creates the invitation, nothing redeems it. The RPC finds the most-recent pending non-expired `teacher_invitations` row by the target profile's auth email, promotes the role, links `profile.teacher_id` from the invitation if set, backfills `teachers.email` if missing, and stamps `accepted_at`. Authorization: caller is the target user themselves OR `is_admin_or_above()` — so the same RPC powers both the admin "Redeem invite" button on the Users tab AND a (future) self-service path on the user's own profile.
+
+**`profiles.teacher_id` is the new source of truth for "who's the signed-in teacher".** `mySignedInTeacher()` in app.js prefers `state.profile.teacher_id` and falls back to the case-insensitive email match against `teachers.email` only when the FK is null. This unifies the lookup that previously lived inline in five places (teacher home bento, `classesForDate`, class detail panel, `canTakeAttendanceFor`, the waiver self-sign banner) — they all delegate to `mySignedInTeacher()` now. **The email-match fallback stays** so a teacher whose admin hasn't yet linked them through the Users tab still gets a working schedule + clock-in. T6d makes the FK preferred, not required.
+
+**SELECT-policy widening on `profiles`.** Pre-T6d the table only had self-read (`profile_self_select`, set up via the Supabase dashboard before the repo carried migrations). T6d adds a parallel permissive `profiles_admin_read` policy gated on `is_admin_or_above()`. Multiple permissive policies are OR'd, so admins now see every row while non-admins still see only their own. The `profiles` table was already in the `supabase_realtime` publication, so changes light up the Users tab live without further wiring.
+
+**No new permission names.** Super_admin and admin already hold `manage_users` from the T0 bundles; T6d gates everything via `is_admin_or_above()` at the RPC entry points, which matches both per the redefined `is_admin()` (§4.5). If a franchise ever wants a delegated bookkeeper-style role with permission edits but not role edits, that's a future split (`manage_user_roles` vs. `manage_user_permissions`) — the RPCs are split today specifically to make that future split a one-line gate change.
+
 ---
 
 ## 5. Gotchas, quirks, and "don't touch this"
@@ -542,7 +572,7 @@ The modal renders the waiver `body_html` in a scrollable read-only block, requir
 
 **Edge Function `verify_jwt` setting matters.** `dk-invite-teacher` has `verify_jwt: true` because it must verify the caller is an admin user (JWT-authed). `par-identity-proxy`, `spoke-get-identity`, `dk-install-callback`, `jackrabbit-sync`, `zapier-enrollment-webhook` all have `verify_jwt: false` because they authenticate via bearer API keys, shared secrets, or signed tokens — not user JWTs. Don't toggle these without knowing why.
 
-**The teacher bento matches the signed-in user to a `teachers` row by email.** There is no `profiles.teacher_id` column yet (deferred to Phase T6). If a teacher accepts an invitation but their work email doesn't match any teachers.email row exactly (case-insensitive), the teacher bento shows a "no teacher record" welcome card rather than their schedule.
+**The teacher bento prefers `profiles.teacher_id` (T6d) and falls back to email match.** All lookups go through `mySignedInTeacher()` which checks the FK first, then case-insensitive email match against `teachers.email`. If neither resolves (teacher accepted an invite, no FK linked yet, work email doesn't match any teachers row), the teacher bento shows a "no teacher record" welcome card. Fix path: open the Users tab and use the role-management modal to set the linked teacher (§4.24).
 
 **The realtime channel uses one channel for all tables with a 300ms debounce.** Don't create per-table channels — you'll hit connection limits. Don't remove the debounce — it coalesces burst writes.
 
@@ -606,6 +636,10 @@ The modal renders the waiver `body_html` in a scrollable read-only block, requir
 
 **Categories AND Infographics tabs are gone — both are managed via modals off the Templates tab head.** The standalone Categories tab was retired during T6b's UI consolidation; the Infographics CRUD tab followed during T6c for the same reason (handful of inline-editable rows that didn't justify a top-level slot, and the Templates tab is the natural place to discover them since both are template-companions). The "⚙ Manage categories" and "🖼 Manage infographics" buttons in the Templates tab head open `#categoriesOverlay` and `#infographicsOverlay` respectively; the existing `renderCategoriesTab()` / `renderInfographicsTab()` functions stayed as-is — they now render into the modals' `#categoryList` / `#infographicsTable` (same ids as before, just relocated) and the modal-open handlers call them. **`ROLE_TAB_VISIBILITY` no longer lists "categories" or "infographics"** for any role; the tools-overflow auto-hide check was updated to match; `SIDEBAR_TABS` shrunk from `{templates, infographics}` to `{templates}`. If you want to bring back a standalone tab, restore those strings AND add a tab panel to `index.html` AND add the panel id back to whatever bento/sidebar logic toggles tab visibility.
 
+**`set_profile_role()` refuses to demote the LAST super_admin.** The RPC counts `profiles where role = 'super_admin' and id <> p_profile_id` and raises `'Cannot demote the last super_admin'` if zero. This protects against a franchise locking itself out (e.g. a super_admin demoting themselves while no other super_admin exists). If you need to actually transfer the super_admin role to a new owner, do it as a TWO-STEP operation through the Users tab: promote the new person to super_admin first, THEN demote the old one. Don't try to bypass the guard with raw SQL — `is_admin()` and `has_permission()` rely on at least one super_admin existing for the install flow's auto-promote (§4.8) to recover the org.
+
+**`profiles.teacher_id` is one-to-one, enforced by a unique partial index.** `profiles_teacher_id_unique where teacher_id is not null` allows multiple NULL profiles but rejects two profiles pointing at the same teachers row. Two profiles claiming the same teacher would silently break the teacher bento (whose shift card?), `canTakeAttendanceFor` (whose attendance window?), and clock-in (whose shift?). If you need to "transfer" a teacher record between profiles, unlink the old one first (`link_profile_to_teacher(old, NULL)`) before linking the new one. Don't relax the index.
+
 **Mobile header collapses to a single row at ≤720px.** Brand text (the "PAR DK / Response Console" stack) hides — only the logo remains, scaled down to 28px. The standalone `#signOutBtn` is hidden via `display: none !important` and the user-chip becomes a `<button>` that opens a `.user-menu` popover. The popover holds the user's name/email/role/PAR-link CTA + a Sign-out menu item. **`<a>` cannot live inside a `<button>`** — that's why the legacy "Connect to PAR" anchor inside the chip moved to the menu. If you put HTML back inside `#userChip`, keep it span/text only or browsers will silently break the chip's click handling. The popover is positioned absolute against `.header-top` (which sets `position: relative`) — don't remove that or the menu floats relative to the wrong ancestor.
 
 ---
@@ -633,7 +667,7 @@ The modal renders the waiver `body_html` in a scrollable read-only block, requir
 
 - **Phase T6c — super_admin-managed payment_methods list.** ✅ **Shipped.** New `payment_methods` table replaces the hardcoded set of six options on `teachers.payment_method`. Super_admin gets a "⚙ Edit options" link next to the personnel-modal dropdown that opens a manage-list sub-modal (label, kind, active toggle, delete-if-not-in-use). The legacy `teachers_payment_method_check` constraint was dropped — the table is now the source of truth. See `migrations/phase_t6c_payment_methods.sql`.
 
-- **Phase T6d — role management UI + explicit `profiles.teacher_id` link + returning-user invitation redemption.** 🔲 Not started. Today, promotion is manual SQL (or auto via PAR org ownership). `handle_new_user` only redeems invitations on FIRST sign-in. T6c adds an RPC or UI flow for admins to (a) change roles via a UI, (b) manually redeem a pending invitation for a returning user, (c) link a profile to a teacher row explicitly via a new `profiles.teacher_id` foreign key column.
+- **Phase T6d — role management UI + explicit `profiles.teacher_id` link + returning-user invitation redemption.** ✅ **Shipped.** New admin-only **Users** tab lists every profile with a role-management modal that edits role + linked teacher + per-user grant/revoke lists in one save (the four T6d RPCs run only when their field changed, so a no-op save makes zero RPC calls). `profiles.teacher_id` FK with a unique partial index becomes the source of truth for "who's the signed-in teacher"; `mySignedInTeacher()` prefers the FK and falls back to the email match. `redeem_invitation_for(profile_id)` lets an admin manually redeem a pending `teacher_invitations` row against an existing profile, closing the gap left by `handle_new_user` only firing on first-sign-in. No new permission names — gated entirely on `is_admin_or_above()`. `set_profile_role()` refuses to demote the last super_admin. See `migrations/phase_t6d_role_management.sql` and §4.24.
 
 - **Phase T7 — freemium upgrade prompt + conversion tracking.** PAR card on teacher bento with context-aware CTA, click-through analytics, usage-based triggers ("you've taken attendance 20 times, want PAR for your family too?"). The current teacher bento already has a simple "On PAR" card; T7 makes it smarter.
 
@@ -703,5 +737,5 @@ JACKRABBIT_ORG_ID                # "551000" for the Charleston franchise
 | T6a — Personnel fields on `teachers` (DOB, address, payroll, background-check) | ✅ Shipped |
 | T6b — Payment details + tax/cert documents + e-signed liability waiver | ✅ Shipped |
 | T6c — Super_admin-managed payment_methods list (replaces hardcoded enum) | ✅ Shipped |
-| T6d — Role management UI + profiles.teacher_id + returning-user invitation redemption | 🔲 Not started |
+| T6d — Role management UI + profiles.teacher_id + returning-user invitation redemption | ✅ Shipped |
 | T7 — Freemium conversion tracking | 🔲 Not started |

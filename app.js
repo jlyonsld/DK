@@ -57,6 +57,10 @@
                                  // to all authenticated; only one active at a time.
     waiverSignatures: [],        // T6b: append-only signature audit. Admin sees
                                  // all; teacher sees own (matched by email).
+    profiles: [],                // T6d: every DK profile, used by the Users tab.
+                                 // RLS: admin_or_above sees all (T6d migration);
+                                 // others see only their own row → empty list here.
+    usersState: { query: "", showNoRole: true, editingId: null },
     dkConfig: null,
     latestSyncLog: null,
     tState: { query: "", category: "all", filled: {} },
@@ -171,8 +175,8 @@
   // Which tabs each role is allowed to see. (Role Management tab doesn't
   // exist in T1 — it lands in T6.)
   const ROLE_TAB_VISIBILITY = {
-    super_admin: new Set(["home","schedule","templates","classes","schools","teachers","subrequests","curriculum","reports"]),
-    admin:       new Set(["home","schedule","templates","classes","schools","teachers","subrequests","curriculum","reports"]),
+    super_admin: new Set(["home","schedule","templates","classes","schools","teachers","subrequests","curriculum","reports","users"]),
+    admin:       new Set(["home","schedule","templates","classes","schools","teachers","subrequests","curriculum","reports","users"]),
     manager:     new Set(["home","schedule","templates","classes","schools","teachers","subrequests","curriculum"]),
     teacher:     new Set(["home","schedule","subrequests"]),
     viewer:      new Set(["home","schedule","templates","classes","schools","teachers","subrequests"])
@@ -602,7 +606,7 @@
   async function reloadAll() {
     showLoader(true);
     try {
-      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches, att, clk, subs, subClm, schs, canc, cur, curA, tpd, tdocs, waivers, wSigs, pms] = await Promise.all([
+      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches, att, clk, subs, subClm, schs, canc, cur, curA, tpd, tdocs, waivers, wSigs, pms, prof] = await Promise.all([
         sb.from("categories").select("*").order("sort_order", { ascending: true }),
         sb.from("templates").select("*").order("created_at", { ascending: true }),
         sb.from("classes").select("*").order("name", { ascending: true }),
@@ -629,7 +633,8 @@
         sb.from("teacher_documents").select("*").order("uploaded_at", { ascending: false }),
         sb.from("liability_waivers").select("*").order("version", { ascending: false }),
         sb.from("liability_waiver_signatures").select("*").order("signed_at", { ascending: false }),
-        sb.from("payment_methods").select("*").order("sort_order", { ascending: true })
+        sb.from("payment_methods").select("*").order("sort_order", { ascending: true }),
+        sb.from("profiles").select("*").order("full_name", { ascending: true })
       ]);
       for (const r of [cats, tpls, cls, igs, tch, ct, ci, stu, enr]) if (r.error) throw r.error;
       // Non-admin roles may not have SELECT access to teacher_invitations /
@@ -685,6 +690,11 @@
       // empty fallback covers the brief window before the migration is
       // applied in any local-dev branch.
       state.paymentMethods        = (pms && !pms.error) ? pms.data : [];
+      // T6d: profiles SELECT widened to admin_or_above. Non-admins see only
+      // their own row via the pre-existing self-read policy → 1-element list
+      // (or 0 if RLS denies for some reason). The Users tab gates on role,
+      // so non-admins never see this data anyway.
+      state.profiles              = (prof && !prof.error) ? prof.data : [];
     } catch (e) {
       console.error(e);
       showToast("Failed to load: " + e.message, "error");
@@ -706,6 +716,7 @@
     renderSubRequestsTab();
     renderCurriculumTab();
     renderReportsTab();
+    renderUsersTab();
   }
 
   /* ═════════════ HOME (Bento) ═════════════ */
@@ -831,10 +842,7 @@
    * stubbed honestly as "coming in Phase T3+" rather than faked.
    */
   function renderTeacherHome(grid) {
-    const myEmail = (state.session?.user?.email || "").toLowerCase();
-    const me = myEmail
-      ? state.teachers.find((t) => (t.email || "").toLowerCase() === myEmail)
-      : null;
+    const me = mySignedInTeacher();
 
     // If we can't find a teachers row for this user yet, show a "not yet
     // linked" welcome card and skip the schedule sections.
@@ -1925,7 +1933,7 @@
     // visible mtabs will center themselves naturally.
     const toolsBtn = $("#mobileToolsBtn");
     if (toolsBtn) {
-      const anyTool = ["templates","schools","subrequests","curriculum","reports"].some(canSeeTab);
+      const anyTool = ["templates","schools","subrequests","curriculum","reports","users"].some(canSeeTab);
       toolsBtn.style.display = anyTool ? "" : "none";
     }
 
@@ -2059,10 +2067,7 @@
   function classesForDate(date) {
     const role = currentRole();
     const isTeacher = role === "teacher";
-    const email = (state.session?.user?.email || "").toLowerCase();
-    const me = isTeacher && email
-      ? state.teachers.find((t) => (t.email || "").toLowerCase() === email)
-      : null;
+    const me = isTeacher ? mySignedInTeacher() : null;
     const myId = me?.id || null;
 
     const onlyMine = state.sState.onlyMine || isTeacher;
@@ -3199,10 +3204,7 @@
       // teachers row by email; shows clocked-in time if already clocked in.
       // Admins without a teachers row will see an error toast on click —
       // that's fine for v1 (tells them they need a teachers entry).
-      const myEmail = (state.session?.user?.email || "").toLowerCase();
-      const myTeacher = myEmail
-        ? state.teachers.find((t) => (t.email || "").toLowerCase() === myEmail)
-        : null;
+      const myTeacher = mySignedInTeacher();
       if (myTeacher) {
         const shift = state.clockIns.find(
           (c) => c.teacher_id === myTeacher.id && c.class_id === cls.id && c.session_date === today
@@ -4316,9 +4318,18 @@
    */
 
   // Resolve the signed-in user to their teachers row by email match.
-  // Returns null if no teacher row exists (e.g. an admin who isn't also
-  // teaching). Used by request/claim flows to set teacher_id implicitly.
+  // Returns the teachers row for the signed-in user, or null. Two paths:
+  //   1. profiles.teacher_id (T6d) — explicit FK set by an admin via the
+  //      Users tab. Source of truth.
+  //   2. Fallback: case-insensitive email match against teachers.email,
+  //      preserved for unlinked profiles. CLAUDE.md §5 calls this out as
+  //      fragile (alternate emails, case mismatch); the FK is the fix.
   function mySignedInTeacher() {
+    const linkedId = state.profile?.teacher_id;
+    if (linkedId) {
+      const t = state.teachers.find((x) => x.id === linkedId);
+      if (t) return t;
+    }
     const email = (state.session?.user?.email || "").toLowerCase();
     if (!email) return null;
     return state.teachers.find((t) => (t.email || "").toLowerCase() === email) || null;
@@ -5282,6 +5293,284 @@
     showToast("Assignment removed", "success");
   }
 
+  /* ═════════════ USERS (T6d — role management) ═════════════
+   *
+   * Admin-only tab that lists every profile and lets super_admin / admin:
+   *   • Change a user's role
+   *   • Edit per-user grant/revoke permission lists
+   *   • Link a profile to a teachers row (supersedes the email-match path
+   *     used by the teacher bento + clock-in helpers)
+   *   • Redeem a pending teacher_invitations row against an existing
+   *     profile (the case handle_new_user can't catch — the user already
+   *     existed when the invitation was created, so the trigger never
+   *     re-fires)
+   *
+   * RPCs called: set_profile_role, set_profile_permissions,
+   *   link_profile_to_teacher, redeem_invitation_for. All gate
+   *   server-side; this UI is the convenience layer.
+   */
+
+  function profileEmailFor(p) {
+    if (!p) return "";
+    // Profile rows don't carry email directly — auth.users does. The signed-in
+    // user's email lives on state.session; for everyone else we fall back to
+    // the linked teachers row, then to par_primary_email if cached.
+    if (state.session && p.id === state.session.user.id) {
+      return state.session.user.email || "";
+    }
+    if (p.teacher_id) {
+      const t = state.teachers.find((x) => x.id === p.teacher_id);
+      if (t && t.email) return t.email;
+    }
+    return p.par_primary_email || "";
+  }
+
+  function pendingInvitationFor(email) {
+    if (!email) return null;
+    const lc = email.toLowerCase();
+    return state.teacherInvitations.find((inv) =>
+      (inv.email || "").toLowerCase() === lc &&
+      !inv.accepted_at &&
+      (!inv.expires_at || new Date(inv.expires_at) > new Date())
+    ) || null;
+  }
+
+  function renderUsersTab() {
+    const panel = document.querySelector('.tab-panel[data-tab="users"]');
+    if (!panel) return;
+    if (!canSeeTab("users")) { panel.innerHTML = ""; return; }
+
+    const q = (state.usersState.query || "").toLowerCase();
+    const showNoRole = !!state.usersState.showNoRole;
+
+    const rows = state.profiles
+      .filter((p) => showNoRole || p.role)
+      .filter((p) => {
+        if (!q) return true;
+        const name = (p.full_name || "").toLowerCase();
+        const email = profileEmailFor(p).toLowerCase();
+        const par = (p.par_display_name || "").toLowerCase();
+        return name.includes(q) || email.includes(q) || par.includes(q);
+      })
+      .sort((a, b) => {
+        const ar = a.role || "zzz", br = b.role || "zzz";
+        if (ar !== br) return ar.localeCompare(br);
+        return (a.full_name || "").localeCompare(b.full_name || "");
+      });
+
+    const meSuper = isSuperAdmin();
+
+    panel.innerHTML = `
+      <div class="tab-head" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <div class="results-meta">${state.profiles.length} ${state.profiles.length === 1 ? "user" : "users"}</div>
+        <div style="flex:1"></div>
+        <input id="usersSearch" class="search" type="search"
+               placeholder="Search name, email…" value="${escapeHtml(state.usersState.query)}"
+               style="max-width:260px" />
+        <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--ink-dim);cursor:pointer">
+          <input type="checkbox" id="usersShowNoRole" ${showNoRole ? "checked" : ""} />
+          Show no-role users
+        </label>
+      </div>
+      <div class="data-table">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Email</th>
+              <th>Role</th>
+              <th>Linked teacher</th>
+              <th>PAR</th>
+              <th style="text-align:right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.length === 0 ? `
+              <tr><td colspan="6" style="text-align:center;color:var(--ink-dim);padding:24px">
+                No users match.
+              </td></tr>` : rows.map((p) => {
+                const email = profileEmailFor(p);
+                const teacher = p.teacher_id
+                  ? state.teachers.find((t) => t.id === p.teacher_id)
+                  : null;
+                const pending = pendingInvitationFor(email);
+                const canEditThis = meSuper || p.role !== "super_admin";
+                const isMe = state.session && p.id === state.session.user.id;
+                const grantedCount = (p.granted_permissions || []).length;
+                const revokedCount = (p.revoked_permissions || []).length;
+                const permsBadge = (grantedCount || revokedCount)
+                  ? ` <span class="par-pending-badge" title="Per-user grants/revokes apply on top of the role bundle">+${grantedCount}/-${revokedCount}</span>`
+                  : "";
+                return `
+                  <tr>
+                    <td>
+                      <b>${escapeHtml(p.full_name || p.par_display_name || "(no name)")}</b>${isMe ? ` <span class="par-pending-badge">you</span>` : ""}
+                    </td>
+                    <td style="color:var(--ink-dim);font-size:12px">${escapeHtml(email || "—")}</td>
+                    <td>${escapeHtml(roleLabel(p.role))}${permsBadge}</td>
+                    <td>${teacher ? escapeHtml(teacher.full_name) : `<span style="color:var(--ink-dim)">—</span>`}</td>
+                    <td>${p.par_person_id
+                      ? `<span class="par-linked-badge" title="${escapeHtml(p.par_primary_email || "")}">PAR ✓</span>`
+                      : `<span style="color:var(--ink-dim)">—</span>`}</td>
+                    <td style="text-align:right">
+                      ${pending ? `<button class="btn small" data-act="redeem-invite" data-id="${escapeHtml(p.id)}">Redeem ${escapeHtml(pending.dk_role)} invite</button>` : ""}
+                      <button class="btn small ${canEditThis ? "primary" : ""}" data-act="edit-user" data-id="${escapeHtml(p.id)}" ${canEditThis ? "" : "disabled title=\"Only super_admin can edit super_admin\""}>Edit</button>
+                    </td>
+                  </tr>
+                `;
+              }).join("")}
+          </tbody>
+        </table>
+      </div>
+    `;
+
+    const search = panel.querySelector("#usersSearch");
+    if (search) search.oninput = (e) => { state.usersState.query = e.target.value; renderUsersTab(); };
+    const noRoleToggle = panel.querySelector("#usersShowNoRole");
+    if (noRoleToggle) noRoleToggle.onchange = (e) => { state.usersState.showNoRole = !!e.target.checked; renderUsersTab(); };
+
+    panel.querySelectorAll("button[data-act='edit-user']").forEach((b) => {
+      b.onclick = () => openUserRoleModal(b.dataset.id);
+    });
+    panel.querySelectorAll("button[data-act='redeem-invite']").forEach((b) => {
+      b.onclick = () => redeemInvitationForProfile(b.dataset.id);
+    });
+  }
+
+  function openUserRoleModal(profileId) {
+    const p = state.profiles.find((x) => x.id === profileId);
+    if (!p) { showToast("Profile not found", "error"); return; }
+    state.usersState.editingId = profileId;
+
+    const meSuper = isSuperAdmin();
+    const isProtected = p.role === "super_admin" && !meSuper;
+    if (isProtected) {
+      showToast("Only super_admin can edit a super_admin profile", "error");
+      return;
+    }
+
+    $("#userRoleTitle").textContent = "Edit " + (p.full_name || profileEmailFor(p) || "user");
+    $("#userRoleName").textContent  = p.full_name || p.par_display_name || "(no name)";
+    $("#userRoleEmail").textContent = profileEmailFor(p) || "(no email cached)";
+
+    const roleSel = $("#userRoleSelect");
+    roleSel.value = p.role || "";
+    // Disable super_admin option for non-super_admin actors.
+    Array.from(roleSel.options).forEach((opt) => {
+      if (opt.value === "super_admin" && !meSuper) {
+        opt.disabled = true;
+        opt.textContent = "Super admin (super_admin only)";
+      } else if (opt.value === "super_admin") {
+        opt.disabled = false;
+        opt.textContent = "Super admin";
+      }
+    });
+
+    const teacherSel = $("#userRoleTeacher");
+    teacherSel.innerHTML = `<option value="">— Not linked —</option>` +
+      state.teachers
+        .filter((t) => t.status !== "inactive" || t.id === p.teacher_id)
+        .map((t) => `<option value="${escapeHtml(t.id)}">${escapeHtml(t.full_name)}${t.email ? ` · ${escapeHtml(t.email)}` : ""}</option>`)
+        .join("");
+    teacherSel.value = p.teacher_id || "";
+
+    $("#userRoleGranted").value = (p.granted_permissions || []).join(", ");
+    $("#userRoleRevoked").value = (p.revoked_permissions || []).join(", ");
+    $("#userRoleReason").value  = "";
+    $("#userRoleError").style.display = "none";
+    $("#userRoleError").textContent = "";
+
+    $("#userRoleOverlay").classList.add("open");
+  }
+
+  function closeUserRoleModal() {
+    $("#userRoleOverlay").classList.remove("open");
+    state.usersState.editingId = null;
+  }
+
+  function parsePermsList(s) {
+    return (s || "")
+      .split(/[,\s]+/)
+      .map((x) => x.trim())
+      .filter(Boolean);
+  }
+
+  async function saveUserRoleModal() {
+    const profileId = state.usersState.editingId;
+    if (!profileId) return;
+    const p = state.profiles.find((x) => x.id === profileId);
+    if (!p) { showToast("Profile not found", "error"); return; }
+
+    const newRole = $("#userRoleSelect").value || null;
+    const newTeacher = $("#userRoleTeacher").value || null;
+    const granted = parsePermsList($("#userRoleGranted").value);
+    const revoked = parsePermsList($("#userRoleRevoked").value);
+    const reason = $("#userRoleReason").value.trim() || null;
+
+    const errEl = $("#userRoleError");
+    errEl.style.display = "none";
+    errEl.textContent = "";
+
+    showLoader(true);
+    try {
+      // Role change first — fails fast on lockout / super_admin protection.
+      if ((p.role || null) !== newRole) {
+        const { error } = await sb.rpc("set_profile_role", {
+          p_profile_id: profileId,
+          p_new_role: newRole,
+          p_reason: reason
+        });
+        if (error) throw error;
+      }
+      // Permissions
+      const oldGranted = JSON.stringify(p.granted_permissions || []);
+      const oldRevoked = JSON.stringify(p.revoked_permissions || []);
+      if (oldGranted !== JSON.stringify(granted) || oldRevoked !== JSON.stringify(revoked)) {
+        const { error } = await sb.rpc("set_profile_permissions", {
+          p_profile_id: profileId,
+          p_granted: granted,
+          p_revoked: revoked
+        });
+        if (error) throw error;
+      }
+      // Teacher link
+      if ((p.teacher_id || null) !== newTeacher) {
+        const { error } = await sb.rpc("link_profile_to_teacher", {
+          p_profile_id: profileId,
+          p_teacher_id: newTeacher
+        });
+        if (error) throw error;
+      }
+    } catch (e) {
+      errEl.textContent = e.message || "Save failed";
+      errEl.style.display = "";
+      showLoader(false);
+      return;
+    }
+    showLoader(false);
+    closeUserRoleModal();
+    await reloadAll();
+    renderAll();
+    showToast("User updated", "success");
+  }
+
+  async function redeemInvitationForProfile(profileId) {
+    const p = state.profiles.find((x) => x.id === profileId);
+    if (!p) return;
+    const email = profileEmailFor(p);
+    const pending = pendingInvitationFor(email);
+    if (!pending) { showToast("No pending invitation for this user", "error"); return; }
+    if (!confirm(`Redeem the pending ${pending.dk_role} invitation for ${email}? This promotes their role and links any attached teacher record.`)) return;
+
+    showLoader(true);
+    const { error } = await sb.rpc("redeem_invitation_for", { p_profile_id: profileId });
+    showLoader(false);
+    if (error) { showToast(error.message, "error"); return; }
+    await reloadAll();
+    renderAll();
+    showToast("Invitation redeemed", "success");
+  }
+
   /* ═════════════ Reports tab ═════════════
    * Admin-only aggregation views that sit alongside the operational tabs.
    * Registered reports:
@@ -5761,8 +6050,7 @@
     if (isAdminOrAbove()) return true;
     if (!hasPerm("take_own_attendance")) return false;
     // Teacher must be assigned to the class
-    const myEmail = (state.session?.user?.email || "").toLowerCase();
-    const me = state.teachers.find((t) => (t.email || "").toLowerCase() === myEmail);
+    const me = mySignedInTeacher();
     if (!me) return false;
     const assigned = state.classTeachers.some((ct) => ct.class_id === cls.id && ct.teacher_id === me.id);
     if (!assigned) return false;
@@ -6528,12 +6816,11 @@
     el.style.display = "";
   }
 
-  /* Match the signed-in user to a teachers row by email (case-insensitive).
-     Returns the teachers row or null. Used by the self-sign banner. */
+  /* Resolve the teachers row for the signed-in user. Thin alias around
+     mySignedInTeacher() (T6d-aware: prefers profiles.teacher_id, falls
+     back to email match). Used by the self-sign waiver banner. */
   function selfTeacherRow() {
-    const email = (state.session?.user?.email || "").toLowerCase();
-    if (!email) return null;
-    return state.teachers.find((t) => (t.email || "").toLowerCase() === email) || null;
+    return mySignedInTeacher();
   }
 
   async function saveTeacher() {
@@ -7282,6 +7569,16 @@
     if (cvClose) cvClose.onclick = closeCurriculumViewer;
     if (cvDone)  cvDone.onclick  = closeCurriculumViewer;
     if (cvOver)  cvOver.onclick  = (e) => { if (e.target.id === "curViewerModalOverlay") closeCurriculumViewer(); };
+
+    // T6d: Users tab — role-management modal
+    const urClose  = $("#userRoleClose");
+    const urCancel = $("#userRoleCancel");
+    const urSave   = $("#userRoleSave");
+    const urOver   = $("#userRoleOverlay");
+    if (urClose)  urClose.onclick  = closeUserRoleModal;
+    if (urCancel) urCancel.onclick = closeUserRoleModal;
+    if (urSave)   urSave.onclick   = saveUserRoleModal;
+    if (urOver)   urOver.onclick   = (e) => { if (e.target.id === "userRoleOverlay") closeUserRoleModal(); };
 
     // Schedule toolbar
     $$(".sched-mode").forEach((b) => {

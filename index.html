@@ -116,6 +116,7 @@
         <button class="tab" data-tab="subrequests">Sub requests</button>
         <button class="tab" data-tab="curriculum">Curriculum</button>
         <button class="tab" data-tab="reports">Reports</button>
+        <button class="tab" data-tab="users">Users</button>
       </div>
 
       <div class="sub-bar" id="subBarTemplates">
@@ -244,6 +245,10 @@
             <div id="reportSubNav" style="display:flex;gap:4px;margin-left:12px"></div>
           </div>
           <div id="reportContent"></div>
+        </div>
+
+        <div class="tab-panel" data-tab="users" style="display:none">
+          <!-- Phase T6d: role management. Body rendered by renderUsersTab(). -->
         </div>
 
       </section>
@@ -1285,6 +1290,10 @@
           <span class="mobile-tools-ico" aria-hidden="true">📊</span>
           <span>Reports</span>
         </button>
+        <button class="mobile-tools-item" data-tab="users" type="button">
+          <span class="mobile-tools-ico" aria-hidden="true">🛡</span>
+          <span>Users</span>
+        </button>
       </div>
     </div>
   </div>
@@ -1390,6 +1399,68 @@
       <div class="modal-foot">
         <button class="btn" id="waiverSignCancel">Cancel</button>
         <button class="btn primary" id="waiverSignSubmit" disabled>Sign waiver</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- T6d: Role-management modal. Opened from the Users tab to edit a
+       single profile's role, per-user grant/revoke lists, and teacher
+       link in one place. Per-row redeem-invitation lives inline on the
+       Users tab, not in this modal. -->
+  <div class="modal-overlay" id="userRoleOverlay">
+    <div class="modal" style="max-width:640px">
+      <div class="modal-head">
+        <h3 id="userRoleTitle">Edit user</h3>
+        <button class="btn ghost small" id="userRoleClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="user-role-head">
+          <div class="user-role-name"  id="userRoleName"></div>
+          <div class="user-role-email" id="userRoleEmail"></div>
+        </div>
+
+        <div class="field">
+          <label>Role</label>
+          <select id="userRoleSelect">
+            <option value="">— No role (locked out) —</option>
+            <option value="viewer">Viewer</option>
+            <option value="teacher">Teacher</option>
+            <option value="manager">Manager</option>
+            <option value="admin">Admin</option>
+            <option value="super_admin">Super admin</option>
+          </select>
+          <div class="field-hint" id="userRoleHint">
+            Roles map to a default permission bundle. Use the lists below for per-user exceptions.
+          </div>
+        </div>
+
+        <div class="field">
+          <label>Linked teacher record <span class="field-sub">(used for schedule, attendance, clock-in)</span></label>
+          <select id="userRoleTeacher">
+            <option value="">— Not linked —</option>
+          </select>
+          <div class="field-hint">Without a link, the teacher bento falls back to matching this user's auth email against the teachers list.</div>
+        </div>
+
+        <div class="field">
+          <label>Granted permissions <span class="field-sub">(comma-separated; layered on top of the role bundle)</span></label>
+          <input type="text" id="userRoleGranted" placeholder="e.g. view_pay_rates, manage_teacher_compliance" />
+        </div>
+        <div class="field">
+          <label>Revoked permissions <span class="field-sub">(comma-separated; removed from the role bundle, wins over grants)</span></label>
+          <input type="text" id="userRoleRevoked" placeholder="e.g. manage_teacher_payments" />
+        </div>
+
+        <div class="field">
+          <label>Reason <span class="field-sub">(optional, captured for audit context)</span></label>
+          <input type="text" id="userRoleReason" placeholder="e.g. promoting to studio manager for fall term" />
+        </div>
+
+        <div id="userRoleError" class="form-error" style="display:none;margin-top:8px"></div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" id="userRoleCancel">Cancel</button>
+        <button class="btn primary" id="userRoleSave">Save changes</button>
       </div>
     </div>
   </div>
