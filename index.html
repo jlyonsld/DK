@@ -113,7 +113,6 @@
         <button class="tab" data-tab="classes">Classes</button>
         <button class="tab" data-tab="schools">Schools</button>
         <button class="tab" data-tab="teachers">Teachers</button>
-        <button class="tab" data-tab="infographics">Infographics</button>
         <button class="tab" data-tab="subrequests">Sub requests</button>
         <button class="tab" data-tab="curriculum">Curriculum</button>
         <button class="tab" data-tab="reports">Reports</button>
@@ -174,6 +173,7 @@
             <div></div>
             <div style="display:flex; gap:8px; align-items:center;">
               <button class="btn small" id="manageCategoriesBtn">⚙ Manage categories</button>
+              <button class="btn small" id="manageInfographicsBtn">🖼 Manage infographics</button>
               <button class="btn primary small" id="newTemplateBtn">＋ New template</button>
             </div>
           </div>
@@ -210,14 +210,6 @@
             </div>
           </div>
           <div class="data-table" id="teacherTable"></div>
-        </div>
-
-        <div class="tab-panel" data-tab="infographics" style="display:none">
-          <div class="tab-head">
-            <div class="results-meta" id="igManageMeta"></div>
-            <button class="btn primary small" id="newInfographicBtn">＋ Upload / add image</button>
-          </div>
-          <div class="data-table" id="infographicsTable"></div>
         </div>
 
         <div class="tab-panel" data-tab="subrequests" style="display:none">
@@ -1277,10 +1269,6 @@
           <span class="mobile-tools-ico" aria-hidden="true">📝</span>
           <span>Templates</span>
         </button>
-        <button class="mobile-tools-item" data-tab="infographics" type="button">
-          <span class="mobile-tools-ico" aria-hidden="true">🖼</span>
-          <span>Infographics</span>
-        </button>
         <button class="mobile-tools-item" data-tab="schools" type="button">
           <span class="mobile-tools-ico" aria-hidden="true">🏫</span>
           <span>Schools</span>
@@ -1327,6 +1315,28 @@
       </div>
       <div class="modal-foot">
         <button class="btn primary" id="paymentMethodsDone">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Infographics manager modal — opened from the Templates tab head.
+       Replaces the standalone Infographics tab; the existing
+       infographicsTable + Upload button stay as-is, just relocated. -->
+  <div class="modal-overlay" id="infographicsOverlay">
+    <div class="modal" style="max-width:880px">
+      <div class="modal-head">
+        <h3>Manage infographics</h3>
+        <button class="btn ghost small" id="infographicsModalClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="tab-head" style="margin:0 0 10px 0">
+          <div class="results-meta" id="igManageMeta"></div>
+          <button class="btn primary small" id="newInfographicBtn">＋ Upload / add image</button>
+        </div>
+        <div class="data-table" id="infographicsTable"></div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn primary" id="infographicsModalDone">Done</button>
       </div>
     </div>
   </div>

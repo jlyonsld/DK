@@ -171,11 +171,11 @@
   // Which tabs each role is allowed to see. (Role Management tab doesn't
   // exist in T1 — it lands in T6.)
   const ROLE_TAB_VISIBILITY = {
-    super_admin: new Set(["home","schedule","templates","classes","schools","teachers","infographics","subrequests","curriculum","reports"]),
-    admin:       new Set(["home","schedule","templates","classes","schools","teachers","infographics","subrequests","curriculum","reports"]),
-    manager:     new Set(["home","schedule","templates","classes","schools","teachers","infographics","subrequests","curriculum"]),
+    super_admin: new Set(["home","schedule","templates","classes","schools","teachers","subrequests","curriculum","reports"]),
+    admin:       new Set(["home","schedule","templates","classes","schools","teachers","subrequests","curriculum","reports"]),
+    manager:     new Set(["home","schedule","templates","classes","schools","teachers","subrequests","curriculum"]),
     teacher:     new Set(["home","schedule","subrequests"]),
-    viewer:      new Set(["home","schedule","templates","classes","schools","teachers","infographics","subrequests"])
+    viewer:      new Set(["home","schedule","templates","classes","schools","teachers","subrequests"])
   };
   function canSeeTab(tab) {
     const role = currentRole();
@@ -1894,7 +1894,7 @@
   /* ═════════════ Router ═════════════ */
 
   // Sidebar visibility: only on the two tabs where infographic access is useful
-  const SIDEBAR_TABS = new Set(["templates", "infographics"]);
+  const SIDEBAR_TABS = new Set(["templates"]);
 
   function go(tab) {
     // Route guard: if the role can't see this tab, fall back to home.
@@ -1925,7 +1925,7 @@
     // visible mtabs will center themselves naturally.
     const toolsBtn = $("#mobileToolsBtn");
     if (toolsBtn) {
-      const anyTool = ["templates","infographics","schools","subrequests","curriculum","reports"].some(canSeeTab);
+      const anyTool = ["templates","schools","subrequests","curriculum","reports"].some(canSeeTab);
       toolsBtn.style.display = anyTool ? "" : "none";
     }
 
@@ -1937,6 +1937,7 @@
     const refreshParBtn    = $("#refreshParLinksBtn");
     const newCategoryBtn   = $("#newCategoryBtn");
     const manageCategoriesBtn = $("#manageCategoriesBtn");
+    const manageInfographicsBtn = $("#manageInfographicsBtn");
     const newInfographicBtn = $("#newInfographicBtn");
 
     if (newTplBtn)         newTplBtn.style.display         = hasPerm("edit_templates")    ? "" : "none";
@@ -1950,6 +1951,10 @@
     // for a clean Templates-tab affordance, even though the modal itself
     // is the same single source of truth.
     if (manageCategoriesBtn) manageCategoriesBtn.style.display = hasPerm("edit_categories") ? "" : "none";
+    // "Manage infographics" is the modal-launcher in the Templates tab head;
+    // visible to anyone who can edit infographics (same gate as the
+    // upload button now living inside the modal).
+    if (manageInfographicsBtn) manageInfographicsBtn.style.display = hasPerm("edit_infographics") ? "" : "none";
     if (newInfographicBtn) newInfographicBtn.style.display = hasPerm("edit_infographics")  ? "" : "none";
 
     const newCurriculumBtn = $("#newCurriculumBtn");
@@ -6753,6 +6758,14 @@
     $("#categoriesOverlay").classList.remove("open");
   }
 
+  function openInfographicsModal() {
+    renderInfographicsTab();
+    $("#infographicsOverlay").classList.add("open");
+  }
+  function closeInfographicsModal() {
+    $("#infographicsOverlay").classList.remove("open");
+  }
+
   /* ═════════════ T6c: Payment methods manage-list modal ═════════════ */
 
   function openPaymentMethodsModal() {
@@ -7139,6 +7152,13 @@
     $("#categoriesModalClose").onclick = closeCategoriesModal;
     $("#categoriesModalDone").onclick  = closeCategoriesModal;
     $("#categoriesOverlay").onclick    = (e) => { if (e.target.id === "categoriesOverlay") closeCategoriesModal(); };
+
+    // Infographics modal (replaces the standalone Infographics tab)
+    const manageIgBtn = $("#manageInfographicsBtn");
+    if (manageIgBtn) manageIgBtn.onclick = openInfographicsModal;
+    $("#infographicsModalClose").onclick = closeInfographicsModal;
+    $("#infographicsModalDone").onclick  = closeInfographicsModal;
+    $("#infographicsOverlay").onclick    = (e) => { if (e.target.id === "infographicsOverlay") closeInfographicsModal(); };
 
     // T6c: payment-methods manage modal
     const pmEditBtn = $("#t_payment_method_edit");
