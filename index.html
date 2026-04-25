@@ -114,6 +114,7 @@
         <button class="tab" data-tab="schools">Schools</button>
         <button class="tab" data-tab="teachers">Teachers</button>
         <button class="tab" data-tab="subrequests">Sub requests</button>
+        <button class="tab" data-tab="events">Events</button>
         <button class="tab" data-tab="curriculum">Curriculum</button>
         <button class="tab" data-tab="reports">Reports</button>
         <button class="tab" data-tab="users">Users</button>
@@ -216,6 +217,11 @@
         <div class="tab-panel" data-tab="subrequests" style="display:none">
           <!-- Phase T4: sub requests / shift trades. The tab body is rendered
                by renderSubRequestsTab() in app.js into this empty panel. -->
+        </div>
+
+        <div class="tab-panel" data-tab="events" style="display:none">
+          <!-- Phase T9: special events (free classes, trainings, promo).
+               Body rendered by renderEventsTab() in app.js. -->
         </div>
 
         <div class="tab-panel" data-tab="curriculum" style="display:none">
@@ -1170,6 +1176,83 @@
     </div>
   </div>
 
+  <!-- Phase T9: special-event editor modal. Used for both new and existing
+       events. Opened from the Events tab + from schedule click on an event
+       block. -->
+  <div class="modal-overlay" id="eventModalOverlay">
+    <div class="modal" style="max-width:640px">
+      <div class="modal-head">
+        <h3 id="eventModalTitle">New event</h3>
+        <button class="btn ghost small" id="eventModalClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="field-row">
+          <div class="field">
+            <label>Kind</label>
+            <select id="ev_kind"></select>
+          </div>
+          <div class="field" style="flex:2">
+            <label>Title</label>
+            <input type="text" id="ev_title" placeholder="e.g. Free demo class — Lambs ES" />
+          </div>
+        </div>
+        <div class="field">
+          <label>Description <span class="field-sub">(optional, parent-facing)</span></label>
+          <textarea id="ev_description" rows="2" placeholder="Short description for the team"></textarea>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>Starts</label>
+            <input type="datetime-local" id="ev_starts_at" />
+          </div>
+          <div class="field">
+            <label>Ends</label>
+            <input type="datetime-local" id="ev_ends_at" />
+          </div>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>School</label>
+            <select id="ev_school_id"></select>
+          </div>
+          <div class="field">
+            <label>Location <span class="field-sub">(if no school)</span></label>
+            <input type="text" id="ev_location" placeholder="e.g. Mt Pleasant Library" />
+          </div>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>Capacity <span class="field-sub">(optional)</span></label>
+            <input type="number" id="ev_capacity" min="0" placeholder="leave blank for unlimited" />
+          </div>
+          <div class="field" style="display:flex;align-items:center;gap:8px">
+            <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;margin-top:18px">
+              <input type="checkbox" id="ev_is_cancelled" /> Mark cancelled
+            </label>
+          </div>
+        </div>
+        <div class="field">
+          <label>Internal notes</label>
+          <textarea id="ev_notes" rows="2" placeholder="Notes for the team — not shown to parents"></textarea>
+        </div>
+
+        <div class="schools-modal-section">
+          <div class="schools-modal-section-head">Staff</div>
+          <div class="schools-modal-section-hint">Assign one or more teachers. Use the role label for "Lead", "Assistant", "Greeter", etc.</div>
+          <div id="ev_staff_list" class="ev-staff-list"></div>
+          <div style="margin-top:8px">
+            <select id="ev_staff_add"></select>
+          </div>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn danger small" id="deleteEventBtn" style="margin-right:auto;display:none">Delete event</button>
+        <button class="btn" id="eventCancel">Cancel</button>
+        <button class="btn primary" id="eventSave">Save</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Class-cancel modal (Phase T8). Open from class detail panel
        "Cancel class" button. -->
   <div class="modal-overlay" id="classCancelOverlay">
@@ -1281,6 +1364,10 @@
         <button class="mobile-tools-item" data-tab="subrequests" type="button">
           <span class="mobile-tools-ico" aria-hidden="true">🔄</span>
           <span>Sub requests</span>
+        </button>
+        <button class="mobile-tools-item" data-tab="events" type="button">
+          <span class="mobile-tools-ico" aria-hidden="true">★</span>
+          <span>Events</span>
         </button>
         <button class="mobile-tools-item" data-tab="curriculum" type="button">
           <span class="mobile-tools-ico" aria-hidden="true">📚</span>

@@ -107,6 +107,10 @@ response-console-v3/
 ├── INSTALL_FLOW_VERIFICATION.md ← End-to-end test plan for the spoke install
 │                               flow: share-the-secret, do-a-test-install,
 │                               verify auto-promote, SQL spot checks.
+├── T7A_VERIFICATION.md       ← End-to-end test plan for PAR promotion-event
+│                               logging: variant resolution per role × link
+│                               state, impression dedup once-per-session,
+│                               click logging on every click, RLS spot checks.
 ├── SHARON_ONBOARDING_WALKTHROUGH.md ← The step-by-step for walking Sharon
 │                               through her first PAR + PAR DK setup,
 │                               including the personal/work email split.
@@ -180,10 +184,22 @@ response-console-v3/
     │                                      admin_or_above. Backs the new
     │                                      Users tab (super_admin/admin
     │                                      only). See §4.24.
-    └── phase_t8_schools.sql             ← schools + class_cancellations
-                                            tables, classes.school_id FK,
-                                            mark_class_cancellation_notified
-                                            RPC. See §4.21.
+    ├── phase_t9_events.sql              ← events + event_staff tables,
+    │                                      event_kind enum, new edit_events
+    │                                      permission added to admin/manager/
+    │                                      super_admin bundles. Backs the
+    │                                      Events tab + schedule integration
+    │                                      for free classes / trainings /
+    │                                      promo events. See §4.25.
+    ├── phase_t8_schools.sql             ← schools + class_cancellations
+    │                                      tables, classes.school_id FK,
+    │                                      mark_class_cancellation_notified
+    │                                      RPC. See §4.21.
+    └── phase_t7a_par_promo_events.sql    ← par_promotion_events (impression /
+                                            click / dismiss) + par_promo_event_kind
+                                            enum. Self-INSERT, admin-only SELECT.
+                                            Foundation for the freemium-conversion
+                                            work. See §4.26.
 ```
 
 **Pre-T4 migrations (not in repo) live at the parent folder:**
@@ -554,6 +570,61 @@ The **role-management modal** edits role + linked teacher + granted permissions 
 
 **No new permission names.** Super_admin and admin already hold `manage_users` from the T0 bundles; T6d gates everything via `is_admin_or_above()` at the RPC entry points, which matches both per the redefined `is_admin()` (§4.5). If a franchise ever wants a delegated bookkeeper-style role with permission edits but not role edits, that's a future split (`manage_user_roles` vs. `manage_user_permissions`) — the RPCs are split today specifically to make that future split a one-line gate change.
 
+### 4.25 Special events — free classes, trainings, promotional events (T9)
+
+T9 adds a parallel item type alongside `classes` for one-off / non-recurring activities: free demo classes, teacher trainings, promotional pop-ups, and an `other` catch-all. Distinct from `closures` (whole-day, all-classes-at-a-school) and from `class_cancellations` (single-session no-show on an existing class). The shape is intentionally NOT an extension of `classes` — see §4.10's "string-based, not RRULE" rationale. Adding event-shaped rows to `classes` would force the JR nightly sync to learn about a `kind` discriminator and would mix RRULE-free explicit-date items with day-string recurrence in the same table.
+
+Two new tables, both in the `supabase_realtime` publication:
+
+- **`events`** — `id`, `kind` (`event_kind` enum: `free_class` / `training` / `promotional` / `other`), `title`, `description`, `starts_at` + `ends_at` (timestamptz, no string parsing), `school_id` (nullable FK to `schools`), `location` (free-form fallback if no school), `capacity` (nullable; null = unlimited), `notes`, `is_cancelled`, `created_by`. Constraint: `ends_at > starts_at`. The `events_capacity_nonneg` check guards against negative capacities.
+- **`event_staff`** — multi-staff assignment. `(event_id, teacher_id)` is unique; `role_label` is free-form ("Lead", "Assistant", "Greeter", "Photographer") so a franchise uses whatever terminology fits without a schema change. **No primary/sub asymmetry** — events have an equal-tier staff list, unlike `class_teachers`. RSVP/signup tables (future v2) would either widen `event_staff` with a `role` enum or add a sibling `event_attendees` table.
+
+One new permission: **`edit_events`**, added to super_admin/admin/manager bundles in both SQL `has_permission()` and JS `PERM_BUNDLES`. Teachers + viewers see events they're staffed on (or all events for viewer) but can't write. SELECT on both tables is open to any signed-in user — the schedule must render events for everyone, and promotional events are visible across the whole team.
+
+UI surfaces:
+
+- **New "Events" top-level tab** — visible to every signed-in role via `ROLE_TAB_VISIBILITY`. Header has `+ New event` button gated by `hasPerm("edit_events")`. Body has two filter rows (When: Upcoming/Past/All; Kind: All/Free class/Training/Promo/Other) and a card grid. Each card shows kind chip, title, date+time range, school/location, description, capacity (if set), and per-card staff chips. Cancelled events render line-through + opacity. Mobile registers the tab as a Tools-sheet overflow item, same pattern as Sub requests / Curriculum.
+- **Schedule Day/Week/Month integration** — `eventsForDate(date)` returns events whose `starts_at..ends_at` window covers that date (multi-day events appear on every covered day). Day view merges classes + events sorted by start time and renders events as rows with a dashed left border in the kind's color + a star (★) and kind chip. Week view positions events as absolute blocks like classes but with a dashed left border and the kind's hue. Month view interleaves events into the per-cell row list (max 3 visible, "+N more" overflow), also dashed left border. The cell's count badge includes events.
+- **Click-through** — clicking an event row in any schedule view (or on a schedule month-cell event row) opens the event editor modal, NOT the class detail panel. `wireScheduleClassClicks()` handles `data-open-event` alongside `data-open-class` and `data-open-day`.
+- **Event editor modal** (`#eventModalOverlay`) — kind dropdown, title, description, start/end datetime inputs, school dropdown (reuses `state.schools`), location fallback, capacity, internal notes, "Mark cancelled" checkbox, plus an inline staff editor. Staff editor for new events buffers additions in `pendingNewEventStaff[]` until save (no event id yet); for existing events, adds/removes/role-edits write directly to `event_staff` immediately so changes propagate via realtime to other admins.
+
+Visual differentiation across the app: events are **dashed**, classes are **solid**. That's the rule — if you add a new schedule projection or summary card, follow it. The kind colors are deterministic via `EVENT_KIND_META.<kind>.hue` (free_class=170 teal, training=270 violet, promotional=38 amber, other=210 slate); never hardcode an event color outside that lookup.
+
+Out of scope for v1 (deliberate, do not bolt on): no attendance / RSVP / headcount tracking on events (would be a sibling `event_attendees` table); no curriculum link (§4.22 stays class-scoped); no public-facing RSVP page (would need an unauthenticated path with anti-bot gating); closures don't affect events (events carry explicit dates — a closure on the same day doesn't cancel them); events don't appear on the teacher home bento yet (could surface as an "Upcoming events" section in v2 if teachers report missing them in the schedule).
+
+### 4.26 PAR promotion events — variant-keyed funnel logging (T7a)
+
+T7a is the foundation slice for the freemium-conversion work. Until now, the home-bento "On PAR" card had two states (linked / unlinked) and zero observability — we couldn't tell who saw what copy or whether anyone clicked through. T7a adds variant-keyed copy and an append-only `par_promotion_events` log so T7b's smart-trigger work has data to calibrate against. **No new permission name** — logging is universal (any authenticated user records their own events), reading is gated on `is_admin_or_above()`.
+
+**Five variants in v1**, computed by `resolveParVariant()` from `state.profile`:
+
+| Variant key | Condition | Pitch |
+|---|---|---|
+| `unlinked_admin` | admin/manager/super_admin/viewer/null, no `par_person_id` | 🔗 "Connect to PAR" |
+| `unlinked_teacher` | teacher, no `par_person_id` | 🔗 "Link DK to PAR" + "Try the family planner" subline |
+| `linked_franchise_owner` | super_admin AND linked | 👤 display name + → (neutral; Sharon already pays via the franchise org) |
+| `linked_admin` | admin/manager/viewer/null AND linked | 👤 display name + → (neutral) |
+| `linked_teacher` | teacher AND linked | 👤 display name + "Try the family planner" subline + → |
+
+The `super_admin` / `admin` split exists specifically so a future copy test can pitch the franchise owner differently from her admin delegates without affecting how admins see the card. Viewer + null fold into the admin variants — they don't see the home bento often, but the resolver handles them gracefully.
+
+**Two helpers in `app.js`:**
+
+- `resolveParVariant()` — pure function on `state.profile`, returns one of the five keys.
+- `logParPromoEvent(variantKey, eventKind, metadata)` — fire-and-forget INSERT into `par_promotion_events`. Failure is silent (a missed log row is strictly better than blocking the user's click).
+
+**Impression dedup is once-per-session** via `state._parPromoImpressions: Set<string>` keyed by variant. The first render of each variant in a session fires `impression`; subsequent re-renders (from realtime debounce, post-mutation `reloadAll()`, etc.) don't re-fire. A full page reload clears the set and re-fires. This was a deliberate calibration call — daily dedup would over-count for admins who keep DK open all day; per-render dedup would be useless once the realtime channel is busy. **Clicks are NOT deduped** — repeat clicks count as repeat intent signals, which is what we want for funnel math.
+
+**Click logging fires before the new tab opens.** The PAR card link carries `data-par-variant="<key>"`; `wireHomeCardEvents()` attaches a click listener that calls `logParPromoEvent(variant, 'click')` before the synchronous `target=_blank` navigation. The INSERT proceeds async; the new tab opens regardless of whether the log row writes (network failure / RLS rejection / etc. don't block the user).
+
+**`event_kind` is an enum (`impression` / `click` / `dismiss`); `variant_key` is text.** Locking down the kind dimension keeps funnel queries unambiguous; leaving variant_key open lets us A/B new copy without a schema migration. T7b will likely add `unlinked_teacher_usage_attendance_20` and similar keys driven by usage thresholds — same pipeline, no migration needed. The `dismiss` kind is in the enum even though v1 has no dismiss UX so a future "× hide for a week" affordance can use the same surface.
+
+**`metadata` is `jsonb` for forward extensibility.** v1 always logs `metadata: {}`. T7b will start carrying threshold values, copy-test ids, and similar context. Anything we want to filter on at scale should eventually be promoted to its own column.
+
+**Realtime publication:** `par_promotion_events` is in `supabase_realtime`. Not strictly required for v1 (no card re-renders on someone-else-logged-an-impression), but consistent with the rest of the schema and cheap. If T7b lands aggregate-counter cards on an admin dashboard, they'll get live updates for free.
+
+**Out of scope for T7a:** usage-based triggers (T7b — schema already supports via new variant keys); dismiss UX (enum has the value, no UI yet); admin-side funnel dashboard (read-only SQL today, in-app card later); per-impression metadata payloads.
+
 ---
 
 ## 5. Gotchas, quirks, and "don't touch this"
@@ -640,6 +711,14 @@ The **role-management modal** edits role + linked teacher + granted permissions 
 
 **`profiles.teacher_id` is one-to-one, enforced by a unique partial index.** `profiles_teacher_id_unique where teacher_id is not null` allows multiple NULL profiles but rejects two profiles pointing at the same teachers row. Two profiles claiming the same teacher would silently break the teacher bento (whose shift card?), `canTakeAttendanceFor` (whose attendance window?), and clock-in (whose shift?). If you need to "transfer" a teacher record between profiles, unlink the old one first (`link_profile_to_teacher(old, NULL)`) before linking the new one. Don't relax the index.
 
+**Events render with a DASHED left border; classes render SOLID.** This is the visual rule across every schedule projection (Day spine, Week absolute blocks, Month rows) AND the Events tab cards. If you add a new schedule view or summary surface, follow it — admins look at the schedule a hundred times a day and any drift causes them to misread an event as a class. The kind colors live in `EVENT_KIND_META` (free_class=170 teal, training=270 violet, promotional=38 amber, other=210 slate); never hardcode an event color outside that lookup. If a future kind needs a new hue, add the row to `EVENT_KIND_META` and `EVENT_KIND_OPTIONS` together — they're parallel arrays for editor-dropdown vs. lookup, and adding to one without the other shows the new kind in only half the UI.
+
+**Events SELECT is open to all signed-in users; writes gate on `edit_events` (T9).** This mirrors classes/schools — the schedule must render every event for every viewer (a teacher needs to see a promotional event running on the same day they teach), and promotional events are visible across the team by design. The `edit_events` permission lives in super_admin/admin/manager bundles. Teachers + viewers see events but can't write them. **Don't tighten SELECT to "events the user is staffed on"** — the schedule layer would have to plumb the filter through `eventsForDate()` anyway, and the only data benefit would be hiding a promo event from a teacher who's not running it (which we want them to see).
+
+**The `pendingNewEventStaff[]` buffer exists because new events have no id at staff-add time.** When opening the editor on an existing event, staff add/remove/role-edit writes to `event_staff` immediately so other admins see it via realtime. When opening on a new event (no id yet), staff additions buffer in `pendingNewEventStaff` and only flush to `event_staff` AFTER `events.insert()` returns the new id. **Don't try to insert event_staff with `event_id: null` and patch later** — the FK is NOT NULL and would fail. If staff insert fails after event insert succeeds, the event survives but the staff list is empty; the toast says so and the editor closes (the admin can re-open and add staff manually). This is the same pattern as the curriculum-assignments + class_teachers add-flows.
+
+**Multi-day events appear on every covered day.** `eventsForDate(date)` checks `iso(starts_at) ≤ date ≤ iso(ends_at)`, so a Sat–Sun training renders on both Saturday and Sunday in all three views. Day view's `eventStartTimeOn(ev, date)` returns midnight of `date` for events that started earlier so they sort to the top of that day's list (rather than appearing at their original 9 AM start time on a day they're already in progress). Week view positions them at the actual hour of the day they began the multi-day window — for follow-on days they show at the column top with their full duration. **Don't try to "split" a multi-day event into per-day rendering with separate start/end times** — the event row in the DB is the source of truth and the schedule must reflect that one row, not generate phantom rows. If a franchise wants per-session events (e.g. a 3-day workshop with distinct daily titles), that's three separate event rows.
+
 **Mobile header collapses to a single row at ≤720px.** Brand text (the "PAR DK / Response Console" stack) hides — only the logo remains, scaled down to 28px. The standalone `#signOutBtn` is hidden via `display: none !important` and the user-chip becomes a `<button>` that opens a `.user-menu` popover. The popover holds the user's name/email/role/PAR-link CTA + a Sign-out menu item. **`<a>` cannot live inside a `<button>`** — that's why the legacy "Connect to PAR" anchor inside the chip moved to the menu. If you put HTML back inside `#userChip`, keep it span/text only or browsers will silently break the chip's click handling. The popover is positioned absolute against `.header-top` (which sets `position: relative`) — don't remove that or the menu floats relative to the wrong ancestor.
 
 ---
@@ -669,7 +748,11 @@ The **role-management modal** edits role + linked teacher + granted permissions 
 
 - **Phase T6d — role management UI + explicit `profiles.teacher_id` link + returning-user invitation redemption.** ✅ **Shipped.** New admin-only **Users** tab lists every profile with a role-management modal that edits role + linked teacher + per-user grant/revoke lists in one save (the four T6d RPCs run only when their field changed, so a no-op save makes zero RPC calls). `profiles.teacher_id` FK with a unique partial index becomes the source of truth for "who's the signed-in teacher"; `mySignedInTeacher()` prefers the FK and falls back to the email match. `redeem_invitation_for(profile_id)` lets an admin manually redeem a pending `teacher_invitations` row against an existing profile, closing the gap left by `handle_new_user` only firing on first-sign-in. No new permission names — gated entirely on `is_admin_or_above()`. `set_profile_role()` refuses to demote the last super_admin. See `migrations/phase_t6d_role_management.sql` and §4.24.
 
-- **Phase T7 — freemium upgrade prompt + conversion tracking.** PAR card on teacher bento with context-aware CTA, click-through analytics, usage-based triggers ("you've taken attendance 20 times, want PAR for your family too?"). The current teacher bento already has a simple "On PAR" card; T7 makes it smarter.
+- **Phase T9 — special events (free classes, trainings, promotional events) + multi-staff assignment.** ✅ **Shipped.** Two new tables (`events`, `event_staff`) and an `event_kind` enum (`free_class` / `training` / `promotional` / `other`). One new permission `edit_events` (super_admin/admin/manager) added to both SQL `has_permission()` and JS `PERM_BUNDLES`. SELECT on both tables is open to any signed-in user so the schedule renders events for everyone. New top-level **Events** tab (visible to every role) with kind + when filters and a card grid; the event editor modal handles all CRUD + inline staff assignment. `eventsForDate()` integrates with all three schedule views (Day spine, Week absolute blocks, Month rows) using a dashed left border + kind-color hue + ★ marker to distinguish events from classes at a glance. Click an event row anywhere → opens the editor. Out of scope for v1: attendance/RSVP, curriculum link, public RSVP page, closure interaction. See `migrations/phase_t9_events.sql` and §4.25.
+
+- **Phase T7 — freemium upgrade prompt + conversion tracking.** Split into two slices.
+  - **T7a (✅ shipped):** PAR card has five variants keyed off role × link state (`unlinked_admin` / `unlinked_teacher` / `linked_franchise_owner` / `linked_admin` / `linked_teacher`); every impression and click logs to the new append-only `par_promotion_events` table. Self-INSERT, admin-only SELECT. See `migrations/phase_t7a_par_promo_events.sql`, `T7A_VERIFICATION.md`, and §4.26.
+  - **T7b (🔲 not started):** Usage-based triggers ("you've taken attendance 20 times, want PAR for your family too?") via new variant keys keyed off `attendance` / `clock_ins` row counts; dismiss UX (the `dismiss` enum value already exists); admin-side funnel dashboard reading `par_promotion_events` aggregates. Calibrate trigger thresholds against a week of T7a data before shipping.
 
 ### Wave 1 leftovers (pre-freemium ops work)
 
@@ -738,4 +821,6 @@ JACKRABBIT_ORG_ID                # "551000" for the Charleston franchise
 | T6b — Payment details + tax/cert documents + e-signed liability waiver | ✅ Shipped |
 | T6c — Super_admin-managed payment_methods list (replaces hardcoded enum) | ✅ Shipped |
 | T6d — Role management UI + profiles.teacher_id + returning-user invitation redemption | ✅ Shipped |
-| T7 — Freemium conversion tracking | 🔲 Not started |
+| T9 — Special events (free classes, trainings, promotional events) + multi-staff assignment | ✅ Shipped |
+| T7a — PAR promotion variant copy + impression/click logging | ✅ Shipped |
+| T7b — Usage-based smart triggers (attendance / clock-in thresholds) + dismiss UX + admin funnel dashboard | 🔲 Not started |

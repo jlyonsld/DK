@@ -61,6 +61,13 @@
                                  // RLS: admin_or_above sees all (T6d migration);
                                  // others see only their own row → empty list here.
     usersState: { query: "", showNoRole: true, editingId: null },
+    // T9: special events + their staff assignments. SELECT open to all
+    // signed-in users; writes gated on edit_events (admin/manager+).
+    events: [],
+    eventStaff: [],
+    // Events tab filter state — kindFilter ∈ {all,free_class,training,promotional,other},
+    // when ∈ {upcoming,past,all}; editingId tracks the event being edited.
+    evState: { kindFilter: "all", when: "upcoming", editingId: null },
     dkConfig: null,
     latestSyncLog: null,
     tState: { query: "", category: "all", filled: {} },
@@ -81,6 +88,11 @@
     assignCurState: { itemId: null, formClassId: "", formTeacherId: "", formLeadOverride: "", formNotes: "" },
     // Schools tab state — search + active toggle.
     schState: { query: "", showInactive: false },
+    // T7a: PAR-promotion impression dedup. Keyed by variant_key; first
+    // render of each variant in a session fires an `impression`, later
+    // re-renders (debounced realtime mutations etc.) don't. Cleared
+    // implicitly on full reload.
+    _parPromoImpressions: new Set(),
     router: "home"
   };
 
@@ -114,6 +126,7 @@
       "edit_classes","edit_teachers","edit_students","edit_enrollments","edit_attendance",
       "edit_templates","edit_categories","edit_infographics","edit_closures",
       "edit_curriculum","assign_curriculum",
+      "edit_events",
       "manage_teacher_payments","manage_teacher_compliance",
       "view_pay_rates","view_billing_status","view_parent_contact",
       "run_jackrabbit_sync","respond_to_leads",
@@ -125,6 +138,7 @@
       "edit_classes","edit_teachers","edit_students","edit_enrollments","edit_attendance",
       "edit_templates","edit_categories","edit_infographics","edit_closures",
       "edit_curriculum","assign_curriculum",
+      "edit_events",
       "manage_teacher_payments","manage_teacher_compliance",
       "view_pay_rates","view_billing_status","view_parent_contact",
       "run_jackrabbit_sync","respond_to_leads",
@@ -135,6 +149,7 @@
       "edit_templates","edit_categories","edit_infographics",
       "edit_classes","edit_teachers","edit_closures",
       "edit_curriculum","assign_curriculum",
+      "edit_events",
       "respond_to_leads",
       "view_classes_readonly","view_teachers_readonly",
       "view_students_readonly","view_enrollments_readonly",
@@ -175,11 +190,11 @@
   // Which tabs each role is allowed to see. (Role Management tab doesn't
   // exist in T1 — it lands in T6.)
   const ROLE_TAB_VISIBILITY = {
-    super_admin: new Set(["home","schedule","templates","classes","schools","teachers","subrequests","curriculum","reports","users"]),
-    admin:       new Set(["home","schedule","templates","classes","schools","teachers","subrequests","curriculum","reports","users"]),
-    manager:     new Set(["home","schedule","templates","classes","schools","teachers","subrequests","curriculum"]),
-    teacher:     new Set(["home","schedule","subrequests"]),
-    viewer:      new Set(["home","schedule","templates","classes","schools","teachers","subrequests"])
+    super_admin: new Set(["home","schedule","templates","classes","schools","teachers","subrequests","events","curriculum","reports","users"]),
+    admin:       new Set(["home","schedule","templates","classes","schools","teachers","subrequests","events","curriculum","reports","users"]),
+    manager:     new Set(["home","schedule","templates","classes","schools","teachers","subrequests","events","curriculum"]),
+    teacher:     new Set(["home","schedule","subrequests","events"]),
+    viewer:      new Set(["home","schedule","templates","classes","schools","teachers","subrequests","events"])
   };
   function canSeeTab(tab) {
     const role = currentRole();
@@ -417,7 +432,8 @@
       "curriculum_items", "curriculum_assignments",
       "teacher_payment_details", "teacher_documents",
       "liability_waivers", "liability_waiver_signatures",
-      "payment_methods"
+      "payment_methods",
+      "events", "event_staff"
     ];
     realtimeChannel = sb.channel("dk-realtime");
     tablesToWatch.forEach((table) => {
@@ -606,7 +622,7 @@
   async function reloadAll() {
     showLoader(true);
     try {
-      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches, att, clk, subs, subClm, schs, canc, cur, curA, tpd, tdocs, waivers, wSigs, pms, prof] = await Promise.all([
+      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches, att, clk, subs, subClm, schs, canc, cur, curA, tpd, tdocs, waivers, wSigs, pms, prof, evs, evStaff] = await Promise.all([
         sb.from("categories").select("*").order("sort_order", { ascending: true }),
         sb.from("templates").select("*").order("created_at", { ascending: true }),
         sb.from("classes").select("*").order("name", { ascending: true }),
@@ -634,7 +650,9 @@
         sb.from("liability_waivers").select("*").order("version", { ascending: false }),
         sb.from("liability_waiver_signatures").select("*").order("signed_at", { ascending: false }),
         sb.from("payment_methods").select("*").order("sort_order", { ascending: true }),
-        sb.from("profiles").select("*").order("full_name", { ascending: true })
+        sb.from("profiles").select("*").order("full_name", { ascending: true }),
+        sb.from("events").select("*").order("starts_at", { ascending: true }),
+        sb.from("event_staff").select("*")
       ]);
       for (const r of [cats, tpls, cls, igs, tch, ct, ci, stu, enr]) if (r.error) throw r.error;
       // Non-admin roles may not have SELECT access to teacher_invitations /
@@ -695,6 +713,11 @@
       // (or 0 if RLS denies for some reason). The Users tab gates on role,
       // so non-admins never see this data anyway.
       state.profiles              = (prof && !prof.error) ? prof.data : [];
+      // T9: events + event_staff. SELECT open to all signed-in users.
+      // Empty fallback covers the brief window before the migration is
+      // applied in any local-dev branch.
+      state.events                = (evs && !evs.error) ? evs.data : [];
+      state.eventStaff            = (evStaff && !evStaff.error) ? evStaff.data : [];
     } catch (e) {
       console.error(e);
       showToast("Failed to load: " + e.message, "error");
@@ -714,6 +737,7 @@
     renderCategoriesTab();
     renderInfographicsTab();
     renderSubRequestsTab();
+    renderEventsTab();
     renderCurriculumTab();
     renderReportsTab();
     renderUsersTab();
@@ -1829,26 +1853,127 @@
     `;
   }
 
+  /* ═════════════ T7a — PAR promotion: variant + event logging ═════════════
+   *
+   * Computes which copy/CTA the PAR card shows for the signed-in user,
+   * and records impressions/clicks to par_promotion_events for funnel
+   * analysis. Variant keys are intentionally stable strings (not enum)
+   * so we can A/B new copy without a schema migration — see
+   * `phase_t7a_par_promo_events.sql` for the table shape.
+   *
+   * Variant matrix (CLAUDE.md §4.26):
+   *   unlinked_admin           — admin/manager/super_admin/viewer/null,
+   *                              no par_person_id. Pitch: link your DK
+   *                              email to PAR identity.
+   *   unlinked_teacher         — teacher, no par_person_id. Pitch: try
+   *                              PAR for your family schedule.
+   *   linked_franchise_owner   — super_admin AND linked. Neutral "Open
+   *                              PAR" — Sharon already pays via the
+   *                              franchise org, no upsell needed.
+   *   linked_admin             — admin/manager/viewer/null AND linked.
+   *                              Neutral "Open PAR".
+   *   linked_teacher           — teacher AND linked. Soft pitch: "Open
+   *                              PAR — try the family planner."
+   */
+  function resolveParVariant() {
+    const p = state.profile;
+    const linked = !!p?.par_person_id;
+    const role = p?.role || null;
+    if (!linked) {
+      return role === "teacher" ? "unlinked_teacher" : "unlinked_admin";
+    }
+    if (role === "super_admin") return "linked_franchise_owner";
+    if (role === "teacher")     return "linked_teacher";
+    return "linked_admin";
+  }
+
+  // Fire-and-forget logger. Failures are silent — losing a row is
+  // strictly less bad than blocking a click on the user's PAR link.
+  function logParPromoEvent(variantKey, eventKind, metadata) {
+    const profileId = state.profile?.id;
+    if (!profileId) return;
+    sb.from("par_promotion_events").insert({
+      profile_id:  profileId,
+      variant_key: variantKey,
+      event_kind:  eventKind,
+      surface:     "home_bento_par_card",
+      metadata:    metadata || {}
+    }).then(({ error }) => {
+      if (error) console.warn("par_promo log failed:", error.message);
+    });
+  }
+
+  const PAR_VARIANT_COPY = {
+    unlinked_admin: {
+      href:  "https://get-on-par.com/?view=settings&tab=linked-accounts",
+      icon:  "🔗",
+      title: "Connect to PAR",
+      sub:   "",
+      tooltip: "Link this email on PAR to connect"
+    },
+    unlinked_teacher: {
+      href:  "https://get-on-par.com/?view=settings&tab=linked-accounts",
+      icon:  "🔗",
+      title: "Link DK to PAR",
+      sub:   "Try the family planner",
+      tooltip: "Link this email on PAR — also great for your family schedule"
+    },
+    linked_franchise_owner: {
+      href:  "https://get-on-par.com/",
+      icon:  "👤",
+      title: null,                  // null → use display name
+      sub:   "",
+      tooltip: "Open PAR in a new tab"
+    },
+    linked_admin: {
+      href:  "https://get-on-par.com/",
+      icon:  "👤",
+      title: null,
+      sub:   "",
+      tooltip: "Open PAR in a new tab"
+    },
+    linked_teacher: {
+      href:  "https://get-on-par.com/",
+      icon:  "👤",
+      title: null,
+      sub:   "Try the family planner",
+      tooltip: "Open PAR in a new tab"
+    }
+  };
+
   function renderParBridgeCard() {
-    const linked = !!state.profile?.par_person_id;
-    const body = linked
-      ? `
-        <a class="par-user" href="https://get-on-par.com/" target="_blank" rel="noopener" title="Open PAR in a new tab">
-          <span>👤</span>
-          <span class="par-name">${escapeHtml(state.profile.par_display_name || state.profile.par_primary_email || "Open PAR")}</span>
-          <span class="par-arrow">→</span>
-        </a>
-      `
-      : `
-        <a class="par-user" href="https://get-on-par.com/?view=settings&tab=linked-accounts" target="_blank" rel="noopener" title="Link this email on PAR to connect">
-          <span>🔗</span>
-          <span class="par-name">Connect to PAR</span>
-          <span class="par-arrow">→</span>
-        </a>
-      `;
+    const variant = resolveParVariant();
+    const copy = PAR_VARIANT_COPY[variant] || PAR_VARIANT_COPY.unlinked_admin;
+    const p = state.profile;
+    const titleText = copy.title
+      || p?.par_display_name
+      || p?.par_primary_email
+      || "Open PAR";
+    const subEl = copy.sub
+      ? `<div class="par-sub">${escapeHtml(copy.sub)}</div>`
+      : "";
+
+    // Fire impression once per variant per session. Re-renders triggered
+    // by realtime debounce or post-mutation reloadAll() won't re-fire.
+    if (!state._parPromoImpressions.has(variant)) {
+      state._parPromoImpressions.add(variant);
+      logParPromoEvent(variant, "impression");
+    }
+
     return `
       <div class="bento-label"><span>On PAR</span></div>
-      <div class="bento-par-bridge">${body}</div>
+      <div class="bento-par-bridge">
+        <a class="par-user" data-par-variant="${variant}"
+           href="${copy.href}" target="_blank" rel="noopener"
+           title="${escapeHtml(copy.tooltip)}">
+          <span>${copy.icon}</span>
+          <span class="par-name">
+            ${escapeHtml(titleText)}
+            ${subEl}
+          </span>
+          <span class="par-arrow">→</span>
+        </a>
+      </div>
     `;
   }
 
@@ -1897,6 +2022,13 @@
     $$('[data-cur-save-notes]', $("#bentoGrid")).forEach((btn) => {
       btn.onclick = (e) => { e.stopPropagation(); saveTeacherCurriculumNotes(btn.dataset.curSaveNotes); };
     });
+    // T7a: log PAR-card clicks before the new-tab navigation kicks off.
+    // INSERT is fire-and-forget; target=_blank doesn't wait on it.
+    $$('[data-par-variant]', $("#bentoGrid")).forEach((a) => {
+      a.addEventListener("click", () => {
+        logParPromoEvent(a.dataset.parVariant, "click");
+      });
+    });
   }
 
   /* ═════════════ Router ═════════════ */
@@ -1933,7 +2065,7 @@
     // visible mtabs will center themselves naturally.
     const toolsBtn = $("#mobileToolsBtn");
     if (toolsBtn) {
-      const anyTool = ["templates","schools","subrequests","curriculum","reports","users"].some(canSeeTab);
+      const anyTool = ["templates","schools","subrequests","events","curriculum","reports","users"].some(canSeeTab);
       toolsBtn.style.display = anyTool ? "" : "none";
     }
 
@@ -2089,6 +2221,89 @@
     return state.closures.filter((c) => c.date === iso);
   }
 
+  /* ═════════════ EVENTS (T9) helpers ═════════════
+   *
+   * Events are explicit-date special items (free classes, trainings, promo
+   * events). They live in `state.events` with multi-staff in
+   * `state.eventStaff`. The schedule renders them alongside classes; the
+   * Events tab is the dedicated CRUD surface.
+   */
+
+  const EVENT_KIND_META = {
+    free_class:  { label: "Free class",   hue: 170, abbr: "FC" },
+    training:    { label: "Training",     hue: 270, abbr: "TR" },
+    promotional: { label: "Promo",        hue: 38,  abbr: "PR" },
+    other:       { label: "Event",        hue: 210, abbr: "EV" }
+  };
+  const EVENT_KIND_OPTIONS = [
+    { value: "free_class",  label: "Free class" },
+    { value: "training",    label: "Training" },
+    { value: "promotional", label: "Promotional" },
+    { value: "other",       label: "Other" }
+  ];
+  function eventKindMeta(k) { return EVENT_KIND_META[k] || EVENT_KIND_META.other; }
+  function eventKindLabel(k) { return eventKindMeta(k).label; }
+  function eventKindHue(k)   { return eventKindMeta(k).hue; }
+  function eventKindAbbr(k)  { return eventKindMeta(k).abbr; }
+
+  function eventStaffFor(eventId) {
+    return state.eventStaff.filter((es) => es.event_id === eventId);
+  }
+  function eventStaffTeachersFor(eventId) {
+    const ids = new Set(eventStaffFor(eventId).map((es) => es.teacher_id));
+    return state.teachers.filter((t) => ids.has(t.id));
+  }
+  function eventStaffInitials(eventId) {
+    return eventStaffTeachersFor(eventId)
+      .map((t) => (t.full_name || "").trim().split(/\s+/).map((p) => p[0] || "").join("").slice(0, 2).toUpperCase())
+      .filter(Boolean)
+      .join("/");
+  }
+
+  // Returns events whose start..end window covers `date`. Multi-day events
+  // (training Sat+Sun) appear on every covered day. Teachers and the
+  // onlyMine toggle filter to events the signed-in teacher is staffed on.
+  function eventsForDate(date) {
+    const role = currentRole();
+    const isTeacher = role === "teacher";
+    const me = isTeacher ? mySignedInTeacher() : null;
+    const myId = me?.id || null;
+    const onlyMine = state.sState.onlyMine || isTeacher;
+
+    const iso = isoDate(date);
+    const myStaffedIds = onlyMine
+      ? new Set(state.eventStaff.filter((es) => es.teacher_id === myId).map((es) => es.event_id))
+      : null;
+
+    return state.events.filter((ev) => {
+      const startIso = isoDate(new Date(ev.starts_at));
+      const endIso   = isoDate(new Date(ev.ends_at));
+      if (iso < startIso || iso > endIso) return false;
+      if (myStaffedIds && !myStaffedIds.has(ev.id)) return false;
+      return true;
+    });
+  }
+
+  // For Day-view chronological merging: returns the start time on `date`
+  // for an event. Multi-day events that started on a prior day return the
+  // start of `date` (00:00) so they sort to the top.
+  function eventStartTimeOn(ev, date) {
+    const start = new Date(ev.starts_at);
+    const iso = isoDate(date);
+    if (isoDate(start) === iso) return start;
+    const d = new Date(date);
+    d.setHours(0, 0, 0, 0);
+    return d;
+  }
+  function eventEndTimeOn(ev, date) {
+    const end = new Date(ev.ends_at);
+    const iso = isoDate(date);
+    if (isoDate(end) === iso) return end;
+    const d = new Date(date);
+    d.setHours(23, 59, 59, 999);
+    return d;
+  }
+
   function renderScheduleTab() {
     const view = $("#schedView");
     const label = $("#schedLabel");
@@ -2130,12 +2345,15 @@
   }
 
   function renderScheduleDayView(view, date) {
-    const classes = classesForDate(date)
-      .map((c) => ({ cls: c, startAt: classStartTimeOn(c, date), teacher: primaryTeacherObj(c.id) }))
+    const classItems = classesForDate(date)
+      .map((c) => ({ kind: "class", cls: c, startAt: classStartTimeOn(c, date), teacher: primaryTeacherObj(c.id) }));
+    const eventItems = eventsForDate(date)
+      .map((ev) => ({ kind: "event", ev, startAt: eventStartTimeOn(ev, date), endAt: eventEndTimeOn(ev, date) }));
+    const items = [...classItems, ...eventItems]
       .sort((a, b) => (a.startAt?.getTime() || 0) - (b.startAt?.getTime() || 0));
     const closures = closuresForDate(date);
 
-    if (!classes.length && !closures.length) {
+    if (!items.length && !closures.length) {
       view.innerHTML = `
         <div class="sched-empty">
           <p>Nothing scheduled on ${escapeHtml(date.toLocaleDateString(undefined, { weekday: "long" }))}.</p>
@@ -2154,12 +2372,48 @@
 
     const now = new Date();
     const isToday = isoDate(date) === isoDate(now);
-    const itemsHtml = classes.map(({ cls, startAt, teacher }, i) => {
+    // Find the next-upcoming index across all items for the "upcoming" dot.
+    const nextIdx = isToday
+      ? items.findIndex((x) => x.startAt && x.startAt > now)
+      : -1;
+    const itemsHtml = items.map((item, i) => {
+      if (item.kind === "event") {
+        const { ev, startAt, endAt } = item;
+        const isPast = isToday && endAt && endAt < now;
+        const isNext = i === nextIdx;
+        const dotClass = isNext ? "upcoming" : isPast ? "" : "active";
+        const hue = eventKindHue(ev.kind);
+        const showLine = i < items.length - 1;
+        const timeStr = startAt
+          ? `${startAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}–${endAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
+          : "—";
+        const staff = eventStaffTeachersFor(ev.id).map((t) => t.full_name.split(/\s+/)[0]).join(", ");
+        const sch = ev.school_id ? state.schools.find((s) => s.id === ev.school_id) : null;
+        const loc = sch ? sch.name : (ev.location || "");
+        const cancelTag = ev.is_cancelled ? '<span class="sched-cancelled-badge" style="margin-left:6px">cancelled</span>' : "";
+        return `
+          <div class="sched-day-item sched-day-event${ev.is_cancelled ? " sched-cancelled" : ""}" data-open-event="${escapeHtml(ev.id)}" ${isPast ? 'style="opacity:.55"' : ""}>
+            <div class="sched-day-spine">
+              <div class="sched-day-dot ${dotClass}" style="background:hsl(${hue}, 62%, 58%)"></div>
+              ${showLine ? '<div class="sched-day-line"></div>' : ""}
+            </div>
+            <div class="sched-day-body" style="border-left:3px solid hsla(${hue}, 62%, 58%, .55)">
+              <div class="sched-day-time">${escapeHtml(timeStr)} <span class="ev-kind-chip" style="background:hsla(${hue},62%,58%,.18); color:hsl(${hue},62%,72%); border:1px solid hsla(${hue},62%,58%,.35)">★ ${escapeHtml(eventKindLabel(ev.kind))}</span>${cancelTag}</div>
+              <div class="sched-day-title">${escapeHtml(ev.title)}</div>
+              <div class="sched-day-sub">
+                ${loc ? escapeHtml(loc) : ""}
+                ${staff ? `${loc ? " · " : ""}<span style="color:hsl(${hue}, 62%, 68%)">${escapeHtml(staff)}</span>` : ""}
+              </div>
+            </div>
+          </div>
+        `;
+      }
+      const { cls, startAt, teacher } = item;
       const isPast = isToday && startAt && startAt < now;
-      const isNext = isToday && startAt && !isPast && i === classes.findIndex((x) => x.startAt && x.startAt > now);
+      const isNext = i === nextIdx;
       const dotClass = isNext ? "upcoming" : isPast ? "" : "active";
       const timeStr = startAt ? startAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : (cls.times || "—");
-      const showLine = i < classes.length - 1;
+      const showLine = i < items.length - 1;
       const hue = teacher ? teacherHue(teacher.id) : 210;
       return `
         <div class="sched-day-item" data-open-class="${escapeHtml(cls.id)}" ${isPast ? 'style="opacity:.55"' : ""}>
@@ -2195,7 +2449,9 @@
         .map((c) => ({ cls: c, startAt: classStartTimeOn(c, d), teacher: primaryTeacherObj(c.id) }))
         .filter((x) => x.startAt)  // drop classes with unparseable times
         .sort((a, b) => a.startAt.getTime() - b.startAt.getTime());
-      days.push({ date: d, classes, closures: closuresForDate(d) });
+      const events = eventsForDate(d)
+        .map((ev) => ({ ev, startAt: eventStartTimeOn(ev, d), endAt: eventEndTimeOn(ev, d) }));
+      days.push({ date: d, classes, events, closures: closuresForDate(d) });
     }
 
     const hourRows = [];
@@ -2257,11 +2513,34 @@
         `;
       }).join("");
 
+      const eventBlocks = d.events.map(({ ev, startAt, endAt }) => {
+        const hoursFromStart = startAt.getHours() + startAt.getMinutes() / 60 - SCHED_HOUR_START;
+        if (hoursFromStart >= (SCHED_HOUR_END - SCHED_HOUR_START)) return "";
+        const topPx = Math.max(0, hoursFromStart * SCHED_HOUR_PX);
+        const durationMin = Math.max(15, (endAt - startAt) / 60000);
+        const heightPx = Math.max(24, (durationMin / 60) * SCHED_HOUR_PX);
+        const hue = eventKindHue(ev.kind);
+        const timeStr = startAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+        const initials = eventStaffInitials(ev.id);
+        const cancelClass = ev.is_cancelled ? " sched-cancelled" : "";
+        return `
+          <div class="sched-week-block sched-week-event${cancelClass}" data-open-event="${escapeHtml(ev.id)}"
+               style="top:${topPx}px;height:${heightPx}px;
+                      background:hsla(${hue},62%,58%,.22);
+                      border-left:3px dashed hsl(${hue},62%,58%);">
+            <div class="sched-week-block-time">★ ${escapeHtml(timeStr)}</div>
+            <div class="sched-week-block-title">${escapeHtml(ev.title)}</div>
+            ${initials ? `<div class="sched-week-block-sub">${escapeHtml(initials)}</div>` : ""}
+          </div>
+        `;
+      }).join("");
+
       return `
         <div class="sched-week-daycol${isToday ? " today" : ""}${isClosed ? " closed" : ""}"
              style="height:${totalHeight}px">
           ${closureLabel}
           ${blocks}
+          ${eventBlocks}
         </div>
       `;
     }).join("");
@@ -2318,14 +2597,42 @@
       const inMonth = d.getMonth() === anchor.getMonth();
       const isToday = iso === todayIso;
       const closures = closuresForDate(d);
-      const classes = classesForDate(d)
-        .map((c) => ({ cls: c, startAt: classStartTimeOn(c, d), teacher: primaryTeacherObj(c.id) }))
+      const classRows = classesForDate(d)
+        .map((c) => ({ kind: "class", cls: c, startAt: classStartTimeOn(c, d), teacher: primaryTeacherObj(c.id) }));
+      const eventRows = eventsForDate(d)
+        .map((ev) => ({ kind: "event", ev, startAt: eventStartTimeOn(ev, d) }));
+      const merged = [...classRows, ...eventRows]
         .sort((a, b) => (a.startAt?.getTime() || 0) - (b.startAt?.getTime() || 0));
 
-      const visible = classes.slice(0, MAX_ROWS);
-      const overflow = Math.max(0, classes.length - MAX_ROWS);
+      const visible = merged.slice(0, MAX_ROWS);
+      const overflow = Math.max(0, merged.length - MAX_ROWS);
 
-      const rowsHtml = visible.map(({ cls, startAt, teacher }) => {
+      const rowsHtml = visible.map((item) => {
+        if (item.kind === "event") {
+          const { ev, startAt } = item;
+          const hue = eventKindHue(ev.kind);
+          const timeStr = startAt
+            ? startAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }).replace(" ", "")
+            : "";
+          const initials = eventStaffInitials(ev.id);
+          const cancelClass = ev.is_cancelled ? " sched-cancelled" : "";
+          const titleTxt = [
+            "★ " + ev.title,
+            "— " + eventKindLabel(ev.kind),
+            timeStr ? "at " + timeStr : "",
+            ev.is_cancelled ? "(cancelled)" : ""
+          ].filter(Boolean).join(" ");
+          return `
+            <div class="sched-month-row sched-month-event${cancelClass}" data-open-event="${escapeHtml(ev.id)}"
+                 style="border-left-color:hsl(${hue}, 62%, 58%); border-left-style:dashed"
+                 title="${escapeHtml(titleTxt)}">
+              ${timeStr ? `<span class="sched-month-row-time">${escapeHtml(timeStr)}</span>` : ""}
+              <span class="sched-month-row-name">★ ${escapeHtml(ev.title)}</span>
+              ${initials ? `<span class="sched-month-row-initials">${escapeHtml(initials)}</span>` : ""}
+            </div>
+          `;
+        }
+        const { cls, startAt, teacher } = item;
         const hue = teacher ? teacherHue(teacher.id) : 210;
         const timeStr = startAt
           ? startAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }).replace(" ", "")
@@ -2374,7 +2681,7 @@
              data-open-day="${iso}">
           <div class="sched-month-head">
             <div class="sched-month-dn">${d.getDate()}</div>
-            ${classes.length ? `<div class="sched-month-count">${classes.length}</div>` : ""}
+            ${merged.length ? `<div class="sched-month-count">${merged.length}</div>` : ""}
           </div>
           ${closureHtml}
           <div class="sched-month-rows">
@@ -2470,6 +2777,12 @@
         const id = el.dataset.openClass;
         state.cState.openClassId = id;
         go("classes");
+      };
+    });
+    $$("[data-open-event]", $("#schedView")).forEach((el) => {
+      el.onclick = (e) => {
+        e.stopPropagation();
+        openEventEditor(el.dataset.openEvent);
       };
     });
     $$("[data-open-day]", $("#schedView")).forEach((el) => {
@@ -4292,6 +4605,341 @@
           if (!error) reloadAll().then(renderAll);
         });
     }
+  }
+
+  /* ═════════════ EVENTS tab (T9) ═════════════
+   *
+   * Special events: free classes, trainings, promotional events. Distinct
+   * from `classes` (recurring, JR-synced) and `closures` (whole-day). The
+   * Events tab is the dedicated CRUD surface; the schedule renders events
+   * alongside classes via eventsForDate().
+   */
+
+  function renderEventsTab() {
+    const panel = document.querySelector('.tab-panel[data-tab="events"]');
+    if (!panel) return;
+    if (!canSeeTab("events")) return;
+
+    const canEdit = hasPerm("edit_events");
+    const filter = state.evState.kindFilter || "all";
+    const when = state.evState.when || "upcoming";
+    const now = new Date();
+
+    const filtered = state.events
+      .filter((ev) => filter === "all" || ev.kind === filter)
+      .filter((ev) => {
+        const end = new Date(ev.ends_at);
+        if (when === "upcoming") return end >= now;
+        if (when === "past") return end < now;
+        return true;
+      })
+      .sort((a, b) => new Date(a.starts_at) - new Date(b.starts_at));
+
+    const kindChips = [{ id: "all", label: "All kinds" }]
+      .concat(EVENT_KIND_OPTIONS.map((o) => ({ id: o.value, label: o.label })))
+      .map((c) => `<button class="chip${filter === c.id ? " active" : ""}" data-ev-kind="${escapeHtml(c.id)}" type="button">${escapeHtml(c.label)}</button>`)
+      .join("");
+
+    const whenChips = [
+      { id: "upcoming", label: "Upcoming" },
+      { id: "past",     label: "Past" },
+      { id: "all",      label: "All time" }
+    ].map((c) => `<button class="chip${when === c.id ? " active" : ""}" data-ev-when="${escapeHtml(c.id)}" type="button">${escapeHtml(c.label)}</button>`).join("");
+
+    const cards = filtered.map(renderEventCard).join("");
+    const empty = filtered.length === 0
+      ? `<div class="sr-empty">${state.events.length === 0
+          ? `No events yet.${canEdit ? " Click <b>＋ New event</b> to add one." : ""}`
+          : "No events match this filter."}</div>`
+      : "";
+
+    panel.innerHTML = `
+      <div class="tab-head">
+        <div class="results-meta">${state.events.length} event${state.events.length === 1 ? "" : "s"}</div>
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+          ${canEdit ? `<button class="btn primary small" id="newEventBtn" type="button">＋ New event</button>` : ""}
+        </div>
+      </div>
+      <div class="ev-filters">
+        <div class="ev-chip-row">${whenChips}</div>
+        <div class="ev-chip-row">${kindChips}</div>
+      </div>
+      <div class="ev-grid">${cards}${empty}</div>
+    `;
+
+    const nb = panel.querySelector("#newEventBtn");
+    if (nb) nb.onclick = () => openEventEditor(null);
+
+    panel.querySelectorAll("[data-ev-kind]").forEach((b) => {
+      b.onclick = () => { state.evState.kindFilter = b.dataset.evKind; renderEventsTab(); };
+    });
+    panel.querySelectorAll("[data-ev-when]").forEach((b) => {
+      b.onclick = () => { state.evState.when = b.dataset.evWhen; renderEventsTab(); };
+    });
+    panel.querySelectorAll("[data-event-edit]").forEach((b) => {
+      b.onclick = (e) => { e.stopPropagation(); openEventEditor(b.dataset.eventEdit); };
+    });
+  }
+
+  function renderEventCard(ev) {
+    const canEdit = hasPerm("edit_events");
+    const hue = eventKindHue(ev.kind);
+    const start = new Date(ev.starts_at);
+    const end = new Date(ev.ends_at);
+    const sameDay = isoDate(start) === isoDate(end);
+    const dateStr = sameDay
+      ? start.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" })
+      : `${start.toLocaleDateString(undefined, { month: "short", day: "numeric" })} – ${end.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}`;
+    const timeStr = sameDay
+      ? `${start.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}–${end.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
+      : "";
+    const sch = ev.school_id ? state.schools.find((s) => s.id === ev.school_id) : null;
+    const loc = sch ? sch.name : (ev.location || "");
+    const staff = eventStaffTeachersFor(ev.id);
+    const staffRow = staff.length
+      ? staff.map((t) => `<span class="ev-staff-chip">${escapeHtml(t.full_name)}</span>`).join("")
+      : `<span class="ev-staff-empty">No staff assigned yet</span>`;
+    const cancelTag = ev.is_cancelled ? `<span class="ev-cancel-pill">cancelled</span>` : "";
+    return `
+      <div class="ev-card${ev.is_cancelled ? " cancelled" : ""}" style="border-top:3px solid hsl(${hue},62%,58%)">
+        <div class="ev-card-head">
+          <div class="ev-card-kind" style="background:hsla(${hue},62%,58%,.18); color:hsl(${hue},62%,72%); border:1px solid hsla(${hue},62%,58%,.35)">★ ${escapeHtml(eventKindLabel(ev.kind))}</div>
+          ${canEdit ? `<button class="btn small" data-event-edit="${escapeHtml(ev.id)}" type="button">Edit</button>` : ""}
+        </div>
+        <div class="ev-card-title">${escapeHtml(ev.title)} ${cancelTag}</div>
+        <div class="ev-card-when">${escapeHtml(dateStr)}${timeStr ? ` · ${escapeHtml(timeStr)}` : ""}</div>
+        ${loc ? `<div class="ev-card-where">${escapeHtml(loc)}</div>` : ""}
+        ${ev.description ? `<div class="ev-card-desc">${escapeHtml(ev.description)}</div>` : ""}
+        ${ev.capacity != null ? `<div class="ev-card-capacity">Capacity: ${ev.capacity}</div>` : ""}
+        <div class="ev-card-staff">${staffRow}</div>
+      </div>
+    `;
+  }
+
+  /* ─── Event editor modal (T9) ─── */
+
+  let editingEventId = null;
+  // Pending staff additions before save when creating a new event (no event
+  // id to attach event_staff rows to yet). Saved on the same click as the
+  // event row.
+  let pendingNewEventStaff = [];
+
+  function openEventEditor(id) {
+    const canEdit = hasPerm("edit_events");
+    if (!canEdit && id == null) return;
+    editingEventId = id || null;
+    pendingNewEventStaff = [];
+    const ev = id ? state.events.find((x) => x.id === id) : null;
+
+    $("#eventModalTitle").textContent = ev ? "Edit event" : "New event";
+
+    // Kind select
+    const kindSel = $("#ev_kind");
+    kindSel.innerHTML = EVENT_KIND_OPTIONS.map(
+      (o) => `<option value="${escapeHtml(o.value)}"${ev && ev.kind === o.value ? " selected" : ""}>${escapeHtml(o.label)}</option>`
+    ).join("");
+
+    $("#ev_title").value = ev ? (ev.title || "") : "";
+    $("#ev_description").value = ev ? (ev.description || "") : "";
+
+    // Datetime inputs use <input type="datetime-local"> which expects
+    // "YYYY-MM-DDTHH:MM" in local time. Default new events to today 4pm-5pm.
+    const defStart = new Date(); defStart.setHours(16, 0, 0, 0);
+    const defEnd   = new Date(); defEnd.setHours(17, 0, 0, 0);
+    $("#ev_starts_at").value = toDatetimeLocalInput(ev ? new Date(ev.starts_at) : defStart);
+    $("#ev_ends_at").value   = toDatetimeLocalInput(ev ? new Date(ev.ends_at)   : defEnd);
+
+    // School dropdown
+    const schSel = $("#ev_school_id");
+    schSel.innerHTML = `<option value="">— No school —</option>` +
+      state.schools
+        .filter((s) => s.active !== false)
+        .map((s) => `<option value="${escapeHtml(s.id)}"${ev && ev.school_id === s.id ? " selected" : ""}>${escapeHtml(s.name)}</option>`)
+        .join("");
+
+    $("#ev_location").value = ev ? (ev.location || "") : "";
+    $("#ev_capacity").value = (ev && ev.capacity != null) ? String(ev.capacity) : "";
+    $("#ev_notes").value = ev ? (ev.notes || "") : "";
+    $("#ev_is_cancelled").checked = !!(ev && ev.is_cancelled);
+
+    $("#deleteEventBtn").style.display = ev ? "" : "none";
+    renderEventStaffEditor();
+    $("#eventModalOverlay").classList.add("open");
+    setTimeout(() => $("#ev_title").focus(), 50);
+  }
+
+  function closeEventEditor() {
+    $("#eventModalOverlay").classList.remove("open");
+    editingEventId = null;
+    pendingNewEventStaff = [];
+  }
+
+  function toDatetimeLocalInput(d) {
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
+  function renderEventStaffEditor() {
+    const wrap = $("#ev_staff_list");
+    if (!wrap) return;
+    const rows = editingEventId
+      ? eventStaffFor(editingEventId).map((es) => {
+          const t = state.teachers.find((x) => x.id === es.teacher_id);
+          return { staffId: es.id, teacherId: es.teacher_id, teacherName: t ? t.full_name : "(unknown)", role_label: es.role_label || "", notes: es.notes || "" };
+        })
+      : pendingNewEventStaff.map((p) => {
+          const t = state.teachers.find((x) => x.id === p.teacherId);
+          return { staffId: null, teacherId: p.teacherId, teacherName: t ? t.full_name : "(unknown)", role_label: p.role_label || "", notes: p.notes || "" };
+        });
+
+    if (!rows.length) {
+      wrap.innerHTML = `<div class="ev-staff-empty">No staff assigned yet.</div>`;
+    } else {
+      wrap.innerHTML = rows.map((r) => `
+        <div class="ev-staff-row" data-staff-id="${escapeHtml(r.staffId || "")}" data-teacher-id="${escapeHtml(r.teacherId)}">
+          <div class="ev-staff-row-name">${escapeHtml(r.teacherName)}</div>
+          <input type="text" class="ev-staff-role" placeholder="Role (e.g. Lead)" value="${escapeHtml(r.role_label)}" />
+          <button class="btn ghost small" data-staff-remove="${escapeHtml(r.staffId || r.teacherId)}" type="button">Remove</button>
+        </div>
+      `).join("");
+      wrap.querySelectorAll("[data-staff-remove]").forEach((b) => {
+        b.onclick = async () => {
+          const row = b.closest(".ev-staff-row");
+          const staffId = row.dataset.staffId;
+          const teacherId = row.dataset.teacherId;
+          if (staffId && editingEventId) {
+            const { error } = await sb.from("event_staff").delete().eq("id", staffId);
+            if (error) return showToast(error.message, "error");
+            await reloadAll();
+            renderEventStaffEditor();
+          } else {
+            pendingNewEventStaff = pendingNewEventStaff.filter((p) => p.teacherId !== teacherId);
+            renderEventStaffEditor();
+          }
+        };
+      });
+      wrap.querySelectorAll(".ev-staff-role").forEach((inp) => {
+        inp.onchange = async (e) => {
+          const row = inp.closest(".ev-staff-row");
+          const staffId = row.dataset.staffId;
+          const teacherId = row.dataset.teacherId;
+          const val = e.target.value.trim() || null;
+          if (staffId && editingEventId) {
+            const { error } = await sb.from("event_staff").update({ role_label: val }).eq("id", staffId);
+            if (error) return showToast(error.message, "error");
+            await reloadAll();
+          } else {
+            const p = pendingNewEventStaff.find((x) => x.teacherId === teacherId);
+            if (p) p.role_label = val;
+          }
+        };
+      });
+    }
+
+    // Add-staff dropdown
+    const addSel = $("#ev_staff_add");
+    if (addSel) {
+      const assignedIds = new Set(rows.map((r) => r.teacherId));
+      addSel.innerHTML = `<option value="">＋ Add staff…</option>` +
+        state.teachers
+          .filter((t) => t.active !== false && !assignedIds.has(t.id))
+          .map((t) => `<option value="${escapeHtml(t.id)}">${escapeHtml(t.full_name)}</option>`)
+          .join("");
+      addSel.onchange = async (e) => {
+        const teacherId = e.target.value;
+        if (!teacherId) return;
+        if (editingEventId) {
+          const { error } = await sb.from("event_staff").insert({ event_id: editingEventId, teacher_id: teacherId });
+          if (error) { showToast(error.message, "error"); e.target.value = ""; return; }
+          await reloadAll();
+        } else {
+          pendingNewEventStaff.push({ teacherId, role_label: "", notes: "" });
+        }
+        e.target.value = "";
+        renderEventStaffEditor();
+      };
+    }
+  }
+
+  async function saveEvent() {
+    const title = $("#ev_title").value.trim();
+    if (!title) { showToast("Title is required", "error"); return; }
+    const startsAt = $("#ev_starts_at").value;
+    const endsAt = $("#ev_ends_at").value;
+    if (!startsAt || !endsAt) { showToast("Start and end times are required", "error"); return; }
+    if (new Date(endsAt) <= new Date(startsAt)) {
+      showToast("End must be after start", "error");
+      return;
+    }
+    const capRaw = $("#ev_capacity").value.trim();
+    const capacity = capRaw === "" ? null : parseInt(capRaw, 10);
+    if (capRaw !== "" && (isNaN(capacity) || capacity < 0)) {
+      showToast("Capacity must be a non-negative number", "error");
+      return;
+    }
+
+    const payload = {
+      kind: $("#ev_kind").value,
+      title,
+      description: $("#ev_description").value.trim() || null,
+      starts_at: new Date(startsAt).toISOString(),
+      ends_at:   new Date(endsAt).toISOString(),
+      school_id: $("#ev_school_id").value || null,
+      location:  $("#ev_location").value.trim() || null,
+      capacity,
+      notes:     $("#ev_notes").value.trim() || null,
+      is_cancelled: $("#ev_is_cancelled").checked
+    };
+
+    showLoader(true);
+    let resp;
+    if (editingEventId) {
+      resp = await sb.from("events").update(payload).eq("id", editingEventId).select().single();
+    } else {
+      payload.created_by = state.session?.user?.id || null;
+      resp = await sb.from("events").insert(payload).select().single();
+    }
+    if (resp.error) {
+      showLoader(false);
+      showToast(resp.error.message, "error");
+      return;
+    }
+    const savedId = resp.data.id;
+
+    // For new events with pending staff additions, insert event_staff rows.
+    if (!editingEventId && pendingNewEventStaff.length) {
+      const rows = pendingNewEventStaff.map((p) => ({
+        event_id: savedId,
+        teacher_id: p.teacherId,
+        role_label: p.role_label || null,
+        notes: p.notes || null
+      }));
+      const { error } = await sb.from("event_staff").insert(rows);
+      if (error) {
+        showLoader(false);
+        showToast("Event saved, but staff insert failed: " + error.message, "error");
+        await reloadAll(); renderAll();
+        closeEventEditor();
+        return;
+      }
+    }
+
+    showLoader(false);
+    showToast(editingEventId ? "Event saved" : "Event created", "success");
+    await reloadAll(); renderAll();
+    closeEventEditor();
+  }
+
+  async function deleteEvent() {
+    if (!editingEventId) return;
+    if (!confirm("Delete this event? Staff assignments will be removed too. This cannot be undone.")) return;
+    showLoader(true);
+    const { error } = await sb.from("events").delete().eq("id", editingEventId);
+    showLoader(false);
+    if (error) return showToast(error.message, "error");
+    showToast("Event deleted", "success");
+    await reloadAll(); renderAll();
+    closeEventEditor();
   }
 
   /* ═════════════ Sub requests / shift trades (Phase T4) ═════════════
@@ -7641,6 +8289,18 @@
     if (schSave)   schSave.onclick   = saveSchool;
     if (schDel)    schDel.onclick    = deleteSchool;
     if (schCopy)   schCopy.onclick   = copyPrimaryToDailyContact;
+
+    // Event editor modal (Phase T9)
+    const evCancel = $("#eventCancel");
+    const evClose  = $("#eventModalClose");
+    const evOver   = $("#eventModalOverlay");
+    const evSave   = $("#eventSave");
+    const evDel    = $("#deleteEventBtn");
+    if (evCancel) evCancel.onclick = closeEventEditor;
+    if (evClose)  evClose.onclick  = closeEventEditor;
+    if (evOver)   evOver.onclick   = (e) => { if (e.target.id === "eventModalOverlay") closeEventEditor(); };
+    if (evSave)   evSave.onclick   = saveEvent;
+    if (evDel)    evDel.onclick    = deleteEvent;
 
     // Class-cancellation modal (Phase T8)
     const ccCancel = $("#classCancelClose");
