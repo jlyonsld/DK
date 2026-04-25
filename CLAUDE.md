@@ -335,6 +335,18 @@ DK installs to iOS / Android home screens and macOS / Windows desktops as a stan
 
 **Regenerating icons.** All six PNG sizes derive from the 1024² `logo.png` source via macOS `sips` (`sips -z <size> <size> logo.png --out <name>.png`). Keep them in sync — a stale icon size will silently win on whichever platform happens to prefer it. The maskable variant uses the same source as `icon-512.png` because the logo's navy background fills the square (no transparent corners to clip).
 
+**Notch / safe-area handling — navy must reach the top of the screen.** Three coordinated pieces:
+
+1. The viewport meta on both `index.html` and `install.html` includes `viewport-fit=cover` so the page extends edge-to-edge on notched devices and `env(safe-area-inset-top)` returns a non-zero value.
+2. `html { background: var(--slate-950); }` in `styles.css` so iOS rubber-band overscroll at the top reveals dark, not the default white. The body's `--bg-gradient` covers the visible page area; this catches the area outside the body during overscroll.
+3. `.header-top` uses `padding: calc(16px + env(safe-area-inset-top)) 22px 16px` so the brand row + Sign-out drop below the notch instead of clipping under it. The header's translucent slate-900 background then visually fills the notch area.
+
+If you change the viewport meta, the `html` background, or the header padding, re-test in iOS Safari AND in standalone PWA mode (Add to Home Screen → open from icon) — the two render the top region differently and a regression in either is easy to miss. The bottom counterpart (`mobile-tabbar` + body `padding-bottom: calc(76px + env(safe-area-inset-bottom))`) is documented in §4.17.
+
+### 4.19 Per-tab action buttons live in the panel, not the global header
+
+The only buttons in `<header>` `.header-actions` are user-chip and Sign out — controls that apply across every tab. Tab-specific actions (`＋ New template`, `＋ New class`, `＋ New teacher`, `＋ New category`, `＋ Upload / add image`, `⟳ Sync now`, `✉ Invite user`, `⟳ Refresh PAR links`) all live inside their own tab panel's `.tab-head` row, so they only show when their tab is active. Role gating for them is consolidated in `applyRoleVisibility()` in `app.js` — one `if (btn) btn.style.display = hasPerm(...) ? "" : "none"` line per button. **When you add a new tab-scoped action**, follow the pattern: button inside the panel's `.tab-head`, gating line in the per-tab block of `applyRoleVisibility()`. Don't put it in the global header — every other tab will get visual clutter for an action they can't use.
+
 ---
 
 ## 5. Gotchas, quirks, and "don't touch this"
