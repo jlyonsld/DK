@@ -100,6 +100,10 @@ response-console-v3/
 ├── T4_VERIFICATION.md        ← End-to-end test plan for sub requests:
 │                               create / claim / fill / cancel round-trip,
 │                               RLS spot checks, schedule badge sanity.
+├── SCHOOLS_VERIFICATION.md   ← End-to-end test plan for Phase T8 schools:
+│                               migration backfill, schools tab, class
+│                               editor dropdown, cancel-class flow,
+│                               notify-daily-contact email + mailto.
 ├── INSTALL_FLOW_VERIFICATION.md ← End-to-end test plan for the spoke install
 │                               flow: share-the-secret, do-a-test-install,
 │                               verify auto-promote, SQL spot checks.
@@ -177,6 +181,16 @@ clock_ins                — teacher shift timestamps (one row per
                            report for payroll. See §4.16.
 infographics             — image assets in Supabase Storage bucket
 teacher_invitations      — DK-side mirror of PAR invitations (see §4.6)
+schools                  — first-class school records with primary +
+                           daily contacts. classes.school_id is the FK;
+                           classes.location stays as a free-form fallback
+                           string for JR-synced classes. See §4.21.
+class_cancellations      — single-session class cancellations (one row
+                           per class_id+session_date). Distinct from
+                           closures (whole-day, all-classes-at-a-school).
+                           Schedule renders cancelled blocks muted; the
+                           notify modal stamps notified_at via
+                           mark_class_cancellation_notified RPC. See §4.21.
 sub_requests             — open / filled / cancelled requests for a teacher
                            sub on a specific class+session_date. Created via
                            create_sub_request RPC; filled via fill_sub_request.
@@ -373,6 +387,18 @@ Permissions: `request_sub` (teacher, manager, admin, super_admin) — already in
 
 The realtime channel watches `sub_requests` and `sub_claims` so a claim from another teacher's phone lights up the admin's open-card list inside the 300ms debounce window. Both tables are added to `supabase_realtime` by the migration.
 
+### 4.21 Schools are first-class; `classes.location` stays as a fallback string
+
+Phase T8 promotes the free-form `classes.location` text into a real `schools` table with primary + daily contacts. **`classes.location` is intentionally not removed.** The Jackrabbit nightly sync writes `location`; we don't want to teach the sync about schools, so the column stays as the JR-of-record source. The schema adds `classes.school_id` (nullable FK) alongside it, and the migration auto-creates one `schools` row per distinct `location` value plus backfills `school_id` to match. New classes created in the app pick a school from a dropdown; `school_id` wins when set, `location` is the display fallback when not. `classLocationLabel(cls)` and `schoolForClass(cls)` are the two helpers — use them everywhere instead of reaching for `cls.location` directly.
+
+Each school carries two contacts: **primary** (long-term ops — principal, activities director) and **daily** (day-of-class person — front desk, after-care coordinator). Same person allowed via the "Copy from primary" button in the school editor. The daily-contact email is what powers the notify-daily-contact flow.
+
+`class_cancellations` is a thin table — `(class_id, session_date)` unique — that records single-session cancellations. **Distinct from `closures`**, which is whole-day + all-classes-at-the-school. Cancelling a class via the "Cancel class" button on the class detail panel inserts a row, mutes the schedule block (line-through + opacity), and immediately pops the notify modal so the admin can email the school. The cancellation row's `notified_at` timestamp is stamped when the admin clicks "Open in email app" (via the `mark_class_cancellation_notified` RPC) so re-notification can show "notified ✓".
+
+The notify modal (`openNotifyModal({ kind, cls, sessionDate, ... })`) handles three notification kinds — `sub_assigned` (auto-pops after `fill_sub_request` success when the linked school has a daily contact), `class_cancelled` (auto-pops after class-cancel save), and `adhoc` (the always-available "✉ Notify daily contact" button on the class panel). Subject + body are pre-filled but fully editable; "Copy email" pushes both to the clipboard, "Open in email app" launches `mailto:` with the daily contact pre-filled. **No actual SMTP** — DK doesn't send email itself; admins prefer to send from their own work address (better deliverability + reply threading). This is the same copy-paste-fallback pattern as the teacher-invitation modal when Resend is unset.
+
+Permissions: schools and class_cancellations writes are gated on the existing `edit_classes` permission — no new permission name. Anyone signed in can SELECT both tables (the schedule needs cancellation data for every viewer to render line-throughs correctly).
+
 ---
 
 ## 5. Gotchas, quirks, and "don't touch this"
@@ -435,6 +461,8 @@ The realtime channel watches `sub_requests` and `sub_claims` so a claim from ano
 
 - **Phase T3 — attendance + clock-in/out + reports.** ✅ **All shipped.** Teachers and admins take per-session attendance (Present/Absent + late-pickup minutes) and clock in/out per class via the class detail panel or the teacher bento cards. Admin-only **Reports** tab ships with two entries: **Attendance** (summary, per-class breakdown, late-pickup log + CSV for billing) and **Teacher hours** (per-teacher payroll roll-up, shift log + CSV for payroll). See §4.13 – §4.16.
 
+- **Phase T8 — schools + class cancellations + notify daily contact.** ✅ **Shipped.** `schools` table with primary + daily contacts replaces the free-form `classes.location` string as the source of truth (location stays as a JR-sync fallback). `class_cancellations` records single-session cancellations distinct from closures. The class detail panel grows "Cancel class" + "✉ Notify daily contact" buttons; the notify modal opens automatically after `fill_sub_request` success and after class-cancel save, with pre-filled email templates and a Copy/mailto path (no actual SMTP — admins send from their own email). Schedule blocks render cancelled sessions line-through. Anyone signed in can SELECT schools + cancellations; writes gated on `edit_classes`. See `migrations/phase_t8_schools.sql`, `SCHOOLS_VERIFICATION.md`, and §4.21.
+
 - **Phase T4 — sub requests / shift trades.** ✅ **Shipped.** Teachers (or admins on a teacher's behalf) open a `sub_requests` row for a specific class+session_date; other teachers offer to cover via `sub_claims`; admins/managers `fill_sub_request(req, teacher)` which atomically marks the request `filled` and flips the chosen claim to `accepted` (sibling pending claims auto-`declined`). Cancellation by the requester or admin auto-declines outstanding claims. Two new permissions — `claim_sub_requests` (teacher+), `manage_all_sub_requests` (manager+) — layered onto the existing `request_sub` permission. The "Sub requests" tab is visible to every signed-in role with a status filter (Open / Mine / All-for-admins) and per-card claim/withdraw/fill/cancel actions. The class detail panel grows a "Request sub" button next to "Take attendance" / "Clock in" that pre-fills the next session date; week + month schedule blocks badge classes with an active request (🔄 open, ✓ filled). All RPCs (`create_sub_request`, `create_sub_request_for`, `claim_sub_request`, `withdraw_sub_claim`, `fill_sub_request`, `cancel_sub_request`) are `security invoker` so RLS fires per row. See `migrations/phase_t4_sub_requests.sql` and `T4_VERIFICATION.md`.
 
 - **Phase T5 — curriculum / scripts / materials library.** No schema. Strategy doc sketches an admin-curated content library with optional DK-corporate-approval badges.
@@ -467,7 +495,7 @@ The realtime channel watches `sub_requests` and `sub_claims` so a claim from ano
 
 - **The class `times` regex parser is strict.** See §5. Non-JR classes entered manually with unusual time formats may break the Week view (they'd silently not render blocks).
 
-- **Closures are global, not per-school.** A closure on a given date flags EVERY class on the month grid that day, regardless of `classes.location`. Fine for single-location franchises; wrong for multi-school franchises where e.g. Mt Pleasant ES is closed but West Ashley ES isn't. Before loading real academic-calendar data, this needs a schema decision — either a `closures.location_filter` column (nullable = all schools) or a separate `school_calendars` table keyed by the school name/id used in `classes.location`.
+- **Closures are still global, not per-school.** A closure on a given date flags EVERY class on the month grid that day, regardless of `classes.school_id`. Fine for single-location franchises; wrong for multi-school franchises where e.g. Mt Pleasant ES is closed but West Ashley ES isn't. Phase T8 promoted schools to first-class (see §4.21) — the natural follow-up is `closures.school_id` (nullable = all schools, non-null = per-school) and a school filter on the closures modal. Until that ships, single-class cancellations should go through `class_cancellations` (the "Cancel class" button) rather than closures.
 
 - **Month-view `+N more` is calibrated to the web row cap.** The renderer computes overflow as `classes.length - 3`. On ≤720px CSS hides the 3rd row, so a cell with 4 classes visually shows 2 rows + "+1 more" even though 2 are hidden. Tap opens Day view where all render, so it's mild — but if it matters, move the overflow computation into CSS via `:nth-child` counters or re-render on viewport change.
 
@@ -502,6 +530,7 @@ JACKRABBIT_ORG_ID                # "551000" for the Charleston franchise
 | Full responsive pass | ✅ Shipped |
 | T3 — Attendance + clock-in/out + Reports tab | ✅ Shipped |
 | T4 — Sub requests / shift trades | ✅ Shipped |
+| T8 — Schools + class cancellations + notify-daily-contact | ✅ Shipped |
 | T5 — Curriculum library | 🔲 Not started |
 | T6 — Role management UI + profiles.teacher_id | 🔲 Not started |
 | T7 — Freemium conversion tracking | 🔲 Not started |

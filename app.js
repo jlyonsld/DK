@@ -40,6 +40,8 @@
     subRequests: [],        // sub_requests rows (RLS-filtered: open visible to all,
                             // your own visible to you, all visible to admin/manager)
     subClaims: [],          // sub_claims rows (RLS-filtered)
+    schools: [],            // schools rows (every signed-in role can SELECT)
+    classCancellations: [], // class_cancellations rows (one per cancelled session)
     closures: [],
     dkConfig: null,
     latestSyncLog: null,
@@ -55,6 +57,8 @@
     // Sub-requests tab filter: "open" (default), "mine" (created/filled by me),
     // "all" (admin/manager only).
     srState: { filter: "open" },
+    // Schools tab state — search + active toggle.
+    schState: { query: "", showInactive: false },
     router: "home"
   };
 
@@ -144,11 +148,11 @@
   // Which tabs each role is allowed to see. (Role Management tab doesn't
   // exist in T1 — it lands in T6.)
   const ROLE_TAB_VISIBILITY = {
-    super_admin: new Set(["home","schedule","templates","classes","teachers","categories","infographics","subrequests","reports"]),
-    admin:       new Set(["home","schedule","templates","classes","teachers","categories","infographics","subrequests","reports"]),
-    manager:     new Set(["home","schedule","templates","classes","teachers","categories","infographics","subrequests"]),
+    super_admin: new Set(["home","schedule","templates","classes","schools","teachers","categories","infographics","subrequests","reports"]),
+    admin:       new Set(["home","schedule","templates","classes","schools","teachers","categories","infographics","subrequests","reports"]),
+    manager:     new Set(["home","schedule","templates","classes","schools","teachers","categories","infographics","subrequests"]),
     teacher:     new Set(["home","schedule","subrequests"]),
-    viewer:      new Set(["home","schedule","templates","classes","teachers","categories","infographics","subrequests"])
+    viewer:      new Set(["home","schedule","templates","classes","schools","teachers","categories","infographics","subrequests"])
   };
   function canSeeTab(tab) {
     const role = currentRole();
@@ -381,7 +385,8 @@
       "students", "enrollments", "attendance", "clock_ins", "sync_log",
       "teacher_invitations", "dk_config", "closures",
       "student_match_candidates",
-      "sub_requests", "sub_claims"
+      "sub_requests", "sub_claims",
+      "schools", "class_cancellations"
     ];
     realtimeChannel = sb.channel("dk-realtime");
     tablesToWatch.forEach((table) => {
@@ -532,7 +537,7 @@
   async function reloadAll() {
     showLoader(true);
     try {
-      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches, att, clk, subs, subClm] = await Promise.all([
+      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches, att, clk, subs, subClm, schs, canc] = await Promise.all([
         sb.from("categories").select("*").order("sort_order", { ascending: true }),
         sb.from("templates").select("*").order("created_at", { ascending: true }),
         sb.from("classes").select("*").order("name", { ascending: true }),
@@ -550,7 +555,9 @@
         sb.from("attendance").select("*").order("session_date", { ascending: false }),
         sb.from("clock_ins").select("*").order("session_date", { ascending: false }),
         sb.from("sub_requests").select("*").order("session_date", { ascending: true }),
-        sb.from("sub_claims").select("*").order("created_at", { ascending: false })
+        sb.from("sub_claims").select("*").order("created_at", { ascending: false }),
+        sb.from("schools").select("*").order("name", { ascending: true }),
+        sb.from("class_cancellations").select("*").order("session_date", { ascending: false })
       ]);
       for (const r of [cats, tpls, cls, igs, tch, ct, ci, stu, enr]) if (r.error) throw r.error;
       // Non-admin roles may not have SELECT access to teacher_invitations /
@@ -583,6 +590,11 @@
       // Viewers fall back to empty.
       state.subRequests      = (subs && !subs.error) ? subs.data : [];
       state.subClaims        = (subClm && !subClm.error) ? subClm.data : [];
+      // Schools + class_cancellations: any signed-in user can SELECT.
+      // Tables won't exist on Supabase until phase_t8_schools.sql is
+      // applied; tolerate the error so the rest of the app stays usable.
+      state.schools          = (schs && !schs.error) ? schs.data : [];
+      state.classCancellations = (canc && !canc.error) ? canc.data : [];
     } catch (e) {
       console.error(e);
       showToast("Failed to load: " + e.message, "error");
@@ -597,6 +609,7 @@
     renderCategoryChips();
     renderTemplates();
     renderClassesTab();
+    renderSchoolsTab();
     renderTeachersTab();
     renderCategoriesTab();
     renderInfographicsTab();
@@ -1376,7 +1389,7 @@
     // visible mtabs will center themselves naturally.
     const toolsBtn = $("#mobileToolsBtn");
     if (toolsBtn) {
-      const anyTool = ["templates","categories","infographics","subrequests","reports"].some(canSeeTab);
+      const anyTool = ["templates","categories","infographics","schools","subrequests","reports"].some(canSeeTab);
       toolsBtn.style.display = anyTool ? "" : "none";
     }
 
@@ -1674,12 +1687,15 @@
         const subBadge = subReq
           ? `<span class="sched-sub-badge sched-sub-${escapeHtml(subReq.status)}" title="Sub request: ${escapeHtml(subReq.status)}">${subReq.status === "open" ? "🔄" : "✓"}</span>`
           : "";
+        const cancellation = classCancellationFor(cls.id, dayIso);
+        const cancelClass = cancellation ? " sched-cancelled" : "";
+        const cancelBadge = cancellation ? `<span class="sched-sub-badge sched-cancelled-badge" title="Class cancelled${cancellation.reason ? ": " + cancellation.reason : ""}">✗</span>` : "";
         return `
-          <div class="sched-week-block" data-open-class="${escapeHtml(cls.id)}"
+          <div class="sched-week-block${cancelClass}" data-open-class="${escapeHtml(cls.id)}"
                style="top:${topPx}px;height:${heightPx}px;
                       background:hsla(${hue},62%,58%,.22);
                       border-left:3px solid hsl(${hue},62%,58%);">
-            <div class="sched-week-block-time">${escapeHtml(timeStr)}${subBadge}</div>
+            <div class="sched-week-block-time">${escapeHtml(timeStr)}${cancelBadge}${subBadge}</div>
             <div class="sched-week-block-title">${escapeHtml(cls.name)}</div>
             ${teacher ? `<div class="sched-week-block-sub">${escapeHtml(teacher.full_name.split(/\s+/)[0])}</div>` : ""}
           </div>
@@ -1764,18 +1780,22 @@
         const subBadge = subReq
           ? `<span class="sched-sub-badge sched-sub-${escapeHtml(subReq.status)}" title="Sub request: ${escapeHtml(subReq.status)}">${subReq.status === "open" ? "🔄" : "✓"}</span>`
           : "";
+        const cancellation = classCancellationFor(cls.id, iso);
+        const cancelClass = cancellation ? " sched-cancelled" : "";
+        const cancelBadge = cancellation ? `<span class="sched-sub-badge sched-cancelled-badge" title="Class cancelled${cancellation.reason ? ": " + cancellation.reason : ""}">✗</span>` : "";
         const titleTxt = [
           cls.name,
           initials ? "— " + initials : "",
           timeStr ? "at " + timeStr : "",
-          subReq ? `(sub ${subReq.status})` : "",
+          cancellation ? "(cancelled)" : (subReq ? `(sub ${subReq.status})` : ""),
         ].filter(Boolean).join(" ");
         return `
-          <div class="sched-month-row" data-open-class="${escapeHtml(cls.id)}"
+          <div class="sched-month-row${cancelClass}" data-open-class="${escapeHtml(cls.id)}"
                style="border-left-color:hsl(${hue}, 62%, 58%)"
                title="${escapeHtml(titleTxt)}">
             ${timeStr ? `<span class="sched-month-row-time">${escapeHtml(timeStr)}</span>` : ""}
             <span class="sched-month-row-name">${escapeHtml(cls.name)}</span>
+            ${cancelBadge}
             ${subBadge}
             ${initials ? `<span class="sched-month-row-initials">${escapeHtml(initials)}</span>` : ""}
           </div>
@@ -2700,6 +2720,69 @@
         }
       }
 
+      // "Cancel class" / "Notify daily contact" buttons (Phase T8). Admin-only.
+      // Operates on the next class day (mirrors Request sub anchor) so the
+      // common case (admin reacting to a same-day issue) is one click.
+      if (hasPerm("edit_classes")) {
+        const nextSession = nextSessionDateForClass(cls, new Date()) || today;
+        const cancellation = classCancellationFor(cls.id, nextSession);
+        if (!cancellation) {
+          const btn = document.createElement("button");
+          btn.className = "btn small";
+          btn.textContent = "Cancel class";
+          btn.title = `Cancel ${cls.name} for ${formatSessionDate(nextSession)} and notify the school`;
+          btn.onclick = (e) => { e.stopPropagation(); openClassCancelModal(cls, nextSession); };
+          actionRow.appendChild(btn);
+        } else {
+          // Already cancelled — show a pill plus a "Notify again" button
+          // (admins sometimes need to re-send the cancellation email).
+          const pill = document.createElement("span");
+          pill.className = "sr-status sr-status-cancelled";
+          pill.textContent = `Cancelled · ${formatSessionDate(nextSession)}${cancellation.notified_at ? " · notified ✓" : ""}`;
+          actionRow.appendChild(pill);
+          const notifyBtn = document.createElement("button");
+          notifyBtn.className = "btn small ghost";
+          notifyBtn.textContent = cancellation.notified_at ? "Re-notify school" : "Notify school";
+          notifyBtn.onclick = (e) => {
+            e.stopPropagation();
+            openNotifyModal({
+              kind: "class_cancelled",
+              cls,
+              sessionDate: nextSession,
+              reason: cancellation.reason || "",
+              cancellationId: cancellation.id,
+            });
+          };
+          actionRow.appendChild(notifyBtn);
+          const undoBtn = document.createElement("button");
+          undoBtn.className = "btn small ghost";
+          undoBtn.textContent = "Restore";
+          undoBtn.onclick = (e) => { e.stopPropagation(); uncancelClassSession(cancellation.id); };
+          actionRow.appendChild(undoBtn);
+        }
+
+        // Always show a generic "Notify daily contact" if the school has
+        // a daily contact email — useful for ad-hoc messages outside the
+        // sub / cancel flows.
+        const sch = schoolForClass(cls);
+        if (sch && sch.daily_contact_email) {
+          const adhocBtn = document.createElement("button");
+          adhocBtn.className = "btn small ghost";
+          adhocBtn.textContent = "✉ Notify daily contact";
+          adhocBtn.title = `Open a notification email to ${sch.daily_contact_name || sch.daily_contact_email}`;
+          adhocBtn.onclick = (e) => {
+            e.stopPropagation();
+            openNotifyModal({
+              kind: "adhoc",
+              cls,
+              sessionDate: nextSession,
+              reason: "",
+            });
+          };
+          actionRow.appendChild(adhocBtn);
+        }
+      }
+
       if (actionRow.children.length > 0) {
         attSection.appendChild(actionRow);
       }
@@ -3214,6 +3297,451 @@
     showToast(`Attendance saved (${entries.length})`, "success");
   }
 
+  /* ═════════════ Schools + class cancellations + notifications (Phase T8) ═════════════
+   *
+   * Schools:
+   *   - First-class entity replacing the free-form classes.location string
+   *     (the string still lives on classes — JR sync writes it; we read
+   *     it as a fallback when school_id is null).
+   *   - Each school has a primary contact (long-term ops, principal-level)
+   *     and a daily contact (day-of-class person who needs to know about
+   *     subs / cancellations). Same person allowed via copy-paste.
+   *
+   * Class cancellations:
+   *   - Single-session class cancellations (vs. closures, which are
+   *     whole-day, all-classes-at-a-school events).
+   *   - Saved as one class_cancellations row per (class_id, session_date).
+   *   - Schedule day/week/month views render cancelled sessions muted
+   *     with a "cancelled" pill.
+   *
+   * Notify daily contact:
+   *   - One modal handles both notification types (sub assigned, class
+   *     cancelled). Pre-fills a subject + body the admin can edit, then
+   *     a "Copy email" button puts the body on the clipboard plus opens
+   *     a mailto: link. No actual email sending — DK doesn't have SMTP
+   *     for this and admins prefer to send from their own email anyway.
+   */
+
+  function schoolForClass(cls) {
+    if (!cls) return null;
+    if (cls.school_id) {
+      return state.schools.find((s) => s.id === cls.school_id) || null;
+    }
+    return null;
+  }
+
+  // The display label for a class's location: school name when linked,
+  // otherwise the legacy free-form `location` string. Empty string if
+  // neither is available.
+  function classLocationLabel(cls) {
+    const s = schoolForClass(cls);
+    if (s) return s.name;
+    return cls?.location || "";
+  }
+
+  function classCancellationFor(classId, sessionDate) {
+    return state.classCancellations.find(
+      (c) => c.class_id === classId && c.session_date === sessionDate
+    ) || null;
+  }
+
+  /* ─── Schools tab ─── */
+
+  function renderSchoolsTab() {
+    const panel = document.querySelector('.tab-panel[data-tab="schools"]');
+    if (!panel) return;
+    if (!canSeeTab("schools")) return;
+
+    const canEdit = hasPerm("edit_classes");
+    const q = (state.schState.query || "").toLowerCase();
+    const showInactive = !!state.schState.showInactive;
+
+    const filtered = state.schools
+      .filter((s) => showInactive || s.active !== false)
+      .filter((s) => {
+        if (!q) return true;
+        const hay = [
+          s.name, s.city, s.state,
+          s.primary_contact_name, s.primary_contact_email,
+          s.daily_contact_name, s.daily_contact_email
+        ].filter(Boolean).join(" ").toLowerCase();
+        return hay.includes(q);
+      });
+
+    // Per-school class count (active classes only, regardless of test toggle).
+    const classCountByLoc = new Map();
+    for (const c of state.classes) {
+      if (!c.school_id) continue;
+      classCountByLoc.set(c.school_id, (classCountByLoc.get(c.school_id) || 0) + 1);
+    }
+    // Also surface a count of "unlinked" classes that still rely on the
+    // free-form location string — handy banner so admins know why they
+    // aren't seeing every class on a Schools card yet.
+    const unlinkedCount = state.classes.filter(
+      (c) => !c.school_id && c.location && c.location.trim() !== ""
+    ).length;
+
+    const cards = filtered.map((s) => renderSchoolCard(s, classCountByLoc.get(s.id) || 0)).join("");
+    const empty = filtered.length === 0
+      ? `<div class="sr-empty">${state.schools.length === 0
+          ? "No schools yet. Click <b>＋ New school</b> to add one — or apply phase_t8_schools.sql to backfill from existing class locations."
+          : "No schools match this filter."}</div>`
+      : "";
+
+    const unlinkedBanner = (unlinkedCount > 0 && canEdit)
+      ? `<div class="schools-unlinked-banner">${unlinkedCount} class${unlinkedCount === 1 ? "" : "es"} still use a free-form location string. Open the class and pick a school from the dropdown to link.</div>`
+      : "";
+
+    panel.innerHTML = `
+      <div class="tab-head">
+        <div class="results-meta">${state.schools.length} school${state.schools.length === 1 ? "" : "s"}${state.schools.length > 0 ? ` · ${state.schools.filter(s => s.active !== false).length} active` : ""}</div>
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+          <input type="search" id="schoolSearch" placeholder="Search schools…" value="${escapeHtml(state.schState.query)}" style="font-size:12.5px;padding:5px 9px;border:1px solid var(--border);border-radius:6px;min-width:160px" />
+          <label style="display:inline-flex; align-items:center; gap:6px; font-size:12px; color:var(--ink-dim); cursor:pointer">
+            <input type="checkbox" id="showInactiveSchools" ${showInactive ? "checked" : ""} /> Show inactive
+          </label>
+          ${canEdit ? `<button class="btn primary small" id="newSchoolBtn" type="button">＋ New school</button>` : ""}
+        </div>
+      </div>
+      ${unlinkedBanner}
+      <div class="schools-grid">${cards}${empty}</div>
+    `;
+
+    const search = panel.querySelector("#schoolSearch");
+    if (search) search.oninput = (e) => { state.schState.query = e.target.value; renderSchoolsTab(); };
+    const inact = panel.querySelector("#showInactiveSchools");
+    if (inact) inact.onchange = (e) => { state.schState.showInactive = !!e.target.checked; renderSchoolsTab(); };
+    const nb = panel.querySelector("#newSchoolBtn");
+    if (nb) nb.onclick = () => openSchoolEditor(null);
+
+    panel.querySelectorAll("[data-school-edit]").forEach((b) => {
+      b.onclick = (e) => { e.stopPropagation(); openSchoolEditor(b.dataset.schoolEdit); };
+    });
+  }
+
+  function renderSchoolCard(s, classCount) {
+    const canEdit = hasPerm("edit_classes");
+    const inactive = s.active === false ? `<span class="school-inactive-pill">inactive</span>` : "";
+    const pc = s.primary_contact_name || s.primary_contact_email
+      ? `
+        <div class="school-contact">
+          <div class="school-contact-label">Primary contact${s.primary_contact_role ? ` · ${escapeHtml(s.primary_contact_role)}` : ""}</div>
+          ${s.primary_contact_name ? `<div class="school-contact-name">${escapeHtml(s.primary_contact_name)}</div>` : ""}
+          ${s.primary_contact_email ? `<div class="school-contact-line"><a href="mailto:${escapeHtml(s.primary_contact_email)}">${escapeHtml(s.primary_contact_email)}</a></div>` : ""}
+          ${s.primary_contact_phone ? `<div class="school-contact-line">${escapeHtml(s.primary_contact_phone)}</div>` : ""}
+        </div>
+      `
+      : "";
+    const dc = s.daily_contact_name || s.daily_contact_email
+      ? `
+        <div class="school-contact">
+          <div class="school-contact-label">Daily contact${s.daily_contact_role ? ` · ${escapeHtml(s.daily_contact_role)}` : ""}</div>
+          ${s.daily_contact_name ? `<div class="school-contact-name">${escapeHtml(s.daily_contact_name)}</div>` : ""}
+          ${s.daily_contact_email ? `<div class="school-contact-line"><a href="mailto:${escapeHtml(s.daily_contact_email)}">${escapeHtml(s.daily_contact_email)}</a></div>` : ""}
+          ${s.daily_contact_phone ? `<div class="school-contact-line">${escapeHtml(s.daily_contact_phone)}</div>` : ""}
+        </div>
+      `
+      : "";
+    const noContacts = !pc && !dc
+      ? `<div class="school-contact-missing">No contacts on file yet${canEdit ? " — click Edit to add." : "."}</div>`
+      : "";
+    const addrLine = [s.city, s.state].filter(Boolean).join(", ");
+    return `
+      <div class="school-card${s.active === false ? " inactive" : ""}">
+        <div class="school-card-head">
+          <div>
+            <div class="school-name">${escapeHtml(s.name)} ${inactive}</div>
+            ${addrLine ? `<div class="school-addr">${escapeHtml(addrLine)}</div>` : ""}
+          </div>
+          ${canEdit ? `<button class="btn small" data-school-edit="${escapeHtml(s.id)}" type="button">Edit</button>` : ""}
+        </div>
+        <div class="school-meta-row">
+          <span class="school-class-count">${classCount} class${classCount === 1 ? "" : "es"}</span>
+        </div>
+        <div class="school-contacts">
+          ${pc}
+          ${dc}
+          ${noContacts}
+        </div>
+      </div>
+    `;
+  }
+
+  /* ─── School editor modal ─── */
+
+  let editingSchoolId = null;
+
+  function openSchoolEditor(id) {
+    editingSchoolId = id || null;
+    const s = id ? state.schools.find((x) => x.id === id) : null;
+    $("#schoolModalTitle").textContent = s ? "Edit school" : "New school";
+    $("#sc_name").value                 = s ? (s.name || "") : "";
+    $("#sc_address_line1").value        = s ? (s.address_line1 || "") : "";
+    $("#sc_address_line2").value        = s ? (s.address_line2 || "") : "";
+    $("#sc_city").value                 = s ? (s.city || "") : "";
+    $("#sc_state").value                = s ? (s.state || "") : "";
+    $("#sc_postal_code").value          = s ? (s.postal_code || "") : "";
+    $("#sc_primary_name").value         = s ? (s.primary_contact_name || "") : "";
+    $("#sc_primary_role").value         = s ? (s.primary_contact_role || "") : "";
+    $("#sc_primary_email").value        = s ? (s.primary_contact_email || "") : "";
+    $("#sc_primary_phone").value        = s ? (s.primary_contact_phone || "") : "";
+    $("#sc_daily_name").value           = s ? (s.daily_contact_name || "") : "";
+    $("#sc_daily_role").value           = s ? (s.daily_contact_role || "") : "";
+    $("#sc_daily_email").value          = s ? (s.daily_contact_email || "") : "";
+    $("#sc_daily_phone").value          = s ? (s.daily_contact_phone || "") : "";
+    $("#sc_notes").value                = s ? (s.notes || "") : "";
+    $("#sc_active").value               = (s && s.active === false) ? "false" : "true";
+    $("#deleteSchoolBtn").style.display = s ? "" : "none";
+    $("#schoolModalOverlay").classList.add("open");
+    setTimeout(() => $("#sc_name").focus(), 50);
+  }
+
+  function closeSchoolEditor() {
+    $("#schoolModalOverlay").classList.remove("open");
+    editingSchoolId = null;
+  }
+
+  // Copy daily-contact fields from primary-contact fields. Useful when
+  // it's the same person.
+  function copyPrimaryToDailyContact() {
+    $("#sc_daily_name").value  = $("#sc_primary_name").value;
+    $("#sc_daily_role").value  = $("#sc_primary_role").value;
+    $("#sc_daily_email").value = $("#sc_primary_email").value;
+    $("#sc_daily_phone").value = $("#sc_primary_phone").value;
+    showToast("Copied primary contact to daily contact", "success");
+  }
+
+  async function saveSchool() {
+    const name = $("#sc_name").value.trim();
+    if (!name) { showToast("School name is required", "error"); return; }
+    const payload = {
+      name,
+      address_line1: $("#sc_address_line1").value.trim() || null,
+      address_line2: $("#sc_address_line2").value.trim() || null,
+      city:          $("#sc_city").value.trim() || null,
+      state:         $("#sc_state").value.trim() || null,
+      postal_code:   $("#sc_postal_code").value.trim() || null,
+      primary_contact_name:  $("#sc_primary_name").value.trim() || null,
+      primary_contact_role:  $("#sc_primary_role").value.trim() || null,
+      primary_contact_email: $("#sc_primary_email").value.trim() || null,
+      primary_contact_phone: $("#sc_primary_phone").value.trim() || null,
+      daily_contact_name:    $("#sc_daily_name").value.trim() || null,
+      daily_contact_role:    $("#sc_daily_role").value.trim() || null,
+      daily_contact_email:   $("#sc_daily_email").value.trim() || null,
+      daily_contact_phone:   $("#sc_daily_phone").value.trim() || null,
+      notes:                 $("#sc_notes").value.trim() || null,
+      active: $("#sc_active").value !== "false",
+    };
+
+    showLoader(true);
+    let resp;
+    if (editingSchoolId) {
+      resp = await sb.from("schools").update(payload).eq("id", editingSchoolId).select().single();
+    } else {
+      // Generate a slug client-side for new schools so we don't need to
+      // round-trip a uniqueness check; collisions hit the unique index
+      // and we retry once with a numeric suffix.
+      const baseSlug = slugify(name) || "school";
+      const existingSlugs = new Set(state.schools.map((x) => x.slug));
+      payload.slug = uniqueSlug(baseSlug, existingSlugs);
+      resp = await sb.from("schools").insert(payload).select().single();
+    }
+    showLoader(false);
+    if (resp.error) { showToast(resp.error.message, "error"); return; }
+    await reloadAll(); renderAll();
+    closeSchoolEditor();
+    showToast(editingSchoolId ? "School updated" : "School added", "success");
+  }
+
+  async function deleteSchool() {
+    if (!editingSchoolId) return;
+    const linkedCount = state.classes.filter((c) => c.school_id === editingSchoolId).length;
+    const warn = linkedCount > 0
+      ? `Delete this school? ${linkedCount} class${linkedCount === 1 ? "" : "es"} currently linked to it will lose the school link (the free-form location string is unaffected).`
+      : "Delete this school? This can't be undone.";
+    if (!confirm(warn)) return;
+    showLoader(true);
+    const { error } = await sb.from("schools").delete().eq("id", editingSchoolId);
+    showLoader(false);
+    if (error) { showToast(error.message, "error"); return; }
+    await reloadAll(); renderAll();
+    closeSchoolEditor();
+    showToast("School deleted", "success");
+  }
+
+  /* ─── Class-cancellation flow ─── */
+
+  // Cancel a specific class on a specific date. Called from the class
+  // detail panel "Cancel class for [date]" action. Opens a small modal
+  // for the reason; on save, INSERTs class_cancellations and immediately
+  // pops the notify modal so the admin can email the daily contact.
+  let cancelClassContext = null; // { cls, sessionDate }
+
+  function openClassCancelModal(cls, sessionDate) {
+    if (!cls) return;
+    cancelClassContext = { cls, sessionDate };
+    $("#cc_class_banner").innerHTML =
+      `Cancelling <b>${escapeHtml(cls.name)}</b> on <b>${escapeHtml(formatSessionDate(sessionDate))}</b>` +
+      (classLocationLabel(cls) ? ` <span style="color:var(--ink-dim)">· ${escapeHtml(classLocationLabel(cls))}</span>` : "");
+    $("#cc_reason").value = "";
+    $("#classCancelOverlay").classList.add("open");
+    setTimeout(() => $("#cc_reason").focus(), 50);
+  }
+
+  function closeClassCancelModal() {
+    $("#classCancelOverlay").classList.remove("open");
+    cancelClassContext = null;
+  }
+
+  async function submitClassCancel() {
+    const ctx = cancelClassContext;
+    if (!ctx) return;
+    const reason = $("#cc_reason").value.trim();
+    showLoader(true);
+    const { data, error } = await sb.from("class_cancellations").insert({
+      class_id: ctx.cls.id,
+      session_date: ctx.sessionDate,
+      reason: reason || null,
+      cancelled_by_user_id: state.session?.user?.id || null,
+    }).select().single();
+    showLoader(false);
+    if (error) { showToast("Cancel failed: " + error.message, "error"); return; }
+    await reloadAll(); renderAll();
+    closeClassCancelModal();
+    showToast("Class cancelled", "success");
+    // Immediately offer to notify the daily contact.
+    openNotifyModal({
+      kind: "class_cancelled",
+      cls: ctx.cls,
+      sessionDate: ctx.sessionDate,
+      reason: reason,
+      cancellationId: data?.id || null,
+    });
+  }
+
+  async function uncancelClassSession(cancellationId) {
+    if (!cancellationId) return;
+    if (!confirm("Un-cancel this session? The schedule will show it as a normal class day again.")) return;
+    showLoader(true);
+    const { error } = await sb.from("class_cancellations").delete().eq("id", cancellationId);
+    showLoader(false);
+    if (error) { showToast("Couldn't un-cancel: " + error.message, "error"); return; }
+    await reloadAll(); renderAll();
+    showToast("Class restored", "success");
+  }
+
+  /* ─── Notify daily contact modal ─── */
+
+  // Notification kinds:
+  //   "sub_assigned"    — fired after fill_sub_request success
+  //   "class_cancelled" — fired after a class_cancellations row is saved
+  //
+  // The modal pre-fills a subject + body the admin can edit. On save:
+  //   - copies body to clipboard
+  //   - opens mailto: in a new tab (with the daily contact pre-filled)
+  //   - if a cancellation_id was passed, stamps notified_at via RPC
+  let notifyContext = null;
+
+  function openNotifyModal(opts) {
+    notifyContext = opts || {};
+    const { kind, cls, sessionDate } = notifyContext;
+    if (!cls) { showToast("No class context for notification", "error"); return; }
+    const school = schoolForClass(cls);
+    const dailyEmail = school?.daily_contact_email || "";
+    const dailyName = school?.daily_contact_name || "";
+
+    const dateStr = formatSessionDate(sessionDate);
+    const dayClass = state.classes.find((c) => c.id === cls.id) || cls;
+    const timeStr = (() => {
+      const t = classStartTimeOn(dayClass, new Date(sessionDate + "T00:00:00"));
+      return t ? t.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "";
+    })();
+    const senderFromCfg = state.dkConfig?.sender_name || "Drama Kids";
+
+    let subject, body;
+    if (kind === "sub_assigned") {
+      const subTeacher = notifyContext.subTeacher;
+      const subName = subTeacher?.full_name || "a substitute";
+      subject = `Substitute teacher for ${cls.name} on ${dateStr}`;
+      body = [
+        `Hi${dailyName ? " " + dailyName.split(/\s+/)[0] : ""},`,
+        ``,
+        `Heads up — ${subName} will be covering our ${cls.name} class on ${dateStr}${timeStr ? ` at ${timeStr}` : ""} in place of the regular teacher.`,
+        ``,
+        notifyContext.reason ? `Reason: ${notifyContext.reason}` : ``,
+        `Please let me know if you have any questions or if there's anyone the front desk should be expecting.`,
+        ``,
+        `Thanks,`,
+        senderFromCfg,
+      ].filter((l) => l !== undefined).join("\n");
+    } else if (kind === "class_cancelled") {
+      subject = `Class cancelled: ${cls.name} on ${dateStr}`;
+      body = [
+        `Hi${dailyName ? " " + dailyName.split(/\s+/)[0] : ""},`,
+        ``,
+        `Apologies for the short notice — our ${cls.name} class on ${dateStr}${timeStr ? ` at ${timeStr}` : ""} has been cancelled.`,
+        ``,
+        notifyContext.reason ? `Reason: ${notifyContext.reason}` : ``,
+        `We'll be in touch with families directly. Please let me know if you need anything from us on your end.`,
+        ``,
+        `Thanks,`,
+        senderFromCfg,
+      ].filter((l) => l !== undefined).join("\n");
+    } else {
+      subject = `Update for ${cls.name} on ${dateStr}`;
+      body = `(custom message)`;
+    }
+
+    $("#nf_kind_label").textContent = kind === "sub_assigned"
+      ? "Sub assigned notification"
+      : kind === "class_cancelled"
+        ? "Class cancellation notification"
+        : "Notification";
+    $("#nf_to").value = dailyEmail;
+    $("#nf_to_name").textContent = dailyName ? `(${dailyName})` : "";
+    $("#nf_school").textContent = school ? school.name : (cls.location || "—");
+    $("#nf_subject").value = subject;
+    $("#nf_body").value = body;
+    $("#nf_no_contact_warn").style.display = dailyEmail ? "none" : "";
+
+    $("#notifyModalOverlay").classList.add("open");
+    setTimeout(() => $("#nf_subject").focus(), 50);
+  }
+
+  function closeNotifyModal() {
+    $("#notifyModalOverlay").classList.remove("open");
+    notifyContext = null;
+  }
+
+  async function copyNotifyEmail() {
+    const subject = $("#nf_subject").value;
+    const body = $("#nf_body").value;
+    const composed = `Subject: ${subject}\n\n${body}`;
+    const ok = await copyText(composed);
+    if (ok) flashCopied($("#nf_copy_btn"));
+    else showToast("Couldn't copy — your browser may need permission", "error");
+  }
+
+  function openNotifyMailto() {
+    const to = $("#nf_to").value.trim();
+    const subject = $("#nf_subject").value;
+    const body = $("#nf_body").value;
+    if (!to) {
+      showToast("No daily-contact email on file for this school. Add one in the Schools tab.", "error");
+      return;
+    }
+    const url = `mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+    window.open(url, "_blank");
+    // If this notification is tied to a cancellation row, stamp notified_at
+    // so the schedule pill can show "Notified ✓".
+    if (notifyContext?.cancellationId) {
+      sb.rpc("mark_class_cancellation_notified", { p_cancellation_id: notifyContext.cancellationId })
+        .then(({ error }) => {
+          if (!error) reloadAll().then(renderAll);
+        });
+    }
+  }
+
   /* ═════════════ Sub requests / shift trades (Phase T4) ═════════════
    *
    * Workflow:
@@ -3684,6 +4212,24 @@
     if (error) { showToast("Fill failed: " + error.message, "error"); return; }
     await reloadAll(); renderAll();
     showToast("Sub request filled", "success");
+    // Phase T8 hook: offer to notify the school's daily contact about the
+    // assigned sub. Skip silently if the class isn't linked to a school
+    // with a daily contact — admin can still notify manually if needed.
+    const req = state.subRequests.find((r) => r.id === reqId);
+    const cls = req ? state.classes.find((c) => c.id === req.class_id) : null;
+    const school = cls ? schoolForClass(cls) : null;
+    if (cls && school && school.daily_contact_email) {
+      // Slight delay so the success toast lands first.
+      setTimeout(() => {
+        openNotifyModal({
+          kind: "sub_assigned",
+          cls,
+          sessionDate: req.session_date,
+          subTeacher: t || null,
+          reason: req.reason || "",
+        });
+      }, 350);
+    }
   }
 
   async function doCancelSubRequest(reqId) {
@@ -4239,6 +4785,20 @@
     $("#classModalTitle").textContent = c ? "Edit class" : "New class";
     $("#c_name").value              = c ? c.name : "";
     $("#c_day_time").value          = c ? (c.day_time || "") : "";
+    // Populate the school dropdown — every active school plus an explicit
+    // "(unset)" option that lets admins clear the link and fall back to
+    // the free-form `location` string. The legacy text input lives below
+    // the dropdown for cases where the school isn't in the list yet
+    // (Jackrabbit-synced classes, manual one-offs).
+    const schoolSel = $("#c_school_id");
+    if (schoolSel) {
+      schoolSel.innerHTML = `<option value="">(unset — use free-form location below)</option>` +
+        state.schools
+          .filter((s) => s.active !== false || (c && c.school_id === s.id))
+          .map((s) => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.name)}</option>`)
+          .join("");
+      schoolSel.value = c?.school_id || "";
+    }
     $("#c_location").value          = c ? (c.location || "") : "";
     $("#c_registration_link").value = c ? (c.registration_link || "") : "";
     $("#c_age_range").value         = c ? (c.age_range || "") : "";
@@ -4254,9 +4814,11 @@
   async function saveClass() {
     const name = $("#c_name").value.trim();
     if (!name) { showToast("Class name is required", "error"); return; }
+    const schoolSel = $("#c_school_id");
     const payload = {
       name,
       day_time: $("#c_day_time").value.trim() || null,
+      school_id: (schoolSel && schoolSel.value) ? schoolSel.value : null,
       location: $("#c_location").value.trim() || null,
       registration_link: $("#c_registration_link").value.trim() || null,
       age_range: $("#c_age_range").value.trim() || null,
@@ -5129,6 +5691,42 @@
     $("#attendanceModalOverlay").onclick = (e) => { if (e.target.id === "attendanceModalOverlay") closeAttendanceModal(); };
     $("#attendanceSave").onclick         = saveAttendance;
     $("#att_mark_all_present").onclick   = markAllPresent;
+
+    // School editor modal (Phase T8)
+    const schCancel  = $("#schoolCancel");
+    const schClose   = $("#schoolModalClose");
+    const schOver    = $("#schoolModalOverlay");
+    const schSave    = $("#schoolSave");
+    const schDel     = $("#deleteSchoolBtn");
+    const schCopy    = $("#schoolCopyContact");
+    if (schCancel) schCancel.onclick = closeSchoolEditor;
+    if (schClose)  schClose.onclick  = closeSchoolEditor;
+    if (schOver)   schOver.onclick   = (e) => { if (e.target.id === "schoolModalOverlay") closeSchoolEditor(); };
+    if (schSave)   schSave.onclick   = saveSchool;
+    if (schDel)    schDel.onclick    = deleteSchool;
+    if (schCopy)   schCopy.onclick   = copyPrimaryToDailyContact;
+
+    // Class-cancellation modal (Phase T8)
+    const ccCancel = $("#classCancelClose");
+    const ccBack   = $("#ccBack");
+    const ccOver   = $("#classCancelOverlay");
+    const ccSave   = $("#ccSubmit");
+    if (ccCancel) ccCancel.onclick = closeClassCancelModal;
+    if (ccBack)   ccBack.onclick   = closeClassCancelModal;
+    if (ccOver)   ccOver.onclick   = (e) => { if (e.target.id === "classCancelOverlay") closeClassCancelModal(); };
+    if (ccSave)   ccSave.onclick   = submitClassCancel;
+
+    // Notify daily contact modal (Phase T8)
+    const nfClose = $("#notifyModalClose");
+    const nfDone  = $("#nf_done");
+    const nfOver  = $("#notifyModalOverlay");
+    const nfCopy  = $("#nf_copy_btn");
+    const nfMail  = $("#nf_mailto_btn");
+    if (nfClose) nfClose.onclick = closeNotifyModal;
+    if (nfDone)  nfDone.onclick  = closeNotifyModal;
+    if (nfOver)  nfOver.onclick  = (e) => { if (e.target.id === "notifyModalOverlay") closeNotifyModal(); };
+    if (nfCopy)  nfCopy.onclick  = copyNotifyEmail;
+    if (nfMail)  nfMail.onclick  = openNotifyMailto;
 
     // Sub-request create modal (Phase T4)
     const srCancel = $("#subRequestCancel");

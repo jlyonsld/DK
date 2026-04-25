@@ -100,6 +100,7 @@
         <button class="tab" data-tab="schedule">Schedule</button>
         <button class="tab" data-tab="templates">Templates</button>
         <button class="tab" data-tab="classes">Classes</button>
+        <button class="tab" data-tab="schools">Schools</button>
         <button class="tab" data-tab="teachers">Teachers</button>
         <button class="tab" data-tab="categories">Categories</button>
         <button class="tab" data-tab="infographics">Infographics</button>
@@ -180,6 +181,11 @@
           </div>
           <div class="sync-status" id="syncStatus"></div>
           <div class="data-table" id="classTable"></div>
+        </div>
+
+        <div class="tab-panel" data-tab="schools" style="display:none">
+          <!-- Phase T8: schools / locations. The tab body (tab-head + grid)
+               is rendered by renderSchoolsTab() in app.js. -->
         </div>
 
         <div class="tab-panel" data-tab="teachers" style="display:none">
@@ -332,7 +338,12 @@
           </div>
         </div>
         <div class="field">
-          <label>Location</label>
+          <label>School</label>
+          <select id="c_school_id"></select>
+          <div class="field-hint">Pick from <b>Schools</b>. Use the field below for one-offs or JR-synced classes whose school isn't set up yet.</div>
+        </div>
+        <div class="field">
+          <label>Location <span class="field-sub">(free-form, used when no school is linked; JR sync writes here)</span></label>
           <input type="text" id="c_location" placeholder="e.g. Lambs Episcopal School" />
         </div>
         <div class="field">
@@ -807,6 +818,174 @@
     </div>
   </div>
 
+  <!-- School editor modal (Phase T8). Open from Schools tab "+ New school"
+       button or per-card Edit. -->
+  <div class="modal-overlay" id="schoolModalOverlay">
+    <div class="modal" style="max-width:640px">
+      <div class="modal-head">
+        <h3 id="schoolModalTitle">New school</h3>
+        <button class="btn ghost small" id="schoolModalClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="field">
+          <label>School name</label>
+          <input type="text" id="sc_name" placeholder="e.g. Lambs Episcopal School" />
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>Address line 1</label>
+            <input type="text" id="sc_address_line1" />
+          </div>
+          <div class="field">
+            <label>Address line 2</label>
+            <input type="text" id="sc_address_line2" />
+          </div>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>City</label>
+            <input type="text" id="sc_city" />
+          </div>
+          <div class="field">
+            <label>State</label>
+            <input type="text" id="sc_state" placeholder="SC" />
+          </div>
+          <div class="field">
+            <label>Postal code</label>
+            <input type="text" id="sc_postal_code" placeholder="29464" />
+          </div>
+        </div>
+
+        <div class="schools-modal-section">
+          <div class="schools-modal-section-head">Primary contact</div>
+          <div class="schools-modal-section-hint">Long-term ops contact — principal, activities director, etc.</div>
+          <div class="field-row">
+            <div class="field">
+              <label>Name</label>
+              <input type="text" id="sc_primary_name" />
+            </div>
+            <div class="field">
+              <label>Role</label>
+              <input type="text" id="sc_primary_role" placeholder="Principal" />
+            </div>
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label>Email</label>
+              <input type="email" id="sc_primary_email" />
+            </div>
+            <div class="field">
+              <label>Phone</label>
+              <input type="tel" id="sc_primary_phone" />
+            </div>
+          </div>
+        </div>
+
+        <div class="schools-modal-section">
+          <div class="schools-modal-section-head">
+            Daily contact
+            <button type="button" class="btn ghost small" id="schoolCopyContact" style="margin-left:auto">Copy from primary</button>
+          </div>
+          <div class="schools-modal-section-hint">Day-of-class person who needs to know about subs / cancellations. Can be the same as primary.</div>
+          <div class="field-row">
+            <div class="field">
+              <label>Name</label>
+              <input type="text" id="sc_daily_name" />
+            </div>
+            <div class="field">
+              <label>Role</label>
+              <input type="text" id="sc_daily_role" placeholder="Front Desk" />
+            </div>
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label>Email</label>
+              <input type="email" id="sc_daily_email" />
+            </div>
+            <div class="field">
+              <label>Phone</label>
+              <input type="tel" id="sc_daily_phone" />
+            </div>
+          </div>
+        </div>
+
+        <div class="field">
+          <label>Notes</label>
+          <textarea id="sc_notes" rows="2" placeholder="Internal notes about this school"></textarea>
+        </div>
+        <div class="field">
+          <label>Active?</label>
+          <select id="sc_active">
+            <option value="true">Active</option>
+            <option value="false">Inactive</option>
+          </select>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn danger small" id="deleteSchoolBtn" style="margin-right:auto;display:none">Delete school</button>
+        <button class="btn" id="schoolCancel">Cancel</button>
+        <button class="btn primary" id="schoolSave">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Class-cancel modal (Phase T8). Open from class detail panel
+       "Cancel class" button. -->
+  <div class="modal-overlay" id="classCancelOverlay">
+    <div class="modal" style="max-width:480px">
+      <div class="modal-head">
+        <h3>Cancel a class session</h3>
+        <button class="btn ghost small" id="classCancelClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="cc_class_banner" style="font-size:13px;margin-bottom:12px;padding:8px 10px;background:var(--surface-alt,#fafafa);border:1px solid var(--border-subtle,#eee);border-radius:6px"></div>
+        <div class="field">
+          <label>Reason <span class="field-sub">(optional, included in the school notification email)</span></label>
+          <textarea id="cc_reason" rows="3" placeholder="e.g. Teacher illness, no sub available"></textarea>
+        </div>
+        <div class="field-hint">After saving, you'll be prompted to email the school's daily contact.</div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" id="ccBack">Back</button>
+        <button class="btn primary" id="ccSubmit">Cancel class &amp; notify</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Notify daily contact modal (Phase T8). Reused for sub-assigned,
+       class-cancelled, and ad-hoc notifications. -->
+  <div class="modal-overlay" id="notifyModalOverlay">
+    <div class="modal" style="max-width:600px">
+      <div class="modal-head">
+        <h3 id="nf_kind_label">Notify daily contact</h3>
+        <button class="btn ghost small" id="notifyModalClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="notify-meta">
+          <div><span class="notify-meta-label">School:</span> <span id="nf_school"></span></div>
+          <div><span class="notify-meta-label">To:</span> <input type="email" id="nf_to" /> <span id="nf_to_name" style="color:var(--ink-dim);font-size:12px"></span></div>
+        </div>
+        <div id="nf_no_contact_warn" class="notify-warn" style="display:none">
+          ⚠ No daily-contact email on file for this school. Add one in the <b>Schools</b> tab to enable mailto auto-fill.
+        </div>
+        <div class="field">
+          <label>Subject</label>
+          <input type="text" id="nf_subject" />
+        </div>
+        <div class="field">
+          <label>Body</label>
+          <textarea id="nf_body" rows="10"></textarea>
+          <div class="field-hint">Edit freely before sending. <b>Copy email</b> puts the subject + body on the clipboard; <b>Open in email app</b> launches your default mail client with the fields pre-filled.</div>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" id="nf_done">Done</button>
+        <button class="btn small" id="nf_copy_btn">Copy email</button>
+        <button class="btn primary" id="nf_mailto_btn">Open in email app</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Sub-request create modal (Phase T4). Reused from the Sub Requests tab
        and from per-class "Request sub" buttons on the class detail panel. -->
   <div class="modal-overlay" id="subRequestModalOverlay">
@@ -861,6 +1040,10 @@
         <button class="mobile-tools-item" data-tab="infographics" type="button">
           <span class="mobile-tools-ico" aria-hidden="true">🖼</span>
           <span>Infographics</span>
+        </button>
+        <button class="mobile-tools-item" data-tab="schools" type="button">
+          <span class="mobile-tools-ico" aria-hidden="true">🏫</span>
+          <span>Schools</span>
         </button>
         <button class="mobile-tools-item" data-tab="subrequests" type="button">
           <span class="mobile-tools-ico" aria-hidden="true">🔄</span>
