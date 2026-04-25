@@ -2832,3 +2832,40 @@ footer code {
   padding: 4px 8px;
   font-size: 12px;
 }
+.cu-current-file {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  background: var(--panel-raised, rgba(255,255,255,0.05));
+  border: 1px solid var(--border, rgba(255,255,255,0.12));
+  border-radius: 8px;
+}
+.cu-current-file-ico {
+  font-size: 22px;
+  width: 32px;
+  text-align: center;
+  flex: 0 0 32px;
+}
+.cu-current-file-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.cu-current-file-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-dim);
+}
+.cu-current-file-name {
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 13px;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

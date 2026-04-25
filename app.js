@@ -4379,10 +4379,24 @@
     $("#cu_dk_approved").checked     = !!it?.dk_approved;
     $("#cu_file").value              = "";
     const cur = $("#cu_currentFileLabel");
+    const replaceHint = $("#cu_replaceHint");
     if (cur) {
-      cur.textContent = (it && it.storage_path)
-        ? `Current file: ${it.storage_path.split("/").pop()} — choose a new file to replace.`
-        : "";
+      if (it && it.storage_path) {
+        const meta = CURRICULUM_TYPE_META[it.asset_type] || { ico: "📦" };
+        const fname = it.storage_path.split("/").pop() || it.storage_path;
+        cur.innerHTML = `
+          <span class="cu-current-file-ico" aria-hidden="true">${meta.ico}</span>
+          <span class="cu-current-file-meta">
+            <span class="cu-current-file-label">Current file</span>
+            <span class="cu-current-file-name" title="${escapeHtml(it.storage_path)}">${escapeHtml(fname)}</span>
+          </span>`;
+        cur.style.display = "";
+        if (replaceHint) replaceHint.style.display = "";
+      } else {
+        cur.innerHTML = "";
+        cur.style.display = "none";
+        if (replaceHint) replaceHint.style.display = "none";
+      }
     }
     const archiveBtn = $("#cu_archiveBtn");
     if (archiveBtn) {
