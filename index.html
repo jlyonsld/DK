@@ -103,6 +103,7 @@
         <button class="tab" data-tab="teachers">Teachers</button>
         <button class="tab" data-tab="categories">Categories</button>
         <button class="tab" data-tab="infographics">Infographics</button>
+        <button class="tab" data-tab="subrequests">Sub requests</button>
         <button class="tab" data-tab="reports">Reports</button>
       </div>
 
@@ -207,6 +208,11 @@
             <button class="btn primary small" id="newInfographicBtn">＋ Upload / add image</button>
           </div>
           <div class="data-table" id="infographicsTable"></div>
+        </div>
+
+        <div class="tab-panel" data-tab="subrequests" style="display:none">
+          <!-- Phase T4: sub requests / shift trades. The tab body is rendered
+               by renderSubRequestsTab() in app.js into this empty panel. -->
         </div>
 
         <div class="tab-panel" data-tab="reports" style="display:none">
@@ -801,6 +807,41 @@
     </div>
   </div>
 
+  <!-- Sub-request create modal (Phase T4). Reused from the Sub Requests tab
+       and from per-class "Request sub" buttons on the class detail panel. -->
+  <div class="modal-overlay" id="subRequestModalOverlay">
+    <div class="modal" style="max-width:520px">
+      <div class="modal-head">
+        <h3>Request a sub</h3>
+        <button class="btn ghost small" id="subRequestModalClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="field">
+          <label>Class</label>
+          <select id="sr_class_id"></select>
+        </div>
+        <div class="field">
+          <label>Session date</label>
+          <input type="date" id="sr_session_date" />
+          <div class="field-hint" id="sr_date_hint"></div>
+        </div>
+        <div class="field">
+          <label>Reason <span class="field-sub">(optional, shown to the admin and any teacher considering covering)</span></label>
+          <textarea id="sr_reason" rows="3" placeholder="e.g. Doctor's appointment"></textarea>
+        </div>
+        <div class="field" id="sr_on_behalf_wrap" style="display:none">
+          <label>Filing on behalf of <span class="field-sub">(admin / manager only)</span></label>
+          <select id="sr_on_behalf_teacher"></select>
+          <div class="field-hint">Leave blank to file as yourself.</div>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" id="subRequestCancel">Cancel</button>
+        <button class="btn primary" id="subRequestSave">Open request</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Mobile Tools bottom sheet (≤720px) — opened by .mtab-center button -->
   <div class="mobile-tools-overlay" id="mobileToolsOverlay" role="dialog" aria-label="Tools" aria-modal="true">
     <div class="mobile-tools-sheet">
@@ -820,6 +861,10 @@
         <button class="mobile-tools-item" data-tab="infographics" type="button">
           <span class="mobile-tools-ico" aria-hidden="true">🖼</span>
           <span>Infographics</span>
+        </button>
+        <button class="mobile-tools-item" data-tab="subrequests" type="button">
+          <span class="mobile-tools-ico" aria-hidden="true">🔄</span>
+          <span>Sub requests</span>
         </button>
         <button class="mobile-tools-item" data-tab="reports" type="button">
           <span class="mobile-tools-ico" aria-hidden="true">📊</span>

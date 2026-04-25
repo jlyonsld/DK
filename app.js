@@ -37,6 +37,9 @@
     clockIns: [],           // clock_ins rows; teacher sees own, admin sees all
     matchCandidates: [],    // unresolved student_match_candidates rows (admin-visible)
     teacherInvitations: [],
+    subRequests: [],        // sub_requests rows (RLS-filtered: open visible to all,
+                            // your own visible to you, all visible to admin/manager)
+    subClaims: [],          // sub_claims rows (RLS-filtered)
     closures: [],
     dkConfig: null,
     latestSyncLog: null,
@@ -49,6 +52,9 @@
     // Reports tab state: active report id + date range (ISO). Defaults to
     // last 30 days including today.
     rptState: { active: "attendance", start: null, end: null },
+    // Sub-requests tab filter: "open" (default), "mine" (created/filled by me),
+    // "all" (admin/manager only).
+    srState: { filter: "open" },
     router: "home"
   };
 
@@ -83,7 +89,8 @@
       "edit_templates","edit_categories","edit_infographics","edit_closures",
       "view_pay_rates","view_billing_status","view_parent_contact",
       "run_jackrabbit_sync","respond_to_leads",
-      "reconcile_students"
+      "reconcile_students",
+      "request_sub","claim_sub_requests","manage_all_sub_requests"
     ],
     admin: [
       "manage_users",
@@ -91,19 +98,22 @@
       "edit_templates","edit_categories","edit_infographics","edit_closures",
       "view_pay_rates","view_billing_status","view_parent_contact",
       "run_jackrabbit_sync","respond_to_leads",
-      "reconcile_students"
+      "reconcile_students",
+      "request_sub","claim_sub_requests","manage_all_sub_requests"
     ],
     manager: [
       "edit_templates","edit_categories","edit_infographics",
       "edit_classes","edit_teachers","edit_closures",
       "respond_to_leads",
       "view_classes_readonly","view_teachers_readonly",
-      "view_students_readonly","view_enrollments_readonly"
+      "view_students_readonly","view_enrollments_readonly",
+      "claim_sub_requests","manage_all_sub_requests"
     ],
     teacher: [
       "view_own_schedule","take_own_attendance","clock_in_out",
       "view_own_curriculum","view_own_pay_history","request_sub",
-      "view_own_roster","manage_own_roster_students","manage_own_enrollments"
+      "view_own_roster","manage_own_roster_students","manage_own_enrollments",
+      "claim_sub_requests"
     ],
     viewer: [
       "view_classes_readonly","view_teachers_readonly","view_students_readonly",
@@ -134,11 +144,11 @@
   // Which tabs each role is allowed to see. (Role Management tab doesn't
   // exist in T1 — it lands in T6.)
   const ROLE_TAB_VISIBILITY = {
-    super_admin: new Set(["home","schedule","templates","classes","teachers","categories","infographics","reports"]),
-    admin:       new Set(["home","schedule","templates","classes","teachers","categories","infographics","reports"]),
-    manager:     new Set(["home","schedule","templates","classes","teachers","categories","infographics"]),
-    teacher:     new Set(["home","schedule"]),
-    viewer:      new Set(["home","schedule","templates","classes","teachers","categories","infographics"])
+    super_admin: new Set(["home","schedule","templates","classes","teachers","categories","infographics","subrequests","reports"]),
+    admin:       new Set(["home","schedule","templates","classes","teachers","categories","infographics","subrequests","reports"]),
+    manager:     new Set(["home","schedule","templates","classes","teachers","categories","infographics","subrequests"]),
+    teacher:     new Set(["home","schedule","subrequests"]),
+    viewer:      new Set(["home","schedule","templates","classes","teachers","categories","infographics","subrequests"])
   };
   function canSeeTab(tab) {
     const role = currentRole();
@@ -370,7 +380,8 @@
       "teachers", "class_teachers", "class_infographics",
       "students", "enrollments", "attendance", "clock_ins", "sync_log",
       "teacher_invitations", "dk_config", "closures",
-      "student_match_candidates"
+      "student_match_candidates",
+      "sub_requests", "sub_claims"
     ];
     realtimeChannel = sb.channel("dk-realtime");
     tablesToWatch.forEach((table) => {
@@ -521,7 +532,7 @@
   async function reloadAll() {
     showLoader(true);
     try {
-      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches, att, clk] = await Promise.all([
+      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches, att, clk, subs, subClm] = await Promise.all([
         sb.from("categories").select("*").order("sort_order", { ascending: true }),
         sb.from("templates").select("*").order("created_at", { ascending: true }),
         sb.from("classes").select("*").order("name", { ascending: true }),
@@ -537,7 +548,9 @@
         sb.from("sync_log").select("*").eq("source", "jackrabbit").eq("operation", "pull_openings").order("created_at", { ascending: false }).limit(1).maybeSingle(),
         sb.from("student_match_candidates").select("*").is("resolved_at", null).order("detected_at", { ascending: false }),
         sb.from("attendance").select("*").order("session_date", { ascending: false }),
-        sb.from("clock_ins").select("*").order("session_date", { ascending: false })
+        sb.from("clock_ins").select("*").order("session_date", { ascending: false }),
+        sb.from("sub_requests").select("*").order("session_date", { ascending: true }),
+        sb.from("sub_claims").select("*").order("created_at", { ascending: false })
       ]);
       for (const r of [cats, tpls, cls, igs, tch, ct, ci, stu, enr]) if (r.error) throw r.error;
       // Non-admin roles may not have SELECT access to teacher_invitations /
@@ -565,6 +578,11 @@
       // Clock-ins RLS: admins read all, teachers read own rows. Errors
       // (e.g. managers/viewers without perm) fall back to empty.
       state.clockIns         = (clk && !clk.error) ? clk.data : [];
+      // Sub requests + claims RLS: admins/managers read all; teachers see
+      // open requests, their own requests/fills, and claims they own.
+      // Viewers fall back to empty.
+      state.subRequests      = (subs && !subs.error) ? subs.data : [];
+      state.subClaims        = (subClm && !subClm.error) ? subClm.data : [];
     } catch (e) {
       console.error(e);
       showToast("Failed to load: " + e.message, "error");
@@ -582,6 +600,7 @@
     renderTeachersTab();
     renderCategoriesTab();
     renderInfographicsTab();
+    renderSubRequestsTab();
     renderReportsTab();
   }
 
@@ -1357,7 +1376,7 @@
     // visible mtabs will center themselves naturally.
     const toolsBtn = $("#mobileToolsBtn");
     if (toolsBtn) {
-      const anyTool = ["templates","categories","infographics","reports"].some(canSeeTab);
+      const anyTool = ["templates","categories","infographics","subrequests","reports"].some(canSeeTab);
       toolsBtn.style.display = anyTool ? "" : "none";
     }
 
@@ -1642,6 +1661,7 @@
         : "";
 
       const totalHeight = (SCHED_HOUR_END - SCHED_HOUR_START) * SCHED_HOUR_PX;
+      const dayIso = isoDate(d.date);
       const blocks = d.classes.map(({ cls, startAt, teacher }) => {
         const hoursFromStart = startAt.getHours() + startAt.getMinutes() / 60 - SCHED_HOUR_START;
         if (hoursFromStart < 0 || hoursFromStart >= (SCHED_HOUR_END - SCHED_HOUR_START)) return "";
@@ -1650,12 +1670,16 @@
         const heightPx = Math.max(24, (durationMin / 60) * SCHED_HOUR_PX);
         const hue = teacher ? teacherHue(teacher.id) : 210;
         const timeStr = startAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+        const subReq = activeSubRequestForSession(cls.id, dayIso);
+        const subBadge = subReq
+          ? `<span class="sched-sub-badge sched-sub-${escapeHtml(subReq.status)}" title="Sub request: ${escapeHtml(subReq.status)}">${subReq.status === "open" ? "🔄" : "✓"}</span>`
+          : "";
         return `
           <div class="sched-week-block" data-open-class="${escapeHtml(cls.id)}"
                style="top:${topPx}px;height:${heightPx}px;
                       background:hsla(${hue},62%,58%,.22);
                       border-left:3px solid hsl(${hue},62%,58%);">
-            <div class="sched-week-block-time">${escapeHtml(timeStr)}</div>
+            <div class="sched-week-block-time">${escapeHtml(timeStr)}${subBadge}</div>
             <div class="sched-week-block-title">${escapeHtml(cls.name)}</div>
             ${teacher ? `<div class="sched-week-block-sub">${escapeHtml(teacher.full_name.split(/\s+/)[0])}</div>` : ""}
           </div>
@@ -1736,10 +1760,15 @@
           ? startAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }).replace(" ", "")
           : "";
         const initials = classInitialsString(cls.id);
+        const subReq = activeSubRequestForSession(cls.id, iso);
+        const subBadge = subReq
+          ? `<span class="sched-sub-badge sched-sub-${escapeHtml(subReq.status)}" title="Sub request: ${escapeHtml(subReq.status)}">${subReq.status === "open" ? "🔄" : "✓"}</span>`
+          : "";
         const titleTxt = [
           cls.name,
           initials ? "— " + initials : "",
           timeStr ? "at " + timeStr : "",
+          subReq ? `(sub ${subReq.status})` : "",
         ].filter(Boolean).join(" ");
         return `
           <div class="sched-month-row" data-open-class="${escapeHtml(cls.id)}"
@@ -1747,6 +1776,7 @@
                title="${escapeHtml(titleTxt)}">
             ${timeStr ? `<span class="sched-month-row-time">${escapeHtml(timeStr)}</span>` : ""}
             <span class="sched-month-row-name">${escapeHtml(cls.name)}</span>
+            ${subBadge}
             ${initials ? `<span class="sched-month-row-initials">${escapeHtml(initials)}</span>` : ""}
           </div>
         `;
@@ -2635,6 +2665,41 @@
         }
       }
 
+      // "Request a sub" button (Phase T4). Shown to teachers assigned to
+      // this class and to admins/managers (who can file on a teacher's
+      // behalf). Skips if there's already a non-cancelled request for the
+      // next session — surface a status pill instead so users can jump
+      // straight into the Sub requests tab to manage it.
+      const canRequestSub =
+        hasPerm("manage_all_sub_requests") ||
+        (hasPerm("request_sub") && myTeacher &&
+          state.classTeachers.some((ct) => ct.class_id === cls.id && ct.teacher_id === myTeacher.id));
+      if (canRequestSub) {
+        const nextSession = nextSessionDateForClass(cls, new Date()) || today;
+        const existingReq = activeSubRequestForSession(cls.id, nextSession);
+        if (!existingReq) {
+          const btn = document.createElement("button");
+          btn.className = "btn small";
+          btn.textContent = "Request sub";
+          btn.title = `Open a sub request for ${formatSessionDate(nextSession)}`;
+          btn.onclick = (e) => {
+            e.stopPropagation();
+            openSubRequestModal({ presetClassId: cls.id, presetSessionDate: nextSession });
+          };
+          actionRow.appendChild(btn);
+        } else {
+          const pill = document.createElement("span");
+          pill.className = "sr-status sr-status-" + existingReq.status;
+          pill.style.cursor = "pointer";
+          pill.title = `Sub request for ${formatSessionDate(nextSession)} — click to manage`;
+          pill.textContent = existingReq.status === "open"
+            ? `Sub request open · ${formatSessionDate(nextSession)}`
+            : `Sub ${existingReq.status} · ${formatSessionDate(nextSession)}`;
+          pill.onclick = (e) => { e.stopPropagation(); go("subrequests"); };
+          actionRow.appendChild(pill);
+        }
+      }
+
       if (actionRow.children.length > 0) {
         attSection.appendChild(actionRow);
       }
@@ -3147,6 +3212,492 @@
     await reloadAll(); renderAll();
     closeAttendanceModal();
     showToast(`Attendance saved (${entries.length})`, "success");
+  }
+
+  /* ═════════════ Sub requests / shift trades (Phase T4) ═════════════
+   *
+   * Workflow:
+   *   1. Teacher (or admin on a teacher's behalf) opens a sub_request for
+   *      a specific class+session_date. Status starts as 'open'.
+   *   2. Other teachers with claim_sub_requests see open requests and can
+   *      offer to cover via claim_sub_request RPC (creates a sub_claims
+   *      row, status 'pending').
+   *   3. Admin/manager picks one teacher to fill via fill_sub_request RPC:
+   *      sets sub_requests.status = 'filled' + filled_by_teacher_id; flips
+   *      the matching pending claim to 'accepted' and any sibling pending
+   *      claims to 'declined' in one atomic shot.
+   *   4. Original requester or admin can cancel an open request via
+   *      cancel_sub_request RPC; pending claims auto-decline.
+   *   5. A claimer can withdraw their own pending claim via
+   *      withdraw_sub_claim RPC.
+   *
+   * RLS keeps everything safe — these functions are thin wrappers around
+   * the SQL RPCs that surface errors via showToast and trigger a full
+   * reloadAll/renderAll on success (realtime would catch up too, but
+   * doing it explicitly keeps the UI snappy).
+   */
+
+  // Resolve the signed-in user to their teachers row by email match.
+  // Returns null if no teacher row exists (e.g. an admin who isn't also
+  // teaching). Used by request/claim flows to set teacher_id implicitly.
+  function mySignedInTeacher() {
+    const email = (state.session?.user?.email || "").toLowerCase();
+    if (!email) return null;
+    return state.teachers.find((t) => (t.email || "").toLowerCase() === email) || null;
+  }
+
+  // Open requests for a given class+date, or null if none.
+  function openSubRequestForSession(classId, sessionDate) {
+    return state.subRequests.find(
+      (r) => r.class_id === classId && r.session_date === sessionDate && r.status === "open"
+    ) || null;
+  }
+
+  // Any non-cancelled request for class+date (open or filled).
+  function activeSubRequestForSession(classId, sessionDate) {
+    return state.subRequests.find(
+      (r) => r.class_id === classId && r.session_date === sessionDate && r.status !== "cancelled"
+    ) || null;
+  }
+
+  // The next class-day on or after fromDate for the given class. Returns
+  // null if none in the next 60 days (defensive against malformed time
+  // strings or classes outside their start/end window).
+  function nextSessionDateForClass(cls, fromDate) {
+    const start = fromDate ? new Date(fromDate) : new Date();
+    start.setHours(0, 0, 0, 0);
+    for (let i = 0; i < 60; i++) {
+      const d = new Date(start); d.setDate(d.getDate() + i);
+      if (classRunsOnDay(cls, d)) return isoDate(d);
+    }
+    return null;
+  }
+
+  // Pretty-print a session_date for display: "Fri, Apr 25" style.
+  function formatSessionDate(iso) {
+    if (!iso) return "—";
+    const [y, m, d] = iso.split("-").map((x) => parseInt(x, 10));
+    const dt = new Date(y, m - 1, d);
+    return dt.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+  }
+
+  // Pending/accepted claims for a given request, sorted by creation order.
+  function claimsForRequest(reqId) {
+    return state.subClaims
+      .filter((c) => c.sub_request_id === reqId)
+      .sort((a, b) => (a.created_at < b.created_at ? -1 : 1));
+  }
+
+  // Filter the visible sub_requests list according to the active filter.
+  function filteredSubRequests() {
+    const f = state.srState.filter;
+    const me = mySignedInTeacher();
+    const myId = me?.id || null;
+
+    if (f === "all" && hasPerm("manage_all_sub_requests")) {
+      return [...state.subRequests];
+    }
+    if (f === "mine") {
+      return state.subRequests.filter((r) =>
+        (myId && (r.requested_by_teacher_id === myId || r.filled_by_teacher_id === myId))
+        || r.created_by_user_id === state.session?.user?.id
+        || (myId && state.subClaims.some((c) => c.sub_request_id === r.id && c.claimed_by_teacher_id === myId))
+      );
+    }
+    // Default: open
+    return state.subRequests.filter((r) => r.status === "open");
+  }
+
+  function renderSubRequestsTab() {
+    const panel = document.querySelector('.tab-panel[data-tab="subrequests"]');
+    if (!panel) return;
+    if (!canSeeTab("subrequests")) return;
+
+    const canManage = hasPerm("manage_all_sub_requests");
+    const canRequest = hasPerm("request_sub") || canManage;
+
+    // Filter chips. "All" is admin/manager-only; teachers see Open / Mine.
+    const filters = [
+      { id: "open", label: "Open" },
+      { id: "mine", label: "Mine" },
+    ];
+    if (canManage) filters.push({ id: "all", label: "All" });
+
+    // If the user can't see the active filter (e.g. teacher with "all"),
+    // fall back to "open".
+    if (!filters.some((f) => f.id === state.srState.filter)) {
+      state.srState.filter = "open";
+    }
+
+    const filterChips = filters.map((f) => {
+      const active = state.srState.filter === f.id;
+      return `<button class="sr-filter-chip${active ? " active" : ""}" data-sr-filter="${f.id}" type="button">${escapeHtml(f.label)}</button>`;
+    }).join(" ");
+
+    const newBtn = canRequest
+      ? `<button class="btn primary small" id="newSubRequestBtn" type="button">＋ Request a sub</button>`
+      : "";
+
+    const list = filteredSubRequests();
+    const sorted = [...list].sort((a, b) => {
+      // Open first, then filled, then cancelled. Within a status, by session_date asc.
+      const statusOrder = { open: 0, filled: 1, cancelled: 2 };
+      const sa = statusOrder[a.status] ?? 3;
+      const sb_ = statusOrder[b.status] ?? 3;
+      if (sa !== sb_) return sa - sb_;
+      if (a.session_date !== b.session_date) return a.session_date < b.session_date ? -1 : 1;
+      return a.created_at < b.created_at ? -1 : 1;
+    });
+
+    const cards = sorted.map(renderSubRequestCard).join("");
+    const empty = sorted.length === 0
+      ? `<div class="sr-empty">No sub requests match this filter.</div>`
+      : "";
+
+    panel.innerHTML = `
+      <div class="tab-head">
+        <div class="results-meta">Sub requests &middot; <span style="color:var(--ink-dim);font-weight:400">${state.subRequests.filter(r => r.status === "open").length} open</span></div>
+        <div style="display:flex;gap:8px;align-items:center">${newBtn}</div>
+      </div>
+      <div class="sr-filter-row">${filterChips}</div>
+      <div class="sr-list">${cards}${empty}</div>
+    `;
+
+    // Wire filter chips
+    panel.querySelectorAll("[data-sr-filter]").forEach((b) => {
+      b.onclick = () => {
+        state.srState.filter = b.dataset.srFilter;
+        renderSubRequestsTab();
+      };
+    });
+
+    // Wire "+ Request a sub" button
+    const newSr = panel.querySelector("#newSubRequestBtn");
+    if (newSr) newSr.onclick = () => openSubRequestModal({});
+
+    // Wire per-card actions
+    wireSubRequestCardEvents(panel);
+  }
+
+  function renderSubRequestCard(req) {
+    const cls = state.classes.find((c) => c.id === req.class_id);
+    const requester = req.requested_by_teacher_id
+      ? state.teachers.find((t) => t.id === req.requested_by_teacher_id)
+      : null;
+    const filler = req.filled_by_teacher_id
+      ? state.teachers.find((t) => t.id === req.filled_by_teacher_id)
+      : null;
+    const me = mySignedInTeacher();
+    const claims = claimsForRequest(req.id);
+    const myClaim = me ? claims.find((c) => c.claimed_by_teacher_id === me.id) : null;
+    const canManage = hasPerm("manage_all_sub_requests");
+    const canClaim  = hasPerm("claim_sub_requests")
+      && me
+      && req.status === "open"
+      && req.requested_by_teacher_id !== me.id;
+    const isMyRequest = me && req.requested_by_teacher_id === me.id;
+    const canCancel = req.status === "open" && (canManage || isMyRequest);
+
+    const hue = (cls && primaryTeacherObj(cls.id)) ? teacherHue(primaryTeacherObj(cls.id).id) : 210;
+    const statusPill = `<span class="sr-status sr-status-${req.status}">${escapeHtml(req.status)}</span>`;
+
+    // Claims block (visible if there are any visible claims AND the request is open).
+    let claimsHtml = "";
+    if (claims.length > 0) {
+      const claimRows = claims.map((c) => {
+        const t = state.teachers.find((x) => x.id === c.claimed_by_teacher_id);
+        const name = t ? t.full_name : "(unknown teacher)";
+        const isMine = me && c.claimed_by_teacher_id === me.id;
+        const note = c.note ? ` <span class="sr-claim-note">— ${escapeHtml(c.note)}</span>` : "";
+        const fillBtn = (canManage && req.status === "open" && c.status === "pending")
+          ? `<button class="btn primary small" data-sr-fill data-req="${escapeHtml(req.id)}" data-tch="${escapeHtml(c.claimed_by_teacher_id)}" type="button">Pick this teacher</button>`
+          : "";
+        const withdrawBtn = (isMine && c.status === "pending")
+          ? `<button class="btn small ghost" data-sr-withdraw data-claim="${escapeHtml(c.id)}" type="button">Withdraw</button>`
+          : "";
+        return `
+          <div class="sr-claim-row">
+            <span class="sr-claim-name">${escapeHtml(name)}${note}</span>
+            <span class="sr-claim-status sr-claim-status-${c.status}">${escapeHtml(c.status)}</span>
+            ${fillBtn}
+            ${withdrawBtn}
+          </div>
+        `;
+      }).join("");
+      claimsHtml = `
+        <div class="sr-claims">
+          <div class="sr-claims-label">Offers (${claims.length})</div>
+          ${claimRows}
+        </div>
+      `;
+    }
+
+    // Action row at bottom of card.
+    const actions = [];
+    if (canClaim && !myClaim) {
+      actions.push(`<button class="btn primary small" data-sr-claim data-req="${escapeHtml(req.id)}" type="button">Offer to cover</button>`);
+    } else if (canClaim && myClaim && myClaim.status !== "pending") {
+      actions.push(`<button class="btn primary small" data-sr-claim data-req="${escapeHtml(req.id)}" type="button">Re-offer to cover</button>`);
+    }
+    if (canManage && req.status === "open") {
+      // Direct-fill picker: any active teacher can be assigned even without a claim.
+      const teacherOpts = state.teachers
+        .filter((t) => t.status !== "inactive")
+        .map((t) => `<option value="${escapeHtml(t.id)}">${escapeHtml(t.full_name)}</option>`)
+        .join("");
+      actions.push(`
+        <div class="sr-direct-fill">
+          <select data-sr-direct-fill data-req="${escapeHtml(req.id)}">
+            <option value="">Assign teacher directly…</option>
+            ${teacherOpts}
+          </select>
+        </div>
+      `);
+    }
+    if (canCancel) {
+      actions.push(`<button class="btn small ghost" data-sr-cancel data-req="${escapeHtml(req.id)}" type="button">Cancel request</button>`);
+    }
+    const actionsHtml = actions.length
+      ? `<div class="sr-actions">${actions.join("")}</div>`
+      : "";
+
+    const reasonHtml = req.reason
+      ? `<div class="sr-reason">${escapeHtml(req.reason)}</div>`
+      : "";
+
+    const filledLine = (req.status === "filled" && filler)
+      ? `<div class="sr-filled-line">Filled by <b>${escapeHtml(filler.full_name)}</b>${req.filled_at ? ` · ${formatRelativePast(new Date(req.filled_at))}` : ""}</div>`
+      : "";
+    const cancelledLine = (req.status === "cancelled")
+      ? `<div class="sr-cancelled-line">Cancelled${req.cancellation_reason ? ` — ${escapeHtml(req.cancellation_reason)}` : ""}</div>`
+      : "";
+
+    return `
+      <div class="sr-card sr-status-card-${req.status}" style="border-left:4px solid hsl(${hue},62%,58%)">
+        <div class="sr-card-head">
+          <div class="sr-card-title">
+            <span class="sr-class-name">${escapeHtml(cls ? cls.name : "(deleted class)")}</span>
+            <span class="sr-session-date">${escapeHtml(formatSessionDate(req.session_date))}</span>
+          </div>
+          ${statusPill}
+        </div>
+        <div class="sr-card-meta">
+          <span>Requested by <b>${escapeHtml(requester ? requester.full_name : "(admin)")}</b></span>
+          <span class="sr-meta-dot">·</span>
+          <span title="${escapeHtml(new Date(req.created_at).toLocaleString())}">${escapeHtml(formatRelativePast(new Date(req.created_at)))}</span>
+        </div>
+        ${reasonHtml}
+        ${filledLine}
+        ${cancelledLine}
+        ${claimsHtml}
+        ${actionsHtml}
+      </div>
+    `;
+  }
+
+  function wireSubRequestCardEvents(root) {
+    root.querySelectorAll("[data-sr-claim]").forEach((b) => {
+      b.onclick = (e) => { e.stopPropagation(); doClaimSubRequest(b.dataset.req); };
+    });
+    root.querySelectorAll("[data-sr-withdraw]").forEach((b) => {
+      b.onclick = (e) => { e.stopPropagation(); doWithdrawSubClaim(b.dataset.claim); };
+    });
+    root.querySelectorAll("[data-sr-fill]").forEach((b) => {
+      b.onclick = (e) => { e.stopPropagation(); doFillSubRequest(b.dataset.req, b.dataset.tch); };
+    });
+    root.querySelectorAll("[data-sr-cancel]").forEach((b) => {
+      b.onclick = (e) => { e.stopPropagation(); doCancelSubRequest(b.dataset.req); };
+    });
+    root.querySelectorAll("[data-sr-direct-fill]").forEach((sel) => {
+      sel.onchange = (e) => {
+        const tch = sel.value;
+        if (!tch) return;
+        doFillSubRequest(sel.dataset.req, tch);
+      };
+    });
+  }
+
+  /* ─── Sub-request: create modal ─── */
+
+  let subRequestModalContext = null; // { presetClassId, presetSessionDate }
+
+  function openSubRequestModal(opts) {
+    subRequestModalContext = opts || {};
+    const overlay = $("#subRequestModalOverlay");
+    if (!overlay) return;
+
+    // Class picker — teachers see only their assigned classes; admins see all active.
+    const sel = $("#sr_class_id");
+    sel.innerHTML = "";
+    const me = mySignedInTeacher();
+    const canManage = hasPerm("manage_all_sub_requests");
+    const myAssignedIds = me
+      ? new Set(state.classTeachers.filter((ct) => ct.teacher_id === me.id).map((ct) => ct.class_id))
+      : new Set();
+    const visible = state.classes
+      .filter((c) => includeTestClass(c) && c.active !== false)
+      .filter((c) => canManage || myAssignedIds.has(c.id))
+      .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+    if (visible.length === 0) {
+      sel.innerHTML = `<option value="">(no classes available)</option>`;
+    } else {
+      sel.innerHTML = `<option value="">Pick a class…</option>` + visible.map((c) =>
+        `<option value="${escapeHtml(c.id)}">${escapeHtml(c.name)}</option>`
+      ).join("");
+    }
+    if (subRequestModalContext.presetClassId) sel.value = subRequestModalContext.presetClassId;
+
+    // Date picker — default to next session of selected class, else today.
+    const dateInp = $("#sr_session_date");
+    const updateDateDefault = () => {
+      const cls = state.classes.find((c) => c.id === sel.value);
+      const next = cls ? nextSessionDateForClass(cls, new Date()) : null;
+      dateInp.value = subRequestModalContext.presetSessionDate
+        || (subRequestModalContext.presetClassId === sel.value && subRequestModalContext.presetSessionDate)
+        || next
+        || isoDate(new Date());
+      // Hint about the next class day.
+      const hint = $("#sr_date_hint");
+      if (hint) {
+        if (cls && next) {
+          hint.textContent = `Next session: ${formatSessionDate(next)}.`;
+        } else if (cls) {
+          hint.textContent = "Couldn't auto-detect this class's next session — pick a date manually.";
+        } else {
+          hint.textContent = "";
+        }
+      }
+    };
+    sel.onchange = () => { subRequestModalContext.presetSessionDate = null; updateDateDefault(); };
+    updateDateDefault();
+
+    $("#sr_reason").value = "";
+
+    // Show admin-only "request on behalf of" row only for admins/managers.
+    const onBehalfWrap = $("#sr_on_behalf_wrap");
+    const onBehalfSel  = $("#sr_on_behalf_teacher");
+    if (onBehalfWrap && onBehalfSel) {
+      if (canManage) {
+        onBehalfWrap.style.display = "";
+        onBehalfSel.innerHTML = `<option value="">(myself / unspecified)</option>` +
+          state.teachers
+            .filter((t) => t.status !== "inactive")
+            .map((t) => `<option value="${escapeHtml(t.id)}">${escapeHtml(t.full_name)}</option>`)
+            .join("");
+        onBehalfSel.value = "";
+      } else {
+        onBehalfWrap.style.display = "none";
+      }
+    }
+
+    overlay.classList.add("open");
+    setTimeout(() => sel.focus(), 50);
+  }
+
+  function closeSubRequestModal() {
+    const overlay = $("#subRequestModalOverlay");
+    if (overlay) overlay.classList.remove("open");
+    subRequestModalContext = null;
+  }
+
+  async function submitSubRequestModal() {
+    const classId = $("#sr_class_id").value;
+    const sessionDate = $("#sr_session_date").value;
+    const reason = $("#sr_reason").value.trim();
+    const onBehalfId = $("#sr_on_behalf_teacher")?.value || "";
+
+    if (!classId) { showToast("Pick a class", "error"); return; }
+    if (!sessionDate) { showToast("Pick a session date", "error"); return; }
+
+    // Refuse to open a duplicate request for the same session — surface
+    // the existing one instead of stacking another row (which would error
+    // anyway via the partial unique index).
+    const existing = activeSubRequestForSession(classId, sessionDate);
+    if (existing) {
+      showToast(`There's already an ${existing.status} request for that session`, "error");
+      return;
+    }
+
+    showLoader(true);
+    let resp;
+    if (onBehalfId && hasPerm("manage_all_sub_requests")) {
+      resp = await sb.rpc("create_sub_request_for", {
+        p_class_id: classId,
+        p_session_date: sessionDate,
+        p_teacher_id: onBehalfId,
+        p_reason: reason || null,
+      });
+    } else {
+      resp = await sb.rpc("create_sub_request", {
+        p_class_id: classId,
+        p_session_date: sessionDate,
+        p_reason: reason || null,
+      });
+    }
+    showLoader(false);
+    if (resp.error) { showToast("Couldn't open request: " + resp.error.message, "error"); return; }
+    await reloadAll(); renderAll();
+    closeSubRequestModal();
+    showToast("Sub request opened", "success");
+  }
+
+  /* ─── Sub-request: RPC wrappers ─── */
+
+  async function doClaimSubRequest(reqId, prefilledNote) {
+    if (!reqId) return;
+    let note = prefilledNote;
+    if (note === undefined) {
+      note = prompt("Add a note for the requester / admin (optional):", "") || "";
+    }
+    showLoader(true);
+    const { error } = await sb.rpc("claim_sub_request", {
+      p_sub_request_id: reqId,
+      p_note: note || null,
+    });
+    showLoader(false);
+    if (error) { showToast("Claim failed: " + error.message, "error"); return; }
+    await reloadAll(); renderAll();
+    showToast("Offer sent — admin will review", "success");
+  }
+
+  async function doWithdrawSubClaim(claimId) {
+    if (!claimId) return;
+    if (!confirm("Withdraw your offer to cover this class?")) return;
+    showLoader(true);
+    const { error } = await sb.rpc("withdraw_sub_claim", { p_claim_id: claimId });
+    showLoader(false);
+    if (error) { showToast("Withdraw failed: " + error.message, "error"); return; }
+    await reloadAll(); renderAll();
+    showToast("Offer withdrawn", "success");
+  }
+
+  async function doFillSubRequest(reqId, teacherId) {
+    if (!reqId || !teacherId) return;
+    const t = state.teachers.find((x) => x.id === teacherId);
+    if (!confirm(`Assign ${t ? t.full_name : "this teacher"} to cover the class?`)) return;
+    showLoader(true);
+    const { error } = await sb.rpc("fill_sub_request", {
+      p_sub_request_id: reqId,
+      p_teacher_id: teacherId,
+    });
+    showLoader(false);
+    if (error) { showToast("Fill failed: " + error.message, "error"); return; }
+    await reloadAll(); renderAll();
+    showToast("Sub request filled", "success");
+  }
+
+  async function doCancelSubRequest(reqId) {
+    if (!reqId) return;
+    const reason = prompt("Reason for cancelling (optional):", "") || "";
+    showLoader(true);
+    const { error } = await sb.rpc("cancel_sub_request", {
+      p_sub_request_id: reqId,
+      p_reason: reason || null,
+    });
+    showLoader(false);
+    if (error) { showToast("Cancel failed: " + error.message, "error"); return; }
+    await reloadAll(); renderAll();
+    showToast("Sub request cancelled", "success");
   }
 
   /* ═════════════ Reports tab ═════════════
@@ -4578,6 +5129,16 @@
     $("#attendanceModalOverlay").onclick = (e) => { if (e.target.id === "attendanceModalOverlay") closeAttendanceModal(); };
     $("#attendanceSave").onclick         = saveAttendance;
     $("#att_mark_all_present").onclick   = markAllPresent;
+
+    // Sub-request create modal (Phase T4)
+    const srCancel = $("#subRequestCancel");
+    const srClose  = $("#subRequestModalClose");
+    const srOver   = $("#subRequestModalOverlay");
+    const srSave   = $("#subRequestSave");
+    if (srCancel) srCancel.onclick = closeSubRequestModal;
+    if (srClose)  srClose.onclick  = closeSubRequestModal;
+    if (srOver)   srOver.onclick   = (e) => { if (e.target.id === "subRequestModalOverlay") closeSubRequestModal(); };
+    if (srSave)   srSave.onclick   = submitSubRequestModal;
 
     // Reconcile modal (admin resolves a student_match_candidate)
     $("#reconcileModalClose").onclick = closeReconcileModal;
