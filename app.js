@@ -68,6 +68,24 @@
     // Events tab filter state — kindFilter ∈ {all,free_class,training,promotional,other},
     // when ∈ {upcoming,past,all}; editingId tracks the event being edited.
     evState: { kindFilter: "all", when: "upcoming", editingId: null },
+    // T10: inventory items + assignments. SELECT open to all signed-in
+    // users; writes gated on edit_inventory (admin/manager+).
+    inventoryItems: [],
+    inventoryAssignments: [],
+    // Inventory tab state — query (free-text), tagFilter, showArchived;
+    // editingId tracks the item being edited in the modal.
+    invState: { query: "", tagFilter: "all", showArchived: false, editingId: null },
+    // Pending photo uploads during a NEW item edit (no item id yet to attach
+    // photos to). Each entry { url, path }. Flushed into photo_urls on save;
+    // discarded on cancel + bucket-removed.
+    _invPendingPhotos: [],
+    // Pending tag chips for the editor input (lets us show tag chips before
+    // they're committed to the row).
+    _invPendingTags: [],
+    // Assign-inventory modal state. target = { kind: 'class'|'event', ... }
+    // captures what the picker is assigning to; selectedItemIds is the set
+    // of items the admin has chosen.
+    invAssignState: { target: null, selectedItemIds: new Set(), query: "" },
     dkConfig: null,
     latestSyncLog: null,
     tState: { query: "", category: "all", filled: {} },
@@ -127,6 +145,7 @@
       "edit_templates","edit_categories","edit_infographics","edit_closures",
       "edit_curriculum","assign_curriculum",
       "edit_events",
+      "edit_inventory",
       "manage_teacher_payments","manage_teacher_compliance",
       "view_pay_rates","view_billing_status","view_parent_contact",
       "run_jackrabbit_sync","respond_to_leads",
@@ -139,6 +158,7 @@
       "edit_templates","edit_categories","edit_infographics","edit_closures",
       "edit_curriculum","assign_curriculum",
       "edit_events",
+      "edit_inventory",
       "manage_teacher_payments","manage_teacher_compliance",
       "view_pay_rates","view_billing_status","view_parent_contact",
       "run_jackrabbit_sync","respond_to_leads",
@@ -190,11 +210,11 @@
   // Which tabs each role is allowed to see. (Role Management tab doesn't
   // exist in T1 — it lands in T6.)
   const ROLE_TAB_VISIBILITY = {
-    super_admin: new Set(["home","schedule","templates","classes","schools","teachers","subrequests","events","curriculum","reports","users"]),
-    admin:       new Set(["home","schedule","templates","classes","schools","teachers","subrequests","events","curriculum","reports","users"]),
-    manager:     new Set(["home","schedule","templates","classes","schools","teachers","subrequests","events","curriculum"]),
-    teacher:     new Set(["home","schedule","subrequests","events"]),
-    viewer:      new Set(["home","schedule","templates","classes","schools","teachers","subrequests","events"])
+    super_admin: new Set(["home","schedule","templates","classes","schools","teachers","subrequests","events","inventory","curriculum","reports","users"]),
+    admin:       new Set(["home","schedule","templates","classes","schools","teachers","subrequests","events","inventory","curriculum","reports","users"]),
+    manager:     new Set(["home","schedule","templates","classes","schools","teachers","subrequests","events","inventory","curriculum"]),
+    teacher:     new Set(["home","schedule","subrequests","events","inventory"]),
+    viewer:      new Set(["home","schedule","templates","classes","schools","teachers","subrequests","events","inventory"])
   };
   function canSeeTab(tab) {
     const role = currentRole();
@@ -433,7 +453,8 @@
       "teacher_payment_details", "teacher_documents",
       "liability_waivers", "liability_waiver_signatures",
       "payment_methods",
-      "events", "event_staff"
+      "events", "event_staff",
+      "inventory_items", "inventory_assignments"
     ];
     realtimeChannel = sb.channel("dk-realtime");
     tablesToWatch.forEach((table) => {
@@ -622,7 +643,7 @@
   async function reloadAll() {
     showLoader(true);
     try {
-      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches, att, clk, subs, subClm, schs, canc, cur, curA, tpd, tdocs, waivers, wSigs, pms, prof, evs, evStaff] = await Promise.all([
+      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches, att, clk, subs, subClm, schs, canc, cur, curA, tpd, tdocs, waivers, wSigs, pms, prof, evs, evStaff, invItems, invAssigns] = await Promise.all([
         sb.from("categories").select("*").order("sort_order", { ascending: true }),
         sb.from("templates").select("*").order("created_at", { ascending: true }),
         sb.from("classes").select("*").order("name", { ascending: true }),
@@ -652,7 +673,9 @@
         sb.from("payment_methods").select("*").order("sort_order", { ascending: true }),
         sb.from("profiles").select("*").order("full_name", { ascending: true }),
         sb.from("events").select("*").order("starts_at", { ascending: true }),
-        sb.from("event_staff").select("*")
+        sb.from("event_staff").select("*"),
+        sb.from("inventory_items").select("*").order("name", { ascending: true }),
+        sb.from("inventory_assignments").select("*").order("usage_starts_at", { ascending: true })
       ]);
       for (const r of [cats, tpls, cls, igs, tch, ct, ci, stu, enr]) if (r.error) throw r.error;
       // Non-admin roles may not have SELECT access to teacher_invitations /
@@ -718,6 +741,11 @@
       // applied in any local-dev branch.
       state.events                = (evs && !evs.error) ? evs.data : [];
       state.eventStaff            = (evStaff && !evStaff.error) ? evStaff.data : [];
+      // T10: inventory items + assignments. SELECT open to all signed-in
+      // users. Empty fallback covers the brief window before the migration
+      // is applied in any local-dev branch.
+      state.inventoryItems        = (invItems && !invItems.error) ? invItems.data : [];
+      state.inventoryAssignments  = (invAssigns && !invAssigns.error) ? invAssigns.data : [];
     } catch (e) {
       console.error(e);
       showToast("Failed to load: " + e.message, "error");
@@ -738,6 +766,7 @@
     renderInfographicsTab();
     renderSubRequestsTab();
     renderEventsTab();
+    renderInventoryTab();
     renderCurriculumTab();
     renderReportsTab();
     renderUsersTab();
@@ -2065,7 +2094,7 @@
     // visible mtabs will center themselves naturally.
     const toolsBtn = $("#mobileToolsBtn");
     if (toolsBtn) {
-      const anyTool = ["templates","schools","subrequests","events","curriculum","reports","users"].some(canSeeTab);
+      const anyTool = ["templates","schools","subrequests","events","inventory","curriculum","reports","users"].some(canSeeTab);
       toolsBtn.style.display = anyTool ? "" : "none";
     }
 
@@ -3648,8 +3677,51 @@
         }
       }
 
+      // T10: "Assign inventory" button + currently-assigned-for-next-session
+      // chip list. Anyone with edit_inventory can assign; everyone signed in
+      // sees the chips (so a teacher knows what's been pulled for them).
+      if (hasPerm("edit_inventory")) {
+        const nextSession = nextSessionDateForClass(cls, new Date()) || today;
+        const btn = document.createElement("button");
+        btn.className = "btn small ghost";
+        btn.textContent = "📦 Assign inventory";
+        btn.title = `Assign inventory items to ${cls.name} on ${formatSessionDate(nextSession)}`;
+        btn.onclick = (e) => {
+          e.stopPropagation();
+          openInventoryAssignModal({ kind: "class", classId: cls.id, sessionDate: nextSession });
+        };
+        actionRow.appendChild(btn);
+      }
+
       if (actionRow.children.length > 0) {
         attSection.appendChild(actionRow);
+      }
+
+      // T10: surface inventory currently assigned to the next session of
+      // this class. Shown to all roles; only admins/managers can detach.
+      {
+        const nextSession = nextSessionDateForClass(cls, new Date()) || today;
+        const assigns = inventoryAssignmentsForClassSession(cls.id, nextSession)
+          .filter((a) => !a.returned_at);
+        if (assigns.length) {
+          const wrap = document.createElement("div");
+          wrap.className = "inv-class-panel-row";
+          wrap.innerHTML = `
+            <div class="inv-class-panel-label">Inventory for ${escapeHtml(formatSessionDate(nextSession))}:</div>
+            <div class="inv-class-panel-chips">
+              ${assigns.map((a) => {
+                const it = inventoryItemById(a.item_id);
+                const conflicts = conflictsForItemInWindow(a.item_id, new Date(a.usage_starts_at), new Date(a.usage_ends_at), a.id);
+                const warn = conflicts.length ? ` warn` : "";
+                return `<span class="inv-chip${warn}" data-inv-chip-item="${escapeHtml(a.item_id)}" title="${conflicts.length ? "Conflict — also assigned to: " + escapeHtml(conflicts.map(assignmentTargetLabel).join(", ")) : "Click to view"}">${escapeHtml(it ? it.name : "(item)")}${conflicts.length ? " ⚠" : ""}</span>`;
+              }).join("")}
+            </div>
+          `;
+          wrap.querySelectorAll("[data-inv-chip-item]").forEach((c) => {
+            c.onclick = (e) => { e.stopPropagation(); openInventoryEditor(c.dataset.invChipItem); };
+          });
+          attSection.appendChild(wrap);
+        }
       }
 
       // Session history table (most recent 8)
@@ -4764,8 +4836,85 @@
 
     $("#deleteEventBtn").style.display = ev ? "" : "none";
     renderEventStaffEditor();
+    renderEventInventoryEditor();
     $("#eventModalOverlay").classList.add("open");
     setTimeout(() => $("#ev_title").focus(), 50);
+  }
+
+  // T10: render the inventory list inside the event editor for an
+  // existing event, plus wire the "+ Assign inventory…" button.
+  // Only visible when editing an existing event (we need an event id +
+  // resolved time window before we can write inventory_assignments).
+  function renderEventInventoryEditor() {
+    const section = $("#ev_inventory_section");
+    const wrap    = $("#ev_inventory_list");
+    const addBtn  = $("#ev_inventory_assign_btn");
+    if (!section || !wrap) return;
+
+    if (!editingEventId) {
+      section.style.display = "none";
+      return;
+    }
+    section.style.display = "";
+
+    const ev = state.events.find((e) => e.id === editingEventId);
+    if (!ev) { wrap.innerHTML = ""; return; }
+
+    const assigns = inventoryAssignmentsForEvent(editingEventId)
+      .slice()
+      .sort((a, b) => new Date(a.usage_starts_at) - new Date(b.usage_starts_at));
+
+    if (!assigns.length) {
+      wrap.innerHTML = `<div class="ev-staff-empty">No inventory assigned.</div>`;
+    } else {
+      wrap.innerHTML = assigns.map((a) => {
+        const it = inventoryItemById(a.item_id);
+        const conflicts = conflictsForItemInWindow(a.item_id, new Date(a.usage_starts_at), new Date(a.usage_ends_at), a.id);
+        const hasConflict = conflicts.length > 0;
+        const status = a.returned_at
+          ? `<span class="inv-assign-pill returned">returned</span>`
+          : (hasConflict ? `<span class="inv-assign-pill conflict">⚠ conflict</span>` : `<span class="inv-assign-pill active">active</span>`);
+        const conflictDetail = hasConflict
+          ? `<div class="inv-pick-conflict">⚠ Also assigned: ${escapeHtml(conflicts.map(assignmentTargetLabel).join(", "))}</div>`
+          : "";
+        return `
+          <div class="inv-assign-row${hasConflict ? " has-conflict" : ""}" data-ev-assign-id="${escapeHtml(a.id)}">
+            <div class="inv-assign-row-head">
+              <div class="inv-assign-row-target">${escapeHtml(it ? it.name : "(deleted item)")}</div>
+              ${status}
+            </div>
+            ${conflictDetail}
+            <div class="inv-assign-row-actions">
+              <button class="btn ghost small" data-ev-assign-delete="${escapeHtml(a.id)}" type="button">Remove</button>
+            </div>
+          </div>
+        `;
+      }).join("");
+
+      wrap.querySelectorAll("[data-ev-assign-delete]").forEach((b) => {
+        b.onclick = async () => {
+          if (!confirm("Remove this inventory assignment?")) return;
+          const { error } = await sb.from("inventory_assignments")
+            .delete()
+            .eq("id", b.dataset.evAssignDelete);
+          if (error) return showToast(error.message, "error");
+          await reloadAll();
+          renderEventInventoryEditor();
+          renderInventoryTab();
+        };
+      });
+    }
+
+    if (addBtn) {
+      addBtn.style.display = hasPerm("edit_inventory") ? "" : "none";
+      addBtn.onclick = (e) => {
+        e.preventDefault();
+        // The picker reads the event's starts_at/ends_at directly via
+        // inventoryAssignTargetWindow, so it stays in sync if the admin
+        // edited the dates in this same session — but only after save.
+        openInventoryAssignModal({ kind: "event", eventId: editingEventId });
+      };
+    }
   }
 
   function closeEventEditor() {
@@ -4940,6 +5089,769 @@
     showToast("Event deleted", "success");
     await reloadAll(); renderAll();
     closeEventEditor();
+  }
+
+  /* ═════════════ Inventory (Phase T10) ═════════════
+   *
+   * Items = props/costumes/supplies/equipment. Each item carries a name,
+   * description, storage_location, tags, photos (in the public
+   * `inventory-photos` bucket), reorder_url, and notes.
+   *
+   * Assignments = item × (class session OR event). Conflict semantics:
+   * an item can only be in one place at a time. We don't hard-prevent
+   * overlapping assignments at the DB level (admins occasionally need to
+   * override), but we surface conflicts everywhere they matter:
+   *   - On the inventory card (red conflict badge if any active overlap)
+   *   - In the assign-picker (red "Conflict — already assigned" warning
+   *     under any item that overlaps the target's time window)
+   *   - In the item editor's "Current & upcoming assignments" list
+   *     (highlighted overlap pairs)
+   *
+   * Assignment time windows materialize from the parent (class session
+   * date+times for class assignments; event starts_at..ends_at for event
+   * assignments) at write time, so the conflict overlap query is a
+   * single column-level comparison and survives a class's time string
+   * later being edited (existing assignments retain their snapshotted
+   * window — admin can re-assign if needed).
+   */
+
+  function inventoryItemById(id) {
+    return state.inventoryItems.find((i) => i.id === id) || null;
+  }
+
+  // All non-archived items, alphabetical.
+  function activeInventoryItems() {
+    return state.inventoryItems
+      .filter((i) => !i.is_archived)
+      .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+  }
+
+  // Distinct tags across items (for the tag filter chips).
+  function allInventoryTags() {
+    const set = new Set();
+    state.inventoryItems.forEach((i) => (i.tags || []).forEach((t) => set.add(t)));
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }
+
+  function inventoryAssignmentsForItem(itemId) {
+    return state.inventoryAssignments.filter((a) => a.item_id === itemId);
+  }
+
+  function inventoryAssignmentsForClassSession(classId, sessionDate) {
+    return state.inventoryAssignments
+      .filter((a) => a.class_id === classId && a.session_date === sessionDate);
+  }
+
+  function inventoryAssignmentsForEvent(eventId) {
+    return state.inventoryAssignments.filter((a) => a.event_id === eventId);
+  }
+
+  // Compute the [start, end] time window for a class session in JS time.
+  // Returns null if the class's times can't be parsed; caller should default
+  // to a 60-minute window starting at noon if needed.
+  function classSessionTimeWindow(cls, sessionDateIso) {
+    if (!cls || !sessionDateIso) return null;
+    const date = new Date(sessionDateIso + "T12:00:00");
+    const startTime = classStartTimeOn(cls, date);
+    const durMin = parseClassDurationMinutes(cls) || 60;
+    if (startTime) {
+      const end = new Date(startTime.getTime() + durMin * 60000);
+      return { start: startTime, end };
+    }
+    // Fallback: noon to 1pm of the session date.
+    const start = new Date(sessionDateIso + "T12:00:00");
+    const end = new Date(start.getTime() + durMin * 60000);
+    return { start, end };
+  }
+
+  // Returns true if [aStart, aEnd) overlaps [bStart, bEnd). Half-open so
+  // back-to-back assignments (one ends exactly when another starts) don't
+  // count as a conflict.
+  function rangesOverlap(aStart, aEnd, bStart, bEnd) {
+    return aStart < bEnd && bStart < aEnd;
+  }
+
+  // Find conflicting assignments for an item across [start, end). Excludes
+  // returned assignments. Optionally excludes a specific assignment id (the
+  // one we're about to write).
+  function conflictsForItemInWindow(itemId, start, end, excludeAssignmentId) {
+    const startMs = start instanceof Date ? start.getTime() : new Date(start).getTime();
+    const endMs   = end   instanceof Date ? end.getTime()   : new Date(end).getTime();
+    return state.inventoryAssignments.filter((a) => {
+      if (a.item_id !== itemId) return false;
+      if (a.returned_at) return false;
+      if (excludeAssignmentId && a.id === excludeAssignmentId) return false;
+      const aStart = new Date(a.usage_starts_at).getTime();
+      const aEnd   = new Date(a.usage_ends_at).getTime();
+      return rangesOverlap(aStart, aEnd, startMs, endMs);
+    });
+  }
+
+  // Returns the count of active conflicts an item has *between any pair of
+  // its current assignments*. Used to badge an item in the list.
+  function itemConflictCount(itemId) {
+    const assigns = inventoryAssignmentsForItem(itemId)
+      .filter((a) => !a.returned_at)
+      .map((a) => ({ id: a.id, s: new Date(a.usage_starts_at).getTime(), e: new Date(a.usage_ends_at).getTime() }))
+      .sort((a, b) => a.s - b.s);
+    let count = 0;
+    for (let i = 0; i < assigns.length; i++) {
+      for (let j = i + 1; j < assigns.length; j++) {
+        if (assigns[j].s >= assigns[i].e) break; // sorted by start, so no further overlaps
+        if (rangesOverlap(assigns[i].s, assigns[i].e, assigns[j].s, assigns[j].e)) count++;
+      }
+    }
+    return count;
+  }
+
+  // Human label for an assignment's target ("3rd-grade Drama · 2026-04-30"
+  // or "Free demo class — Lambs ES").
+  function assignmentTargetLabel(a) {
+    if (a.class_id) {
+      const cls = state.classes.find((c) => c.id === a.class_id);
+      const name = cls ? (cls.name || "Class") : "(deleted class)";
+      return `${name} · ${a.session_date || ""}`;
+    }
+    if (a.event_id) {
+      const ev = state.events.find((e) => e.id === a.event_id);
+      return ev ? ev.title : "(deleted event)";
+    }
+    return "—";
+  }
+
+  /* ─── Inventory tab render ─── */
+
+  function renderInventoryTab() {
+    const panel = document.querySelector('.tab-panel[data-tab="inventory"]');
+    if (!panel) return;
+    if (!canSeeTab("inventory")) return;
+
+    const canEdit = hasPerm("edit_inventory");
+    const q = (state.invState.query || "").trim().toLowerCase();
+    const tagFilter = state.invState.tagFilter || "all";
+    const showArchived = !!state.invState.showArchived;
+
+    const filtered = state.inventoryItems
+      .filter((i) => showArchived || !i.is_archived)
+      .filter((i) => tagFilter === "all" || (i.tags || []).includes(tagFilter))
+      .filter((i) => {
+        if (!q) return true;
+        const hay = [
+          i.name, i.description, i.storage_location,
+          (i.tags || []).join(" "), i.notes
+        ].filter(Boolean).join(" ").toLowerCase();
+        return hay.includes(q);
+      })
+      .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+
+    const allTags = allInventoryTags();
+    const tagChips = [{ id: "all", label: "All tags" }]
+      .concat(allTags.map((t) => ({ id: t, label: t })))
+      .map((c) => `<button class="chip${tagFilter === c.id ? " active" : ""}" data-inv-tag="${escapeHtml(c.id)}" type="button">${escapeHtml(c.label)}</button>`)
+      .join("");
+
+    const cards = filtered.map(renderInventoryCard).join("");
+    const empty = filtered.length === 0
+      ? `<div class="sr-empty">${state.inventoryItems.length === 0
+          ? `No inventory yet.${canEdit ? " Click <b>＋ New item</b> to add one." : ""}`
+          : "No items match this filter."}</div>`
+      : "";
+
+    panel.innerHTML = `
+      <div class="tab-head">
+        <div class="results-meta">${state.inventoryItems.length} item${state.inventoryItems.length === 1 ? "" : "s"}</div>
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+          <input type="text" id="invSearch" class="select-inline" placeholder="Search inventory…" value="${escapeHtml(state.invState.query || "")}" />
+          <label style="display:inline-flex; align-items:center; gap:6px; font-size:12px; color:var(--ink-dim); cursor:pointer;">
+            <input type="checkbox" id="invShowArchived"${showArchived ? " checked" : ""} /> Show archived
+          </label>
+          ${canEdit ? `<button class="btn primary small" id="newInventoryBtn" type="button">＋ New item</button>` : ""}
+        </div>
+      </div>
+      <div class="ev-filters">
+        <div class="ev-chip-row">${tagChips}</div>
+      </div>
+      <div class="inv-grid">${cards}${empty}</div>
+    `;
+
+    const nb = panel.querySelector("#newInventoryBtn");
+    if (nb) nb.onclick = () => openInventoryEditor(null);
+
+    const search = panel.querySelector("#invSearch");
+    if (search) {
+      search.oninput = (e) => { state.invState.query = e.target.value; renderInventoryTab(); };
+    }
+    const showArch = panel.querySelector("#invShowArchived");
+    if (showArch) {
+      showArch.onchange = (e) => { state.invState.showArchived = e.target.checked; renderInventoryTab(); };
+    }
+    panel.querySelectorAll("[data-inv-tag]").forEach((b) => {
+      b.onclick = () => { state.invState.tagFilter = b.dataset.invTag; renderInventoryTab(); };
+    });
+    panel.querySelectorAll("[data-inv-edit]").forEach((b) => {
+      b.onclick = (e) => { e.stopPropagation(); openInventoryEditor(b.dataset.invEdit); };
+    });
+    panel.querySelectorAll("[data-inv-card]").forEach((c) => {
+      c.onclick = () => openInventoryEditor(c.dataset.invCard);
+    });
+  }
+
+  function renderInventoryCard(item) {
+    const canEdit = hasPerm("edit_inventory");
+    const photo = (item.photo_urls && item.photo_urls[0]) || null;
+    const tags = (item.tags || []).slice(0, 4)
+      .map((t) => `<span class="inv-tag-chip">${escapeHtml(t)}</span>`)
+      .join("");
+    const moreTags = (item.tags || []).length > 4 ? `<span class="inv-tag-chip more">+${item.tags.length - 4}</span>` : "";
+
+    const activeAssigns = inventoryAssignmentsForItem(item.id).filter((a) => !a.returned_at);
+    const upcoming = activeAssigns
+      .filter((a) => new Date(a.usage_ends_at) >= new Date())
+      .sort((a, b) => new Date(a.usage_starts_at) - new Date(b.usage_starts_at));
+    const nextAssign = upcoming[0];
+    const conflictCount = itemConflictCount(item.id);
+
+    const statusRow = nextAssign
+      ? `<div class="inv-status assigned">📍 Assigned to <b>${escapeHtml(assignmentTargetLabel(nextAssign))}</b></div>`
+      : `<div class="inv-status free">✓ Available</div>`;
+
+    const conflictRow = conflictCount
+      ? `<div class="inv-conflict">⚠ ${conflictCount} conflict${conflictCount === 1 ? "" : "s"}</div>`
+      : "";
+
+    const reorderRow = item.reorder_url
+      ? `<a class="inv-reorder" href="${escapeHtml(item.reorder_url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">↗ Re-order</a>`
+      : "";
+
+    return `
+      <div class="inv-card${item.is_archived ? " archived" : ""}" data-inv-card="${escapeHtml(item.id)}">
+        <div class="inv-card-photo">
+          ${photo
+            ? `<img src="${escapeHtml(photo)}" alt="${escapeHtml(item.name)}" loading="lazy" />`
+            : `<div class="inv-card-photo-empty">📦</div>`}
+        </div>
+        <div class="inv-card-body">
+          <div class="inv-card-head">
+            <div class="inv-card-name">${escapeHtml(item.name)}${item.is_archived ? ` <span class="ev-cancel-pill">archived</span>` : ""}</div>
+            ${canEdit ? `<button class="btn small" data-inv-edit="${escapeHtml(item.id)}" type="button">Edit</button>` : ""}
+          </div>
+          ${item.storage_location ? `<div class="inv-card-where">📍 ${escapeHtml(item.storage_location)}</div>` : ""}
+          ${item.description ? `<div class="inv-card-desc">${escapeHtml(item.description)}</div>` : ""}
+          ${tags || moreTags ? `<div class="inv-card-tags">${tags}${moreTags}</div>` : ""}
+          ${statusRow}
+          ${conflictRow}
+          ${reorderRow}
+        </div>
+      </div>
+    `;
+  }
+
+  /* ─── Inventory item editor modal ─── */
+
+  let editingInventoryId = null;
+
+  function openInventoryEditor(id) {
+    const canEdit = hasPerm("edit_inventory");
+    if (!canEdit && id == null) return;
+    editingInventoryId = id || null;
+    state._invPendingPhotos = [];
+    state._invPendingTags = [];
+    const it = id ? inventoryItemById(id) : null;
+
+    $("#inventoryModalTitle").textContent = it ? "Edit inventory item" : "New inventory item";
+    $("#inv_name").value             = it ? (it.name || "") : "";
+    $("#inv_description").value      = it ? (it.description || "") : "";
+    $("#inv_storage_location").value = it ? (it.storage_location || "") : "";
+    $("#inv_tags").value             = it ? (it.tags || []).join(", ") : "";
+    $("#inv_reorder_url").value      = it ? (it.reorder_url || "") : "";
+    $("#inv_notes").value            = it ? (it.notes || "") : "";
+    $("#inv_is_archived").checked    = !!(it && it.is_archived);
+
+    $("#deleteInventoryBtn").style.display = (it && canEdit) ? "" : "none";
+
+    const upload = $("#inv_photo_upload");
+    if (upload) {
+      upload.value = "";
+      upload.disabled = !canEdit;
+    }
+
+    renderInventoryEditorPhotos();
+    renderInventoryEditorAssignments();
+
+    $("#inventoryModalOverlay").classList.add("open");
+    setTimeout(() => $("#inv_name").focus(), 50);
+  }
+
+  function closeInventoryEditor() {
+    $("#inventoryModalOverlay").classList.remove("open");
+    editingInventoryId = null;
+    state._invPendingPhotos = [];
+    state._invPendingTags = [];
+  }
+
+  function renderInventoryEditorPhotos() {
+    const wrap = $("#inv_photos_list");
+    if (!wrap) return;
+    const it = editingInventoryId ? inventoryItemById(editingInventoryId) : null;
+    const persisted = it ? (it.photo_urls || []) : [];
+    const pending = state._invPendingPhotos.map((p) => p.url);
+    const all = persisted.concat(pending);
+
+    if (!all.length) {
+      wrap.innerHTML = `<div class="ev-staff-empty">No photos yet.</div>`;
+      return;
+    }
+    wrap.innerHTML = all.map((url, i) => `
+      <div class="inv-photo-row" data-photo-idx="${i}" data-photo-url="${escapeHtml(url)}">
+        <img src="${escapeHtml(url)}" alt="" loading="lazy" />
+        <button class="btn ghost small" data-photo-remove="${i}" type="button">Remove</button>
+      </div>
+    `).join("");
+
+    wrap.querySelectorAll("[data-photo-remove]").forEach((b) => {
+      b.onclick = async () => {
+        const idx = parseInt(b.dataset.photoRemove, 10);
+        const persistedCount = persisted.length;
+        if (idx < persistedCount && editingInventoryId) {
+          // Persisted photo — strip from photo_urls and remove from bucket.
+          const url = persisted[idx];
+          const path = inventoryStoragePathFromUrl(url);
+          const newUrls = persisted.filter((_, k) => k !== idx);
+          const { error } = await sb.from("inventory_items")
+            .update({ photo_urls: newUrls })
+            .eq("id", editingInventoryId);
+          if (error) return showToast(error.message, "error");
+          if (path) await sb.storage.from("inventory-photos").remove([path]).catch(() => {});
+          await reloadAll();
+          renderInventoryEditorPhotos();
+          renderInventoryTab();
+        } else {
+          // Pending photo — discard the bucket upload too.
+          const pendingIdx = idx - persistedCount;
+          const removed = state._invPendingPhotos.splice(pendingIdx, 1)[0];
+          if (removed && removed.path) {
+            await sb.storage.from("inventory-photos").remove([removed.path]).catch(() => {});
+          }
+          renderInventoryEditorPhotos();
+        }
+      };
+    });
+  }
+
+  // Extract the bucket path from a public Supabase URL so we can remove the
+  // object on photo-delete. URL shape:
+  //   https://<host>/storage/v1/object/public/inventory-photos/<path>
+  function inventoryStoragePathFromUrl(url) {
+    if (!url) return null;
+    const m = String(url).match(/\/object\/public\/inventory-photos\/(.+?)(?:\?|$)/);
+    return m ? decodeURIComponent(m[1]) : null;
+  }
+
+  async function uploadInventoryPhoto(file) {
+    if (!file) return null;
+    if (!file.type.startsWith("image/")) {
+      showToast("Pick an image file", "error");
+      return null;
+    }
+    const safe = (file.name || "photo").replace(/[^a-zA-Z0-9._-]/g, "_").slice(-80);
+    const path = `${editingInventoryId || "_pending"}/${Date.now()}-${safe}`;
+    showLoader(true);
+    const { error: upErr } = await sb.storage.from("inventory-photos").upload(path, file, {
+      cacheControl: "3600",
+      upsert: false
+    });
+    if (upErr) {
+      showLoader(false);
+      showToast(upErr.message, "error");
+      return null;
+    }
+    const { data } = sb.storage.from("inventory-photos").getPublicUrl(path);
+    showLoader(false);
+    return { url: data.publicUrl, path };
+  }
+
+  function renderInventoryEditorAssignments() {
+    const section = $("#inv_assignments_section");
+    const wrap = $("#inv_assignments_list");
+    if (!wrap || !section) return;
+    if (!editingInventoryId) { section.style.display = "none"; return; }
+    section.style.display = "";
+
+    const all = inventoryAssignmentsForItem(editingInventoryId)
+      .slice()
+      .sort((a, b) => new Date(a.usage_starts_at) - new Date(b.usage_starts_at));
+    if (!all.length) {
+      wrap.innerHTML = `<div class="ev-staff-empty">Not currently assigned.</div>`;
+      return;
+    }
+
+    // Build a quick conflict-pair lookup so we can red-flag overlapping rows.
+    const overlapIds = new Set();
+    const active = all.filter((a) => !a.returned_at);
+    for (let i = 0; i < active.length; i++) {
+      const a = active[i];
+      const aS = new Date(a.usage_starts_at).getTime();
+      const aE = new Date(a.usage_ends_at).getTime();
+      for (let j = i + 1; j < active.length; j++) {
+        const b = active[j];
+        const bS = new Date(b.usage_starts_at).getTime();
+        const bE = new Date(b.usage_ends_at).getTime();
+        if (rangesOverlap(aS, aE, bS, bE)) {
+          overlapIds.add(a.id); overlapIds.add(b.id);
+        }
+      }
+    }
+
+    wrap.innerHTML = all.map((a) => {
+      const start = new Date(a.usage_starts_at);
+      const end = new Date(a.usage_ends_at);
+      const dateStr = start.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" });
+      const timeStr = `${start.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}–${end.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
+      const status = a.returned_at
+        ? `<span class="inv-assign-pill returned">returned</span>`
+        : (overlapIds.has(a.id) ? `<span class="inv-assign-pill conflict">⚠ conflict</span>` : `<span class="inv-assign-pill active">active</span>`);
+      return `
+        <div class="inv-assign-row${overlapIds.has(a.id) ? " has-conflict" : ""}" data-assign-id="${escapeHtml(a.id)}">
+          <div class="inv-assign-row-head">
+            <div class="inv-assign-row-target">${escapeHtml(assignmentTargetLabel(a))}</div>
+            ${status}
+          </div>
+          <div class="inv-assign-row-when">${escapeHtml(dateStr)} · ${escapeHtml(timeStr)}</div>
+          <div class="inv-assign-row-actions">
+            ${a.returned_at
+              ? `<button class="btn small" data-assign-unreturn="${escapeHtml(a.id)}" type="button">Mark active</button>`
+              : `<button class="btn small" data-assign-return="${escapeHtml(a.id)}" type="button">Mark returned</button>`}
+            <button class="btn ghost small" data-assign-delete="${escapeHtml(a.id)}" type="button">Remove</button>
+          </div>
+        </div>
+      `;
+    }).join("");
+
+    wrap.querySelectorAll("[data-assign-return]").forEach((b) => {
+      b.onclick = async () => {
+        const { error } = await sb.from("inventory_assignments")
+          .update({ returned_at: new Date().toISOString() })
+          .eq("id", b.dataset.assignReturn);
+        if (error) return showToast(error.message, "error");
+        await reloadAll();
+        renderInventoryEditorAssignments();
+        renderInventoryTab();
+      };
+    });
+    wrap.querySelectorAll("[data-assign-unreturn]").forEach((b) => {
+      b.onclick = async () => {
+        const { error } = await sb.from("inventory_assignments")
+          .update({ returned_at: null })
+          .eq("id", b.dataset.assignUnreturn);
+        if (error) return showToast(error.message, "error");
+        await reloadAll();
+        renderInventoryEditorAssignments();
+        renderInventoryTab();
+      };
+    });
+    wrap.querySelectorAll("[data-assign-delete]").forEach((b) => {
+      b.onclick = async () => {
+        if (!confirm("Remove this assignment?")) return;
+        const { error } = await sb.from("inventory_assignments")
+          .delete()
+          .eq("id", b.dataset.assignDelete);
+        if (error) return showToast(error.message, "error");
+        await reloadAll();
+        renderInventoryEditorAssignments();
+        renderInventoryTab();
+      };
+    });
+  }
+
+  async function saveInventoryItem() {
+    const name = $("#inv_name").value.trim();
+    if (!name) { showToast("Name is required", "error"); return; }
+
+    const tagsRaw = $("#inv_tags").value || "";
+    const tags = tagsRaw.split(",").map((s) => s.trim()).filter(Boolean);
+
+    const reorderRaw = $("#inv_reorder_url").value.trim();
+    if (reorderRaw && !/^https?:\/\//i.test(reorderRaw)) {
+      showToast("Re-order link must start with http:// or https://", "error");
+      return;
+    }
+
+    const payload = {
+      name,
+      description:      $("#inv_description").value.trim() || null,
+      storage_location: $("#inv_storage_location").value.trim() || null,
+      tags,
+      reorder_url:      reorderRaw || null,
+      notes:            $("#inv_notes").value.trim() || null,
+      is_archived:      $("#inv_is_archived").checked
+    };
+
+    showLoader(true);
+    let resp;
+    if (editingInventoryId) {
+      resp = await sb.from("inventory_items").update(payload).eq("id", editingInventoryId).select().single();
+    } else {
+      payload.created_by = state.session?.user?.id || null;
+      // Pending photos uploaded under "_pending/" — persist their URLs now.
+      // (We could move them under the new id, but the public URL is stable
+      // either way; not worth the round-trip.)
+      payload.photo_urls = state._invPendingPhotos.map((p) => p.url);
+      resp = await sb.from("inventory_items").insert(payload).select().single();
+    }
+    showLoader(false);
+
+    if (resp.error) {
+      showToast(resp.error.message, "error");
+      return;
+    }
+
+    showToast(editingInventoryId ? "Item saved" : "Item created", "success");
+    state._invPendingPhotos = [];
+    await reloadAll(); renderAll();
+    closeInventoryEditor();
+  }
+
+  async function deleteInventoryItem() {
+    if (!editingInventoryId) return;
+    const it = inventoryItemById(editingInventoryId);
+    if (!confirm(`Delete "${it?.name || "this item"}"? Existing assignments will be removed too. This cannot be undone.`)) return;
+
+    // Best-effort: remove every photo from the bucket. The DB row's photo
+    // URLs are dropped on delete-cascade-of-nothing (no FK), but the bucket
+    // objects would leak if we didn't.
+    const paths = (it?.photo_urls || [])
+      .map(inventoryStoragePathFromUrl)
+      .filter(Boolean);
+    if (paths.length) await sb.storage.from("inventory-photos").remove(paths).catch(() => {});
+
+    showLoader(true);
+    const { error } = await sb.from("inventory_items").delete().eq("id", editingInventoryId);
+    showLoader(false);
+    if (error) return showToast(error.message, "error");
+    showToast("Item deleted", "success");
+    await reloadAll(); renderAll();
+    closeInventoryEditor();
+  }
+
+  /* ─── Assign-inventory modal (opened from class detail panel + event editor) ─── */
+
+  // Open with target = { kind: 'class', classId, sessionDate }
+  // or          target = { kind: 'event', eventId }
+  function openInventoryAssignModal(target) {
+    if (!hasPerm("edit_inventory")) {
+      showToast("You don't have permission to assign inventory", "error");
+      return;
+    }
+    state.invAssignState.target = target;
+    state.invAssignState.selectedItemIds = new Set();
+    state.invAssignState.query = "";
+    $("#inv_assign_search").value = "";
+    $("#inv_assign_notes").value = "";
+    $("#inventoryAssignSave").disabled = true;
+
+    // Banner: what we're assigning to + the time window we'll snapshot.
+    const win = inventoryAssignTargetWindow(target);
+    const banner = $("#inv_assign_target_banner");
+    const targetLabel = inventoryAssignTargetLabel(target);
+    if (banner) {
+      const dateStr = win
+        ? `${win.start.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })} · ${win.start.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}–${win.end.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
+        : "(no time window)";
+      banner.innerHTML = `<b>Assigning to:</b> ${escapeHtml(targetLabel)}<br/><span class="field-sub">${escapeHtml(dateStr)}</span>`;
+    }
+
+    renderInventoryAssignPicker();
+    $("#inventoryAssignOverlay").classList.add("open");
+    setTimeout(() => $("#inv_assign_search").focus(), 50);
+  }
+
+  function closeInventoryAssignModal() {
+    $("#inventoryAssignOverlay").classList.remove("open");
+    state.invAssignState.target = null;
+    state.invAssignState.selectedItemIds = new Set();
+  }
+
+  function inventoryAssignTargetLabel(target) {
+    if (!target) return "—";
+    if (target.kind === "class") {
+      const cls = state.classes.find((c) => c.id === target.classId);
+      return `${cls ? cls.name : "Class"} · ${target.sessionDate}`;
+    }
+    if (target.kind === "event") {
+      const ev = state.events.find((e) => e.id === target.eventId);
+      return ev ? ev.title : "Event";
+    }
+    return "—";
+  }
+
+  function inventoryAssignTargetWindow(target) {
+    if (!target) return null;
+    if (target.kind === "class") {
+      const cls = state.classes.find((c) => c.id === target.classId);
+      return classSessionTimeWindow(cls, target.sessionDate);
+    }
+    if (target.kind === "event") {
+      const ev = state.events.find((e) => e.id === target.eventId);
+      if (!ev) return null;
+      return { start: new Date(ev.starts_at), end: new Date(ev.ends_at) };
+    }
+    return null;
+  }
+
+  function renderInventoryAssignPicker() {
+    const wrap = $("#inv_assign_picker");
+    if (!wrap) return;
+    const target = state.invAssignState.target;
+    const win = inventoryAssignTargetWindow(target);
+    const q = (state.invAssignState.query || "").trim().toLowerCase();
+    const items = activeInventoryItems()
+      .filter((i) => {
+        if (!q) return true;
+        const hay = [i.name, i.description, i.storage_location, (i.tags || []).join(" ")].filter(Boolean).join(" ").toLowerCase();
+        return hay.includes(q);
+      });
+
+    // Items already assigned to this exact target → skip them (button on
+    // the source surface should already reflect this; defensive double).
+    const alreadyAssignedItemIds = new Set();
+    if (target?.kind === "class") {
+      inventoryAssignmentsForClassSession(target.classId, target.sessionDate)
+        .filter((a) => !a.returned_at)
+        .forEach((a) => alreadyAssignedItemIds.add(a.item_id));
+    } else if (target?.kind === "event") {
+      inventoryAssignmentsForEvent(target.eventId)
+        .filter((a) => !a.returned_at)
+        .forEach((a) => alreadyAssignedItemIds.add(a.item_id));
+    }
+
+    if (!items.length) {
+      wrap.innerHTML = `<div class="ev-staff-empty">No items to pick from.</div>`;
+      return;
+    }
+
+    wrap.innerHTML = items.map((it) => {
+      const conflicts = win
+        ? conflictsForItemInWindow(it.id, win.start, win.end, null)
+        : [];
+      const isConflict = conflicts.length > 0;
+      const isAssignedHere = alreadyAssignedItemIds.has(it.id);
+      const checked = state.invAssignState.selectedItemIds.has(it.id);
+      const conflictNote = isConflict
+        ? `<div class="inv-pick-conflict">⚠ Already assigned: ${escapeHtml(conflicts.map(assignmentTargetLabel).join(", "))}</div>`
+        : "";
+      return `
+        <label class="inv-pick-row${isAssignedHere ? " disabled" : ""}${isConflict ? " warn" : ""}">
+          <input type="checkbox" data-inv-pick="${escapeHtml(it.id)}"${checked ? " checked" : ""}${isAssignedHere ? " disabled" : ""} />
+          <div class="inv-pick-body">
+            <div class="inv-pick-name">${escapeHtml(it.name)}${isAssignedHere ? ` <span class="ev-cancel-pill">already assigned</span>` : ""}</div>
+            ${it.storage_location ? `<div class="inv-pick-where">📍 ${escapeHtml(it.storage_location)}</div>` : ""}
+            ${conflictNote}
+          </div>
+        </label>
+      `;
+    }).join("");
+
+    wrap.querySelectorAll("[data-inv-pick]").forEach((cb) => {
+      cb.onchange = (e) => {
+        const id = cb.dataset.invPick;
+        if (e.target.checked) state.invAssignState.selectedItemIds.add(id);
+        else state.invAssignState.selectedItemIds.delete(id);
+        $("#inventoryAssignSave").disabled = state.invAssignState.selectedItemIds.size === 0;
+      };
+    });
+  }
+
+  async function saveInventoryAssign() {
+    const target = state.invAssignState.target;
+    if (!target) return;
+    const win = inventoryAssignTargetWindow(target);
+    if (!win) { showToast("Couldn't determine the time window for this target", "error"); return; }
+    const ids = Array.from(state.invAssignState.selectedItemIds);
+    if (!ids.length) return;
+
+    const notes = $("#inv_assign_notes").value.trim() || null;
+
+    const rows = ids.map((itemId) => ({
+      item_id: itemId,
+      class_id: target.kind === "class" ? target.classId : null,
+      event_id: target.kind === "event" ? target.eventId : null,
+      session_date: target.kind === "class" ? target.sessionDate : null,
+      usage_starts_at: win.start.toISOString(),
+      usage_ends_at:   win.end.toISOString(),
+      notes,
+      created_by: state.session?.user?.id || null
+    }));
+
+    showLoader(true);
+    const { error } = await sb.from("inventory_assignments").insert(rows);
+    showLoader(false);
+
+    if (error) {
+      // Most likely cause: partial unique violation (this exact item already
+      // assigned to this exact class session / event). Surface the message.
+      showToast(error.message, "error");
+      return;
+    }
+    showToast(`Assigned ${rows.length} item${rows.length === 1 ? "" : "s"}`, "success");
+    await reloadAll(); renderAll();
+    closeInventoryAssignModal();
+    // If the event editor is open in the background, refresh its inline
+    // inventory list so the new assignment shows immediately.
+    if (editingEventId) renderEventInventoryEditor();
+  }
+
+  /* ─── Inventory modal event wiring (called once from wireEvents) ─── */
+
+  function wireInventoryModals() {
+    const ed = $("#inventoryModalOverlay");
+    if (!ed) return;
+    $("#inventoryModalClose").onclick = closeInventoryEditor;
+    $("#inventoryCancel").onclick     = closeInventoryEditor;
+    $("#inventorySave").onclick       = saveInventoryItem;
+    $("#deleteInventoryBtn").onclick  = deleteInventoryItem;
+    ed.addEventListener("click", (e) => { if (e.target === ed) closeInventoryEditor(); });
+
+    const upload = $("#inv_photo_upload");
+    if (upload) {
+      upload.onchange = async (e) => {
+        const file = e.target.files && e.target.files[0];
+        if (!file) return;
+        const result = await uploadInventoryPhoto(file);
+        upload.value = "";
+        if (!result) return;
+        if (editingInventoryId) {
+          // Persist immediately for existing items.
+          const it = inventoryItemById(editingInventoryId);
+          const newUrls = (it?.photo_urls || []).concat([result.url]);
+          const { error } = await sb.from("inventory_items")
+            .update({ photo_urls: newUrls })
+            .eq("id", editingInventoryId);
+          if (error) {
+            await sb.storage.from("inventory-photos").remove([result.path]).catch(() => {});
+            return showToast(error.message, "error");
+          }
+          await reloadAll();
+          renderInventoryEditorPhotos();
+          renderInventoryTab();
+        } else {
+          // Buffer until save for new items.
+          state._invPendingPhotos.push(result);
+          renderInventoryEditorPhotos();
+        }
+      };
+    }
+
+    const ad = $("#inventoryAssignOverlay");
+    if (ad) {
+      $("#inventoryAssignClose").onclick  = closeInventoryAssignModal;
+      $("#inventoryAssignCancel").onclick = closeInventoryAssignModal;
+      $("#inventoryAssignSave").onclick   = saveInventoryAssign;
+      ad.addEventListener("click", (e) => { if (e.target === ad) closeInventoryAssignModal(); });
+      const search = $("#inv_assign_search");
+      if (search) {
+        search.oninput = (e) => { state.invAssignState.query = e.target.value; renderInventoryAssignPicker(); };
+      }
+    }
   }
 
   /* ═════════════ Sub requests / shift trades (Phase T4) ═════════════
@@ -8301,6 +9213,9 @@
     if (evOver)   evOver.onclick   = (e) => { if (e.target.id === "eventModalOverlay") closeEventEditor(); };
     if (evSave)   evSave.onclick   = saveEvent;
     if (evDel)    evDel.onclick    = deleteEvent;
+
+    // Inventory modals (Phase T10) — both editor + assign-picker.
+    wireInventoryModals();
 
     // Class-cancellation modal (Phase T8)
     const ccCancel = $("#classCancelClose");

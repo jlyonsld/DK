@@ -115,6 +115,7 @@
         <button class="tab" data-tab="teachers">Teachers</button>
         <button class="tab" data-tab="subrequests">Sub requests</button>
         <button class="tab" data-tab="events">Events</button>
+        <button class="tab" data-tab="inventory">Inventory</button>
         <button class="tab" data-tab="curriculum">Curriculum</button>
         <button class="tab" data-tab="reports">Reports</button>
         <button class="tab" data-tab="users">Users</button>
@@ -222,6 +223,11 @@
         <div class="tab-panel" data-tab="events" style="display:none">
           <!-- Phase T9: special events (free classes, trainings, promo).
                Body rendered by renderEventsTab() in app.js. -->
+        </div>
+
+        <div class="tab-panel" data-tab="inventory" style="display:none">
+          <!-- Phase T10: inventory items + assignments to classes/events.
+               Body rendered by renderInventoryTab() in app.js. -->
         </div>
 
         <div class="tab-panel" data-tab="curriculum" style="display:none">
@@ -1244,11 +1250,109 @@
             <select id="ev_staff_add"></select>
           </div>
         </div>
+
+        <div class="schools-modal-section" id="ev_inventory_section" style="display:none">
+          <div class="schools-modal-section-head">Inventory</div>
+          <div class="schools-modal-section-hint">Items assigned to this event. Conflicts with other classes/events are flagged here too.</div>
+          <div id="ev_inventory_list" class="inv-assignments-list"></div>
+          <div style="margin-top:8px">
+            <button class="btn small" id="ev_inventory_assign_btn" type="button">＋ Assign inventory…</button>
+          </div>
+        </div>
       </div>
       <div class="modal-foot">
         <button class="btn danger small" id="deleteEventBtn" style="margin-right:auto;display:none">Delete event</button>
         <button class="btn" id="eventCancel">Cancel</button>
         <button class="btn primary" id="eventSave">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Phase T10: inventory item editor. Opened from the Inventory tab. -->
+  <div class="modal-overlay" id="inventoryModalOverlay">
+    <div class="modal" style="max-width:680px">
+      <div class="modal-head">
+        <h3 id="inventoryModalTitle">New inventory item</h3>
+        <button class="btn ghost small" id="inventoryModalClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="field">
+          <label>Name</label>
+          <input type="text" id="inv_name" placeholder="e.g. Pirate hat (size S)" />
+        </div>
+        <div class="field">
+          <label>Description <span class="field-sub">(optional)</span></label>
+          <textarea id="inv_description" rows="2" placeholder="What it is, condition, anything else"></textarea>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>Storage location</label>
+            <input type="text" id="inv_storage_location" placeholder="e.g. Shelf A2 / closet 3" />
+          </div>
+          <div class="field">
+            <label>Tags <span class="field-sub">(comma-separated)</span></label>
+            <input type="text" id="inv_tags" placeholder="costume, props, year-round" />
+          </div>
+        </div>
+        <div class="field">
+          <label>Re-order link <span class="field-sub">(vendor URL — saves a search next time)</span></label>
+          <input type="url" id="inv_reorder_url" placeholder="https://www.amazon.com/dp/..." />
+        </div>
+        <div class="field">
+          <label>Internal notes</label>
+          <textarea id="inv_notes" rows="2" placeholder="Notes for the team"></textarea>
+        </div>
+        <div class="field" style="display:flex;align-items:center;gap:8px">
+          <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer">
+            <input type="checkbox" id="inv_is_archived" /> Archive (hide from pickers)
+          </label>
+        </div>
+
+        <div class="schools-modal-section">
+          <div class="schools-modal-section-head">Photos</div>
+          <div class="schools-modal-section-hint">Add reference photos so anyone can identify the item at a glance.</div>
+          <div id="inv_photos_list" class="inv-photos-list"></div>
+          <div style="margin-top:8px">
+            <input type="file" id="inv_photo_upload" accept="image/*" />
+          </div>
+        </div>
+
+        <div class="schools-modal-section" id="inv_assignments_section">
+          <div class="schools-modal-section-head">Current &amp; upcoming assignments</div>
+          <div id="inv_assignments_list" class="inv-assignments-list"></div>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn danger small" id="deleteInventoryBtn" style="margin-right:auto;display:none">Delete item</button>
+        <button class="btn" id="inventoryCancel">Cancel</button>
+        <button class="btn primary" id="inventorySave">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Phase T10: assign-inventory picker. Opened from class detail panel
+       or event editor. -->
+  <div class="modal-overlay" id="inventoryAssignOverlay">
+    <div class="modal" style="max-width:560px">
+      <div class="modal-head">
+        <h3>Assign inventory</h3>
+        <button class="btn ghost small" id="inventoryAssignClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="inv_assign_target_banner" class="inv-assign-banner"></div>
+        <div class="field">
+          <label>Search</label>
+          <input type="text" id="inv_assign_search" placeholder="Filter by name, tag, or location" />
+        </div>
+        <div id="inv_assign_picker" class="inv-assign-picker"></div>
+        <div class="field">
+          <label>Notes <span class="field-sub">(optional)</span></label>
+          <textarea id="inv_assign_notes" rows="2" placeholder="e.g. needs to be returned by Friday"></textarea>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" id="inventoryAssignCancel">Cancel</button>
+        <button class="btn primary" id="inventoryAssignSave" disabled>Assign selected</button>
       </div>
     </div>
   </div>
@@ -1368,6 +1472,10 @@
         <button class="mobile-tools-item" data-tab="events" type="button">
           <span class="mobile-tools-ico" aria-hidden="true">★</span>
           <span>Events</span>
+        </button>
+        <button class="mobile-tools-item" data-tab="inventory" type="button">
+          <span class="mobile-tools-ico" aria-hidden="true">📦</span>
+          <span>Inventory</span>
         </button>
         <button class="mobile-tools-item" data-tab="curriculum" type="button">
           <span class="mobile-tools-ico" aria-hidden="true">📚</span>
