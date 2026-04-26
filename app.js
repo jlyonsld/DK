@@ -86,6 +86,8 @@
     // captures what the picker is assigning to; selectedItemIds is the set
     // of items the admin has chosen.
     invAssignState: { target: null, selectedItemIds: new Set(), query: "" },
+    // T11: student intake requests (parent self-fill enrollment forms).
+    studentIntakeRequests: [],
     dkConfig: null,
     latestSyncLog: null,
     tState: { query: "", category: "all", filled: {} },
@@ -454,7 +456,8 @@
       "liability_waivers", "liability_waiver_signatures",
       "payment_methods",
       "events", "event_staff",
-      "inventory_items", "inventory_assignments"
+      "inventory_items", "inventory_assignments",
+      "student_intake_requests"
     ];
     realtimeChannel = sb.channel("dk-realtime");
     tablesToWatch.forEach((table) => {
@@ -643,7 +646,7 @@
   async function reloadAll() {
     showLoader(true);
     try {
-      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches, att, clk, subs, subClm, schs, canc, cur, curA, tpd, tdocs, waivers, wSigs, pms, prof, evs, evStaff, invItems, invAssigns] = await Promise.all([
+      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches, att, clk, subs, subClm, schs, canc, cur, curA, tpd, tdocs, waivers, wSigs, pms, prof, evs, evStaff, invItems, invAssigns, intakes] = await Promise.all([
         sb.from("categories").select("*").order("sort_order", { ascending: true }),
         sb.from("templates").select("*").order("created_at", { ascending: true }),
         sb.from("classes").select("*").order("name", { ascending: true }),
@@ -675,7 +678,8 @@
         sb.from("events").select("*").order("starts_at", { ascending: true }),
         sb.from("event_staff").select("*"),
         sb.from("inventory_items").select("*").order("name", { ascending: true }),
-        sb.from("inventory_assignments").select("*").order("usage_starts_at", { ascending: true })
+        sb.from("inventory_assignments").select("*").order("usage_starts_at", { ascending: true }),
+        sb.from("student_intake_requests").select("*").order("sent_at", { ascending: false })
       ]);
       for (const r of [cats, tpls, cls, igs, tch, ct, ci, stu, enr]) if (r.error) throw r.error;
       // Non-admin roles may not have SELECT access to teacher_invitations /
@@ -746,6 +750,10 @@
       // is applied in any local-dev branch.
       state.inventoryItems        = (invItems && !invItems.error) ? invItems.data : [];
       state.inventoryAssignments  = (invAssigns && !invAssigns.error) ? invAssigns.data : [];
+      // T11: student intake requests. Admin/manager (edit_students) read all;
+      // teachers see pending/completed for classes they teach. Empty fallback
+      // covers the brief window before phase_t11_student_intake.sql is applied.
+      state.studentIntakeRequests = (intakes && !intakes.error) ? intakes.data : [];
     } catch (e) {
       console.error(e);
       showToast("Failed to load: " + e.message, "error");
@@ -3357,6 +3365,7 @@
       <div style="margin-top:16px">
         <div class="section-title">Enrollments <span style="font-weight:400;color:var(--ink-dim);text-transform:none;letter-spacing:0">(${classEnrollments.filter(e => e.status === 'active').length} active${classEnrollments.length > classEnrollments.filter(e => e.status === 'active').length ? ' · ' + (classEnrollments.length - classEnrollments.filter(e => e.status === 'active').length) + ' inactive' : ''})</span></div>
         <div class="reconcile-banner"></div>
+        <div class="pending-intakes-list"></div>
         <div class="enrollments-list"></div>
         <div class="add-student-row" style="margin-top:8px"></div>
       </div>
@@ -3431,6 +3440,56 @@
       showToast("Teacher assigned", "success");
     };
 
+    // Pending / recently-completed intake requests for this class.
+    // Visible to admin/manager (edit_students) and teachers assigned to
+    // the class (RLS-filtered upstream — empty list means nothing to show).
+    const intakeList = $(".pending-intakes-list", rootEl);
+    if (intakeList) {
+      const classIntakes = (state.studentIntakeRequests || []).filter(
+        (r) => r.class_id === cls.id && (r.status === "pending" || r.status === "completed")
+      );
+      const pending = classIntakes.filter((r) => r.status === "pending");
+      if (pending.length === 0) {
+        intakeList.innerHTML = "";
+      } else {
+        intakeList.innerHTML = "";
+        const head = document.createElement("div");
+        head.style.cssText = "font-size:11.5px;color:var(--ink-dim);text-transform:uppercase;letter-spacing:.5px;margin:8px 0 4px";
+        head.textContent = `Pending parent forms (${pending.length})`;
+        intakeList.appendChild(head);
+        pending.forEach((r) => {
+          const card = document.createElement("div");
+          card.style.cssText = "display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 10px;border:1px dashed var(--border);border-radius:8px;margin-bottom:6px;background:rgba(16,185,129,.04)";
+          const sentDays = Math.floor((Date.now() - new Date(r.sent_at).getTime()) / 86400000);
+          const sentLabel = sentDays === 0 ? "today" : sentDays === 1 ? "1 day ago" : `${sentDays} days ago`;
+          const expiresAt = new Date(r.expires_at);
+          const expired = expiresAt.getTime() < Date.now();
+          const childLabel = (r.initial_first_name || r.initial_last_name)
+            ? ` · ${escapeHtml([r.initial_first_name, r.initial_last_name].filter(Boolean).join(" "))}`
+            : "";
+          card.innerHTML = `
+            <div style="flex:1;min-width:0">
+              <div style="font-size:13px;font-weight:500">📧 ${escapeHtml(r.parent_email)}${childLabel}</div>
+              <div style="font-size:11.5px;color:var(--ink-dim);margin-top:2px">
+                Sent ${sentLabel}${r.email_sent_count > 1 ? ` · ${r.email_sent_count} sends` : ""}${expired ? ' · <span style="color:#dc2626">expired</span>' : ` · expires ${expiresAt.toLocaleDateString()}`}
+              </div>
+            </div>
+            <div style="display:flex;gap:4px;flex-shrink:0">
+              <button class="btn small" data-act="resend-intake" data-id="${escapeHtml(r.id)}">Resend</button>
+              <button class="btn small ghost danger" data-act="cancel-intake" data-id="${escapeHtml(r.id)}">Cancel</button>
+            </div>
+          `;
+          $('[data-act="resend-intake"]', card).onclick = (e) => {
+            e.stopPropagation(); resendIntake(r.id);
+          };
+          $('[data-act="cancel-intake"]', card).onclick = (e) => {
+            e.stopPropagation(); cancelIntake(r.id);
+          };
+          intakeList.appendChild(card);
+        });
+      }
+    }
+
     // Enrollments list
     const enrollList = $(".enrollments-list", rootEl);
     if (enrollList) {
@@ -3444,18 +3503,71 @@
           if (aActive !== bActive) return aActive - bActive;
           return (a.student.last_name || "").localeCompare(b.student.last_name || "");
         });
+        const canEditStudents = hasPerm("edit_students");
         activeFirst.forEach(({ student, status, drop_reason, dropped_at, enrolled_at }) => {
           const row = document.createElement("div");
-          row.className = "assign-row";
+          row.className = "enrollment-row";
+          // Theme-aware bg + ink color. The original .assign-row used
+          // var(--panel-raised) on a dark theme; hardcoding white broke
+          // contrast because var(--ink) is light in the dark token set.
+          row.style.cssText = "display:block;padding:8px 10px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;background:var(--panel-raised);color:var(--ink)";
           const statusClass = status === "active" ? "role-primary" : status === "waitlist" ? "role-substitute" : status === "dropped" ? "role-co-teacher" : "role-assistant";
           const localBadge = student.source === "dk_local"
             ? ' <span class="source-badge source-local" title="Added directly in DK — not from Jackrabbit">local</span>'
             : "";
+          // T11: Render parent contact + emergency + allergy chips below
+          // the name. Pulls from the existing arrays + new T11 columns.
+          const parentNames  = Array.isArray(student.parent_names)  ? student.parent_names  : [];
+          const parentEmails = Array.isArray(student.parent_emails) ? student.parent_emails : [];
+          const parentPhones = Array.isArray(student.parent_phones) ? student.parent_phones : [];
+          const parentLine = parentNames.length || parentEmails.length || parentPhones.length
+            ? parentNames.map((n, i) => {
+                const e = parentEmails[i] || "";
+                const p = parentPhones[i] || "";
+                const parts = [`<span style="color:var(--ink)">${escapeHtml(n)}</span>`];
+                if (e) parts.push(`<a href="mailto:${escapeHtml(e)}" style="color:var(--ink-dim);text-decoration:none">${escapeHtml(e)}</a>`);
+                if (p) parts.push(`<a href="tel:${escapeHtml(p)}" style="color:var(--ink-dim);text-decoration:none">${escapeHtml(p)}</a>`);
+                return parts.join(" · ");
+              }).join("<br/>")
+            : "";
+          // Emergency contact + chips for allergies / no-photo
+          const ecLine = student.emergency_contact_name
+            ? `<span style="font-size:11.5px;color:var(--ink-dim)">🚨 <span style="color:var(--ink)">${escapeHtml(student.emergency_contact_name)}</span>${student.emergency_contact_phone ? ` · <a href="tel:${escapeHtml(student.emergency_contact_phone)}" style="color:var(--ink-dim);text-decoration:none">${escapeHtml(student.emergency_contact_phone)}</a>` : ""}${student.emergency_contact_relationship ? ` <span style="opacity:.7">(${escapeHtml(student.emergency_contact_relationship)})</span>` : ""}</span>`
+            : "";
+          const chips = [];
+          if (student.allergies)
+            chips.push(`<span title="${escapeHtml(student.allergies)}" style="display:inline-block;padding:1px 6px;font-size:10.5px;background:#fef2f2;color:#991b1b;border:1px solid #fecaca;border-radius:4px">⚠ allergies</span>`);
+          if (student.medical_notes)
+            chips.push(`<span title="${escapeHtml(student.medical_notes)}" style="display:inline-block;padding:1px 6px;font-size:10.5px;background:#fef9c3;color:#854d0e;border:1px solid #fde68a;border-radius:4px">⚕ medical</span>`);
+          if (student.photo_permission === false)
+            chips.push(`<span title="Parent declined photo permission" style="display:inline-block;padding:1px 6px;font-size:10.5px;background:#f3f4f6;color:#374151;border:1px solid #d1d5db;border-radius:4px">📷 no photos</span>`);
+          // Edit button (only if user has edit_students perm). Click opens
+          // the same Add Student modal in edit mode (preloaded + UPDATE).
+          const editBtn = canEditStudents
+            ? `<button class="btn small" data-act="edit-student" data-student-id="${escapeHtml(student.id)}" style="padding:3px 9px;font-size:11.5px">✎ Edit</button>`
+            : "";
           row.innerHTML = `
-            <span class="teacher-name">${escapeHtml(student.first_name || "")} ${escapeHtml(student.last_name || "")}${localBadge}${student.dob ? ` <span style="font-size:11px;color:var(--ink-dim);font-weight:400">· DoB ${escapeHtml(student.dob)}</span>` : ""}</span>
-            <span class="role-tag ${statusClass}">${escapeHtml(status)}</span>
-            ${drop_reason ? `<span style="font-size:11px;color:var(--ink-dim)">· ${escapeHtml(drop_reason)}</span>` : ""}
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+              <span style="font-weight:500;color:var(--ink)">
+                ${escapeHtml(student.first_name || "")} ${escapeHtml(student.last_name || "")}${localBadge}${student.dob ? ` <span style="font-size:11px;color:var(--ink-dim);font-weight:400">· DoB ${escapeHtml(student.dob)}</span>` : ""}${student.grade ? ` <span style="font-size:11px;color:var(--ink-dim);font-weight:400">· ${escapeHtml(student.grade)}</span>` : ""}
+              </span>
+              <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+                ${chips.join("")}
+                <span class="role-tag ${statusClass}">${escapeHtml(status)}</span>
+                ${drop_reason ? `<span style="font-size:11px;color:var(--ink-dim)">· ${escapeHtml(drop_reason)}</span>` : ""}
+                ${editBtn}
+              </span>
+            </div>
+            ${parentLine ? `<div style="font-size:12px;color:var(--ink-dim);margin-top:4px;line-height:1.5">${parentLine}</div>` : ""}
+            ${ecLine ? `<div style="margin-top:3px">${ecLine}</div>` : ""}
           `;
+          const editBtnEl = $('[data-act="edit-student"]', row);
+          if (editBtnEl) {
+            editBtnEl.onclick = (e) => {
+              e.stopPropagation();
+              openStudentModal(cls, student);
+            };
+          }
           enrollList.appendChild(row);
         });
       }
@@ -3739,7 +3851,7 @@
           const canEdit = canTakeAttendanceFor(cls, d);
           const row = document.createElement("div");
           row.className = "assign-row";
-          row.style.cssText = "display:flex;gap:8px;align-items:center;padding:6px 8px;background:var(--surface,#fff);border:1px solid var(--border);border-radius:6px";
+          row.style.cssText = "display:flex;gap:8px;align-items:center;padding:6px 8px;background:var(--panel-raised);color:var(--ink);border:1px solid var(--border);border-radius:6px";
           const dateLabel = new Date(d + "T00:00:00").toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
           const lateBit = stats.latePickups > 0
             ? ` · <span style="color:#a36a00">${stats.latePickups} late pickup${stats.latePickups === 1 ? "" : "s"} (${stats.lateMinutes} min)</span>`
@@ -3790,53 +3902,231 @@
     }
   }
 
-  /* ═════════════ T3a: Add-student + Reconcile modals ═════════════
+  /* ═════════════ T3a + T11: Add-student / Reconcile / Parent intake ═════
    * Teacher/admin adds a DK-local student to a class (contracted classes
    * or late adds to JR classes). The student INSERT fires a server-side
    * trigger that auto-flags match candidates against JR records; admins
    * resolve them from the class-panel banner via reconcile_students RPC.
+   *
+   * T11 expands the modal with parents repeater (parent_names/emails/phones
+   * arrays already on the schema), gender, school, grade, emergency contact,
+   * allergies, medical notes, photo permission, authorized pickup. It also
+   * adds a "Send form to parent" shortcut that calls dk-send-intake-form
+   * to email the parent a public token-gated form (student-intake.html).
    */
   let addStudentTargetClassId = null;
+  let editingStudentId = null;       // T11: non-null when modal is in edit mode
   let reconcileCandidateId = null;
 
-  function openAddStudentModal(cls) {
-    addStudentTargetClassId = cls.id;
-    $("#addStudentClassBanner").innerHTML =
-      `Adding a student to <b>${escapeHtml(cls.name || "this class")}</b>` +
-      (cls.location ? ` <span style="color:var(--ink-dim)">· ${escapeHtml(cls.location)}</span>` : "");
-    $("#addStudentSourceWarn").style.display = cls.source === "jackrabbit" ? "" : "none";
-    $("#as_first_name").value = "";
-    $("#as_last_name").value = "";
-    $("#as_dob").value = "";
+  // Unified Add/Edit student modal entry point. Pass `studentToEdit` to
+  // open in edit mode (preloads fields, save does UPDATE not INSERT,
+  // hides the parent-intake send banner since we already have a row).
+  function openStudentModal(cls, studentToEdit) {
+    addStudentTargetClassId = cls?.id || null;
+    editingStudentId = studentToEdit?.id || null;
+    const editing = !!studentToEdit;
+
+    // Modal title + class banner + send-intake banner visibility
+    const titleEl = document.querySelector("#addStudentModalOverlay .modal-head h3");
+    if (titleEl) titleEl.textContent = editing ? "Edit student" : "Add student";
+    const intakeShortcut = document.querySelector("#addStudentModalOverlay .intake-shortcut");
+    if (intakeShortcut) intakeShortcut.style.display = editing ? "none" : "";
+    // The "or fill it out yourself" divider only makes sense in add mode
+    const divider = intakeShortcut?.nextElementSibling;
+    if (divider && divider.textContent && divider.textContent.includes("or fill it out yourself")) {
+      divider.style.display = editing ? "none" : "";
+    }
+    const saveBtn = $("#addStudentSave");
+    if (saveBtn) saveBtn.textContent = editing ? "Save changes" : "Add to class";
+
+    if (editing) {
+      $("#addStudentClassBanner").innerHTML =
+        `Editing <b>${escapeHtml((studentToEdit.first_name || "") + " " + (studentToEdit.last_name || ""))}</b>` +
+        (cls?.name ? ` in <b>${escapeHtml(cls.name)}</b>` : "");
+      $("#addStudentSourceWarn").style.display = "none";
+    } else {
+      $("#addStudentClassBanner").innerHTML =
+        `Adding a student to <b>${escapeHtml(cls?.name || "this class")}</b>` +
+        (cls?.location ? ` <span style="color:var(--ink-dim)">· ${escapeHtml(cls.location)}</span>` : "");
+      $("#addStudentSourceWarn").style.display = cls?.source === "jackrabbit" ? "" : "none";
+    }
+
+    // Seed every field (empty for add, prefilled for edit)
+    const s = studentToEdit || {};
+    $("#as_first_name").value      = s.first_name || "";
+    $("#as_last_name").value       = s.last_name  || "";
+    $("#as_dob").value             = s.dob        || "";
+    $("#as_gender").value          = s.gender     || "";
+    $("#as_grade").value           = s.grade      || "";
+    $("#as_school_name").value     = s.school_name || "";
+    $("#as_ec_name").value         = s.emergency_contact_name || "";
+    $("#as_ec_phone").value        = s.emergency_contact_phone || "";
+    $("#as_ec_relationship").value = s.emergency_contact_relationship || "";
+    $("#as_authorized_pickup").value = s.authorized_pickup || "";
+    $("#as_allergies").value       = s.allergies || "";
+    $("#as_medical_notes").value   = s.medical_notes || "";
+    $("#as_notes").value           = s.notes || "";
+    $("#as_intake_email").value    = "";
+    $("#as_intake_status").style.display = "none";
+    $("#as_intake_status").innerHTML = "";
+    // Photo permission tri-state radio
+    const photoVal = s.photo_permission === true ? "yes"
+                   : s.photo_permission === false ? "no"
+                   : "";
+    document.querySelectorAll('input[name="as_photo_perm"]').forEach((r) => {
+      r.checked = (r.value === photoVal);
+    });
+
+    // Parents repeater: seed from arrays, or one empty row in add mode
+    $("#as_parents_list").innerHTML = "";
+    const names  = Array.isArray(s.parent_names)  ? s.parent_names  : [];
+    const emails = Array.isArray(s.parent_emails) ? s.parent_emails : [];
+    const phones = Array.isArray(s.parent_phones) ? s.parent_phones : [];
+    const seedCount = Math.max(names.length, emails.length, phones.length, 1);
+    for (let i = 0; i < seedCount; i++) {
+      addAsParentRow({ name: names[i] || "", email: emails[i] || "", phone: phones[i] || "" });
+    }
+
     $("#addStudentModalOverlay").classList.add("open");
     setTimeout(() => $("#as_first_name").focus(), 50);
   }
 
+  // Back-compat shim — older callers use openAddStudentModal(cls).
+  function openAddStudentModal(cls) { openStudentModal(cls, null); }
+
   function closeAddStudentModal() {
     $("#addStudentModalOverlay").classList.remove("open");
     addStudentTargetClassId = null;
+    editingStudentId = null;
+  }
+
+  function addAsParentRow(seed) {
+    const list = $("#as_parents_list");
+    const idx = list.children.length + 1;
+    const row = document.createElement("div");
+    row.className = "as-parent-row";
+    row.style.cssText = "padding:10px;border:1px solid var(--border);border-radius:8px;margin-bottom:8px;background:rgba(0,0,0,.02)";
+    row.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <strong style="font-size:12.5px" class="as-parent-label">Parent / guardian ${idx}</strong>
+        ${idx > 1 ? '<button type="button" class="btn ghost small" data-action="remove" style="color:#dc2626">Remove</button>' : ""}
+      </div>
+      <div class="field-row">
+        <div class="field"><label>Name</label><input type="text" class="as_p_name" /></div>
+        <div class="field"><label>Email</label><input type="email" class="as_p_email" /></div>
+        <div class="field"><label>Phone</label><input type="tel" class="as_p_phone" /></div>
+      </div>
+    `;
+    if (seed) {
+      row.querySelector(".as_p_name").value  = seed.name  || "";
+      row.querySelector(".as_p_email").value = seed.email || "";
+      row.querySelector(".as_p_phone").value = seed.phone || "";
+    }
+    const rm = row.querySelector('[data-action="remove"]');
+    if (rm) {
+      rm.onclick = () => {
+        row.remove();
+        renumberAsParents();
+      };
+    }
+    list.appendChild(row);
+  }
+
+  function renumberAsParents() {
+    Array.from($("#as_parents_list").children).forEach((row, i) => {
+      const lbl = row.querySelector(".as-parent-label");
+      if (lbl) lbl.textContent = `Parent / guardian ${i + 1}`;
+    });
+  }
+
+  function readAsPhotoPermission() {
+    const v = (document.querySelector('input[name="as_photo_perm"]:checked') || {}).value;
+    if (v === "yes") return true;
+    if (v === "no")  return false;
+    return null;
+  }
+
+  function readAsParentsArrays() {
+    const names = [], emails = [], phones = [];
+    Array.from($("#as_parents_list").querySelectorAll(".as-parent-row")).forEach((row) => {
+      const n = row.querySelector(".as_p_name").value.trim();
+      const e = row.querySelector(".as_p_email").value.trim().toLowerCase();
+      const p = row.querySelector(".as_p_phone").value.trim();
+      if (n) names.push(n);
+      if (e) emails.push(e);
+      if (p) phones.push(p);
+    });
+    return { names, emails, phones };
   }
 
   async function saveAddStudent() {
-    const classId = addStudentTargetClassId;
-    if (!classId) { showToast("No class selected", "error"); return; }
     const first = $("#as_first_name").value.trim();
     const last  = $("#as_last_name").value.trim();
-    const dob   = $("#as_dob").value || null;
     if (!first || !last) { showToast("First and last name are required", "error"); return; }
 
+    const dob   = $("#as_dob").value || null;
+    const gender = $("#as_gender").value || null;
+    const grade = $("#as_grade").value.trim() || null;
+    const schoolName = $("#as_school_name").value.trim() || null;
+    const ecName  = $("#as_ec_name").value.trim() || null;
+    const ecPhone = $("#as_ec_phone").value.trim() || null;
+    const ecRel   = $("#as_ec_relationship").value.trim() || null;
+    const authPickup = $("#as_authorized_pickup").value.trim() || null;
+    const allergies = $("#as_allergies").value.trim() || null;
+    const medNotes  = $("#as_medical_notes").value.trim() || null;
+    const photoPerm = readAsPhotoPermission();
+    const notes  = $("#as_notes").value.trim() || null;
+    const parents = readAsParentsArrays();
+
+    // Common payload shape — used by both INSERT (add) and UPDATE (edit).
+    // UPDATE intentionally does NOT touch source / jackrabbit_student_id /
+    // created_by — those are write-once at create time.
+    const fields = {
+      first_name: first,
+      last_name: last,
+      dob,
+      gender,
+      grade,
+      school_name: schoolName,
+      parent_names: parents.names,
+      parent_emails: parents.emails,
+      parent_phones: parents.phones,
+      emergency_contact_name: ecName,
+      emergency_contact_phone: ecPhone,
+      emergency_contact_relationship: ecRel,
+      authorized_pickup: authPickup,
+      allergies,
+      medical_notes: medNotes,
+      photo_permission: photoPerm,
+      notes,
+    };
+
+    // ── EDIT mode: UPDATE the existing row, leave enrollment alone ─────
+    if (editingStudentId) {
+      showLoader(true);
+      const { error } = await sb.from("students")
+        .update(fields)
+        .eq("id", editingStudentId);
+      showLoader(false);
+      if (error) {
+        showToast("Save failed: " + error.message, "error");
+        return;
+      }
+      await reloadAll(); renderAll();
+      closeAddStudentModal();
+      showToast(`${first} ${last} updated`, "success");
+      return;
+    }
+
+    // ── ADD mode: INSERT student + INSERT enrollment ──────────────────
+    const classId = addStudentTargetClassId;
+    if (!classId) { showToast("No class selected", "error"); return; }
     showLoader(true);
-    // Generate the student id client-side so we can chain the enrollment
-    // insert without needing SELECT visibility back on the just-inserted
-    // student row (teachers can't SELECT a student until an enrollment
-    // links them to a class the teacher is assigned to).
     const newStudentId = (crypto && crypto.randomUUID) ? crypto.randomUUID() : null;
     if (!newStudentId) { showLoader(false); showToast("This browser lacks crypto.randomUUID", "error"); return; }
     const studentPayload = {
       id: newStudentId,
-      first_name: first,
-      last_name: last,
-      dob,
+      ...fields,
       source: "dk_local",
       jackrabbit_student_id: null,
       created_by: state.session?.user?.id || null,
@@ -3865,6 +4155,126 @@
     await reloadAll(); renderAll();
     closeAddStudentModal();
     showToast(`${first} ${last} added to class`, "success");
+  }
+
+  /* ─── T11: Send intake form to parent ────────────────────────────────
+   * Calls dk-send-intake-form (verify_jwt: true). On success, shows a
+   * result modal with the link (always — so the admin can copy/paste if
+   * Resend isn't configured or the email failed). The intake row carries
+   * the sha256(token); the raw token only ever exists in this single
+   * response and the parent's email link.
+   */
+  async function sendIntakeForm({ classId, parentEmail, initialFirstName, initialLastName, resendIntakeId }) {
+    if (!parentEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(parentEmail)) {
+      showToast("Enter a valid parent email", "error");
+      return null;
+    }
+    if (!classId) { showToast("No class selected", "error"); return null; }
+    showLoader(true);
+    let resp;
+    try {
+      resp = await sb.functions.invoke("dk-send-intake-form", {
+        body: {
+          class_id: classId,
+          parent_email: parentEmail,
+          initial_first_name: initialFirstName || null,
+          initial_last_name: initialLastName || null,
+          resend_intake_id: resendIntakeId || null,
+        },
+      });
+    } catch (e) {
+      showLoader(false);
+      showToast("Send failed: " + (e.message || String(e)), "error");
+      return null;
+    }
+    showLoader(false);
+    // supabase-js v2.50+ exposes the raw Response on the invoke result
+    // (top-level `response`), pre-2.50 only on `error.context`. Either
+    // shape: read the body by hand for a useful error — same defensive
+    // pattern as the curriculum-fetch viewer.
+    if (resp.error) {
+      let detail = resp.error.message || "Send failed";
+      const respObj = resp.response || resp.error.context;
+      if (respObj && typeof respObj.clone === "function") {
+        try { const j = await respObj.clone().json(); if (j?.error) detail = j.error; } catch (_) {}
+      }
+      showToast(detail, "error");
+      return null;
+    }
+    const data = resp.data || {};
+    await reloadAll(); renderAll();
+    return data;
+  }
+
+  function openIntakeResultModal(data, parentEmail) {
+    const emailSent = !!data.email_sent;
+    const url = data.intake_url || "";
+    const expires = data.expires_at ? new Date(data.expires_at).toLocaleDateString() : "—";
+    $("#intakeResultTitle").textContent = emailSent ? "Form sent ✓" : "Form ready (email not sent)";
+    let bodyHtml;
+    if (emailSent) {
+      bodyHtml = `
+        <p style="margin:0 0 12px">We emailed the enrollment form to <b>${escapeHtml(parentEmail)}</b>.
+        It expires on ${escapeHtml(expires)}.</p>
+        <p style="margin:0 0 8px;color:var(--ink-dim);font-size:12.5px">If they say they didn't get it, you can copy the link below and send it yourself:</p>
+        <input type="text" readonly value="${escapeHtml(url)}" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:12.5px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace" onclick="this.select()" />
+      `;
+    } else {
+      const why = data.email_error === "skipped_no_resend_key"
+        ? "Email isn't configured yet (Resend API key not set)."
+        : data.email_error === "skipped_no_sender_email"
+        ? "Email isn't configured yet (no sender email on dk_config)."
+        : `Email send failed: ${escapeHtml(data.email_error || "unknown")}`;
+      bodyHtml = `
+        <p style="margin:0 0 8px;color:#7a5b00">${why}</p>
+        <p style="margin:0 0 8px">Copy this link and send it to <b>${escapeHtml(parentEmail)}</b> yourself:</p>
+        <input type="text" readonly value="${escapeHtml(url)}" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:12.5px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace" onclick="this.select()" />
+        <p style="margin:10px 0 0;font-size:12px;color:var(--ink-dim)">The link expires on ${escapeHtml(expires)}.</p>
+      `;
+    }
+    $("#intakeResultBody").innerHTML = bodyHtml;
+    $("#intakeResultOverlay").classList.add("open");
+  }
+  function closeIntakeResultModal() {
+    $("#intakeResultOverlay").classList.remove("open");
+  }
+
+  async function handleSendIntakeFromModal() {
+    const classId = addStudentTargetClassId;
+    const parentEmail = $("#as_intake_email").value.trim().toLowerCase();
+    const first = $("#as_first_name").value.trim() || null;
+    const last  = $("#as_last_name").value.trim() || null;
+    const data = await sendIntakeForm({ classId, parentEmail, initialFirstName: first, initialLastName: last });
+    if (!data) return;
+    closeAddStudentModal();
+    openIntakeResultModal(data, parentEmail);
+  }
+
+  async function resendIntake(intakeId) {
+    const intake = (state.studentIntakeRequests || []).find((r) => r.id === intakeId);
+    if (!intake) { showToast("Intake not found", "error"); return; }
+    const data = await sendIntakeForm({
+      classId: intake.class_id,
+      parentEmail: intake.parent_email,
+      initialFirstName: intake.initial_first_name,
+      initialLastName: intake.initial_last_name,
+      resendIntakeId: intake.id,
+    });
+    if (!data) return;
+    openIntakeResultModal(data, intake.parent_email);
+  }
+
+  async function cancelIntake(intakeId) {
+    if (!confirm("Cancel this intake request? The link will stop working immediately.")) return;
+    showLoader(true);
+    const { error } = await sb.rpc("cancel_student_intake", { p_intake_id: intakeId });
+    showLoader(false);
+    if (error) {
+      showToast("Cancel failed: " + error.message, "error");
+      return;
+    }
+    showToast("Intake cancelled", "success");
+    await reloadAll(); renderAll();
   }
 
   function openReconcileModal(candidateId) {
@@ -9175,11 +9585,18 @@
     $("#invRole").addEventListener("change", updateInviteRoleMapHint);
     $("#invSend").onclick           = submitInviteEditor;
 
-    // Add-student modal (teacher/admin adds a DK-local student to a class)
+    // Add-student modal (T11: full intake fields + parent self-fill button)
     $("#addStudentCancel").onclick     = closeAddStudentModal;
     $("#addStudentModalClose").onclick = closeAddStudentModal;
     $("#addStudentModalOverlay").onclick = (e) => { if (e.target.id === "addStudentModalOverlay") closeAddStudentModal(); };
     $("#addStudentSave").onclick       = saveAddStudent;
+    $("#as_add_parent_btn").onclick    = () => addAsParentRow();
+    $("#as_send_intake_btn").onclick   = handleSendIntakeFromModal;
+
+    // Intake result modal (shows the link for copy/paste fallback)
+    $("#intakeResultClose").onclick    = closeIntakeResultModal;
+    $("#intakeResultDone").onclick     = closeIntakeResultModal;
+    $("#intakeResultOverlay").onclick  = (e) => { if (e.target.id === "intakeResultOverlay") closeIntakeResultModal(); };
 
     // Attendance modal (T3b: take or edit a session's attendance)
     $("#attendanceCancel").onclick       = closeAttendanceModal;

@@ -200,13 +200,23 @@ response-console-v3/
     │                                        enum. Self-INSERT, admin-only SELECT.
     │                                        Foundation for the freemium-conversion
     │                                        work. See §4.26.
-    └── phase_t10_inventory.sql           ← inventory_items + inventory_assignments
-                                            tables, public inventory-photos Storage
-                                            bucket, new edit_inventory permission.
-                                            Items attach to a class session OR an
-                                            event; conflict detection via timestamp-
-                                            range overlap on assignment rows.
-                                            See §4.27.
+    ├── phase_t10_inventory.sql           ← inventory_items + inventory_assignments
+    │                                       tables, public inventory-photos Storage
+    │                                       bucket, new edit_inventory permission.
+    │                                       Items attach to a class session OR an
+    │                                       event; conflict detection via timestamp-
+    │                                       range overlap on assignment rows.
+    │                                       See §4.27.
+    └── phase_t11_student_intake.sql       ← students PII columns (allergies,
+                                            medical_notes, photo_permission,
+                                            emergency contact, school_name,
+                                            grade, authorized_pickup) +
+                                            student_intake_requests table
+                                            (sha256-hashed token, 14-day expiry).
+                                            cancel_student_intake RPC. Backs
+                                            the expanded Add Student modal +
+                                            parent-self-fill form
+                                            (student-intake.html). See §4.28.
 ```
 
 **Pre-T4 migrations (not in repo) live at the parent folder:**
@@ -664,6 +674,35 @@ T10 adds a physical-inventory ledger for the franchise: props, costumes, supplie
 
 **Out of scope for T10:** quantity tracking (each item is a single physical unit; if the franchise needs N pairs of pirate hats, create N items or one item with `(qty 12)` in the name); check-out → check-in workflow with required returns (we just track `returned_at` as an optional manual mark); barcode/QR scanning; per-school inventory scoping (closures-style — would need `inventory_items.school_id` and a school filter); inventory on the home bento (no surface yet — could be a "Items missing from your class" card for teachers in v2).
 
+### 4.28 Student intake — full PII fields + parent self-fill form (T11)
+
+T11 turns the previously bare-bones Add Student modal (first / last / DoB only) into a full intake form, AND adds an "📧 Send form to parent" path that emails the parent a public token-gated form (`student-intake.html`) which they fill out themselves, syncing back as a new student + enrollment in one round-trip.
+
+**Schema additions, no schema rewrite.** Parent contact arrays (`parent_names text[]`, `parent_emails text[]`, `parent_phones text[]`) and `family_id` were already on `students` from earlier phases — the JR sync populates them, the UI just wasn't surfacing them. T11 adds proper PII columns: `allergies`, `medical_notes`, `photo_permission boolean` (tri-state — null = "not asked"), `emergency_contact_name`/`phone`/`relationship`, `school_name`, `grade`, `authorized_pickup`. All nullable; no backfill needed for existing rows.
+
+**`student_intake_requests` is the token table.** Each row carries `class_id` (FK), `parent_email`, `token_hash text` (sha256(raw_token)), `status` (`pending` / `completed` / `cancelled` / `expired`), `expires_at` (14-day default), audit fields (`sent_by`, `sent_at`, `email_sent_count`, `last_email_status`, `last_email_error`), and on completion: `completed_at`, `resulting_student_id`, `resulting_enrollment_id`, `submitted_payload jsonb`. **The DB stores only sha256(token), never the raw token** — a leak of the row gives an attacker nothing usable; verification re-hashes the URL token and looks up by hash. Same defense pattern as a salted password hash, simpler because the token IS random (no rainbow-table risk).
+
+**Two Edge Functions, distinct auth models:**
+
+- **`dk-send-intake-form`** (`verify_jwt: true`) — admin/manager calls this. Verifies the caller's `edit_students` permission via `has_permission()` (called under the user-bound supabase-js client because the SQL function reads `auth.uid()` internally — with service-role it'd be NULL and always return false). Mints a 32-byte hex random token, persists sha256(token) + class_id + parent_email + (optionally) initial_first_name/last_name as a hint. Builds the URL `https://dk-green.vercel.app/student-intake.html?token=<raw>`. Emails via Resend if `RESEND_API_KEY` + `dk_config.sender_email` are both set; otherwise returns the URL for copy/paste fallback (mirrors `dk-invite-teacher`'s pattern, §4.6). Resend path: passes `resend_intake_id` and rotates the token + pushes expiry on the existing row, so the old emailed link stops working immediately.
+- **`dk-submit-intake-form`** (`verify_jwt: false`) — public; the parent has no auth session. Auth IS the token. Function sha256s the URL token, looks up the intake row, verifies status='pending' and not expired. Then atomically: INSERT student (client-supplied UUID, `source='dk_local'`, all PII fields from the payload), INSERT enrollment, UPDATE the intake row to `completed`. The students-INSERT trigger fires the existing T3a match-detection pipeline so duplicate detection works the same as in-app adds. The function uses service-role for writes — there are no INSERT/UPDATE/DELETE policies on `student_intake_requests` by design.
+
+**RLS on `student_intake_requests`.** SELECT to admins/managers (`has_permission('edit_students')`) AND to teachers assigned to the class (email-match through `class_teachers` + `teachers.email`, per §5's "never reference auth.users from RLS" rule). No writes via RLS — both Edge Functions use service-role. The `cancel_student_intake(p_intake_id uuid)` RPC is `security definer`, gated on `edit_students`, and is the admin-side cancel surface (token remains in DB but is unusable since the submit function refuses non-pending rows).
+
+**UI surfaces:**
+
+- **Expanded Add Student modal** at `index.html` — dashed banner at top with "📧 Send form to parent" (parent email + Send button); below that, sectioned form (Student / Parents repeater 1-4 / Emergency contact / Health & safety / Notes). Parents repeater seeds with one empty row; "+ Add another parent" button up to 4. Photo permission is a tri-state radio group (Yes / No / Not asked).
+- **Send-result modal** (`#intakeResultOverlay`) — appears after the Send button completes. Shows the intake URL inline regardless of email-sent state, so admin can copy/paste. If Resend is unconfigured (`skipped_no_resend_key` / `skipped_no_sender_email`) or the email failed, shows that explicitly with the URL as the fallback.
+- **Class detail panel** — gains a "Pending parent forms (N)" subsection above the enrollments list. Each pending row shows parent email, child hint (if pre-filled), days-since-sent, expiry, with `Resend` and `Cancel` buttons. When the parent submits, the row drops out (status flips to `completed`) and the new student appears in the enrollments list via the realtime debounce.
+- **Enrolled-student rows** — now display parent name(s) / email / phone underneath the student name, plus chip indicators for `⚠ allergies`, `⚕ medical`, `📷 no photos` (if `photo_permission = false`). Email + phone render as `mailto:` / `tel:` links. Emergency contact gets a 🚨 line if set. Tooltips on the chips show the full text without bloating the row.
+- **Public form page** `student-intake.html` — standalone (parallel to `install.html`). No auth, no Supabase JS SDK; uses raw `fetch` with the publishable key as `apikey` + `Authorization: Bearer <publishable>` (Supabase's gateway requires *some* apikey even for `verify_jwt: false` functions, the publishable one works because the real auth is the token in the body). Reads `?token=…` from URL, renders the form, POSTs `{token, payload}` to `dk-submit-intake-form`, shows success/error.
+
+**No new permission name.** Reuses `edit_students` (manager+) for both the in-app modal entry points and the Edge Function gate. A future per-user grant/revoke can scope intake-sending without affecting other student-write flows because all the granular checks happen via `has_permission('edit_students')`.
+
+**Why `verify_jwt: false` for the submit function but `verify_jwt: true` for `curriculum-fetch` (which is also "auth via something other than JWT").** The curriculum-fetch path verifies the JWT manually inside the handler via `auth.getUser(jwt)` because the platform's gateway-layer rejections weren't appearing in function logs (CLAUDE.md table at §3). For `dk-submit-intake-form` the parent has no JWT at all — they're a member of the public, the email link is their entire credential. That's the same model as `dk-install-callback` (HMAC-signed token) and the same `verify_jwt: false` setting. Don't try to layer manual JWT verification on top — there's no JWT to verify.
+
+**14-day expiry, no auto-purge.** Like `closures` and `install_nonces`, expired/cancelled intake rows accumulate. Volume is low (one per dk_local student) and they're useful audit trail (who sent what to whom, when). If volume becomes a concern, add a nightly pg_cron purge of `status in ('expired','cancelled') and sent_at < now() - interval '90 days'` — same pattern §5 calls out for closures.
+
 ---
 
 ## 5. Gotchas, quirks, and "don't touch this"
@@ -768,6 +807,18 @@ T10 adds a physical-inventory ledger for the franchise: props, costumes, supplie
 
 **Mobile header collapses to a single row at ≤720px.** Brand text (the "PAR DK / Response Console" stack) hides — only the logo remains, scaled down to 28px. The standalone `#signOutBtn` is hidden via `display: none !important` and the user-chip becomes a `<button>` that opens a `.user-menu` popover. The popover holds the user's name/email/role/PAR-link CTA + a Sign-out menu item. **`<a>` cannot live inside a `<button>`** — that's why the legacy "Connect to PAR" anchor inside the chip moved to the menu. If you put HTML back inside `#userChip`, keep it span/text only or browsers will silently break the chip's click handling. The popover is positioned absolute against `.header-top` (which sets `position: relative`) — don't remove that or the menu floats relative to the wrong ancestor.
 
+**Student intake tokens: DB stores ONLY sha256(token), never the raw value (T11).** `student_intake_requests.token_hash` is `sha256(raw_token_hex)`. The raw token only ever exists in (a) the URL emailed to the parent and (b) the single response from `dk-send-intake-form` (so the admin can copy/paste in the result modal). Verification re-hashes the URL token and looks up by hash — same defense pattern as a salted password hash, but no salt needed because the token IS 32 random bytes (no rainbow-table risk). **Don't add a `token` column** — a DB leak would then expose every live intake link. Resending uses `resend_intake_id` to rotate the token + push expiry on the existing row, which immediately invalidates the previous emailed link.
+
+**`dk-send-intake-form` calls `has_permission()` under the user-bound supabase-js client (T11).** Because `has_permission(perm text)` reads `auth.uid()` internally — when called via the service-role admin client, `auth.uid()` is NULL and the function always returns false. Fixed once already in `dk-send-intake-form/index.ts` (uses `userClient.rpc("has_permission", { perm: "edit_students" })`). **Don't refactor the permission check to use the admin client** unless you also pass `auth.uid()` explicitly via SQL — easier to keep the user-bound RPC pattern. Same trap exists for any Edge Function that wants to gate on a permission bundle.
+
+**`dk-submit-intake-form` is `verify_jwt: false` and that is correct (T11).** The parent has no Supabase auth session — they're a member of the public, the email link IS their entire credential. Same auth model as `dk-install-callback` (HMAC-signed token). **Don't try to layer manual JWT verification on top** (the curriculum-fetch pattern from §3) — there's no JWT to verify. The token in the body, hashed and compared to the persisted `token_hash`, is the authentication.
+
+**Photo permission on `students` is tri-state, not a boolean (T11).** `students.photo_permission` is `boolean NULL` where `null` means "we never asked." The intake form, the Add Student modal, AND the parent self-fill form all expose three radio options (Yes / No / Not asked) and persist null when the admin/parent picks "Not asked." Any UI that filters or summarizes by this column has to handle three states. The Class detail panel's `📷 no photos` chip renders ONLY when `photo_permission === false` — null doesn't trigger it (we don't yell "we don't know" at the admin every render).
+
+**Renaming the `assign-row` class to `enrollment-row` for student rows in the class panel was deliberate (T11).** Pre-T11 the enrolled-student row used the same `.assign-row` flex layout as the teacher list (single line, name + status pill on the right). T11 needs two-line layout (name row + parent contact row + emergency line) which `.assign-row`'s flexbox fights. The new class is `.enrollment-row` with `display:block` + manual flex on the inner header row. Don't try to make `.assign-row` work for both — they're now different shapes.
+
+**The intake-row "Pending parent forms" subsection is gated on RLS, not role.** Admins see all pending intakes for a class; teachers see them only if they're on `class_teachers` for that class (RLS policy `intake_requests_select_teacher` does the email-match join through `teachers.email`). If a teacher reports they don't see a pending form they expected, check whether their `teachers.email` is set AND matches their `auth.jwt() ->> 'email'`. Same fragility as the teacher-bento "today's shifts" lookup pre-T6d (CLAUDE.md §5).
+
 ---
 
 ## 6. Open issues and half-built features
@@ -802,6 +853,8 @@ T10 adds a physical-inventory ledger for the franchise: props, costumes, supplie
   - **T7b (🔲 not started):** Usage-based triggers ("you've taken attendance 20 times, want PAR for your family too?") via new variant keys keyed off `attendance` / `clock_ins` row counts; dismiss UX (the `dismiss` enum value already exists); admin-side funnel dashboard reading `par_promotion_events` aggregates. Calibrate trigger thresholds against a week of T7a data before shipping.
 
 - **Phase T10 — physical inventory (props/costumes/supplies/equipment) + class/event assignments + conflict detection.** ✅ **Shipped.** Two new tables (`inventory_items`, `inventory_assignments`) with a polymorphic-target shape (assignment carries nullable `class_id` + nullable `event_id`, exactly-one-set check). One new permission `edit_inventory` (super_admin/admin/manager) added to both SQL `has_permission()` and JS `PERM_BUNDLES`. Public `inventory-photos` Storage bucket mirrors the `infographics` pattern. SELECT on both tables open to all signed-in users so the schedule + class detail + event editor can render assignments for everyone. New top-level **Inventory** tab with search + tag-filter chips + card grid (photo, location, tags, status, conflict badge, re-order link). Item editor modal handles CRUD + photo upload + an inline "Current & upcoming assignments" list with mark-returned/remove. Assign-picker modal opens from the class detail panel "📦 Assign inventory" button or the event editor's "+ Assign inventory…" button — multi-select with conflict warnings. Class detail panel surfaces an "Inventory for [date]:" chip row to all roles (teachers see what's been pulled). Conflict math is a timestamp-range overlap on `usage_starts_at` / `usage_ends_at` (materialized at write time from class session_date+times or event starts_at/ends_at). Out of scope for v1: quantity tracking, check-out/check-in workflow, barcode scanning, per-school scoping, home-bento integration. See `migrations/phase_t10_inventory.sql` and §4.27.
+
+- **Phase T11 — student intake form (full PII fields + parent self-fill flow).** ✅ **Shipped.** Adds nine PII columns to `students` (allergies, medical_notes, photo_permission tri-state, emergency_contact_name/phone/relationship, school_name, grade, authorized_pickup) — parent contact arrays were already on the schema. New `student_intake_requests` table stores `sha256(token)` + class_id + parent_email + audit fields; raw token lives only in the URL emailed to the parent. Two Edge Functions: `dk-send-intake-form` (verify_jwt: true; admin gate via `has_permission('edit_students')` called under user-bound supabase-js client; emails via Resend with copy/paste fallback) and `dk-submit-intake-form` (verify_jwt: false; public; auth IS the token; atomically inserts student + enrollment + marks intake completed using service-role). New public page `student-intake.html` parallels `install.html`. Add Student modal expands with full intake fields + parents repeater + "📧 Send form to parent" shortcut. Class detail panel grows a "Pending parent forms" subsection above the enrollments list with Resend / Cancel actions, and enriches each enrolled-student row with parent name(s)/email/phone, emergency contact, and chips for `⚠ allergies`/`⚕ medical`/`📷 no photos`. No new permission name — reuses `edit_students`. `cancel_student_intake(uuid)` RPC powers the admin cancel surface. See `migrations/phase_t11_student_intake.sql`, `T11_VERIFICATION.md`, and §4.28.
 
 ### Wave 1 leftovers (pre-freemium ops work)
 
@@ -873,4 +926,5 @@ JACKRABBIT_ORG_ID                # "551000" for the Charleston franchise
 | T9 — Special events (free classes, trainings, promotional events) + multi-staff assignment | ✅ Shipped |
 | T7a — PAR promotion variant copy + impression/click logging | ✅ Shipped |
 | T10 — Inventory items + class/event assignments + conflict detection | ✅ Shipped |
+| T11 — Student intake (PII columns + parent self-fill enrollment form) | ✅ Shipped |
 | T7b — Usage-based smart triggers (attendance / clock-in thresholds) + dismiss UX + admin funnel dashboard | 🔲 Not started |
