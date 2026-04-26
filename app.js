@@ -3503,10 +3503,14 @@
           if (aActive !== bActive) return aActive - bActive;
           return (a.student.last_name || "").localeCompare(b.student.last_name || "");
         });
+        const canEditStudents = hasPerm("edit_students");
         activeFirst.forEach(({ student, status, drop_reason, dropped_at, enrolled_at }) => {
           const row = document.createElement("div");
           row.className = "enrollment-row";
-          row.style.cssText = "display:block;padding:8px 10px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;background:white";
+          // Theme-aware bg + ink color. The original .assign-row used
+          // var(--panel-raised) on a dark theme; hardcoding white broke
+          // contrast because var(--ink) is light in the dark token set.
+          row.style.cssText = "display:block;padding:8px 10px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;background:var(--panel-raised);color:var(--ink)";
           const statusClass = status === "active" ? "role-primary" : status === "waitlist" ? "role-substitute" : status === "dropped" ? "role-co-teacher" : "role-assistant";
           const localBadge = student.source === "dk_local"
             ? ' <span class="source-badge source-local" title="Added directly in DK — not from Jackrabbit">local</span>'
@@ -3520,7 +3524,7 @@
             ? parentNames.map((n, i) => {
                 const e = parentEmails[i] || "";
                 const p = parentPhones[i] || "";
-                const parts = [escapeHtml(n)];
+                const parts = [`<span style="color:var(--ink)">${escapeHtml(n)}</span>`];
                 if (e) parts.push(`<a href="mailto:${escapeHtml(e)}" style="color:var(--ink-dim);text-decoration:none">${escapeHtml(e)}</a>`);
                 if (p) parts.push(`<a href="tel:${escapeHtml(p)}" style="color:var(--ink-dim);text-decoration:none">${escapeHtml(p)}</a>`);
                 return parts.join(" · ");
@@ -3528,7 +3532,7 @@
             : "";
           // Emergency contact + chips for allergies / no-photo
           const ecLine = student.emergency_contact_name
-            ? `<span style="font-size:11.5px;color:var(--ink-dim)">🚨 ${escapeHtml(student.emergency_contact_name)}${student.emergency_contact_phone ? ` · <a href="tel:${escapeHtml(student.emergency_contact_phone)}" style="color:var(--ink-dim);text-decoration:none">${escapeHtml(student.emergency_contact_phone)}</a>` : ""}${student.emergency_contact_relationship ? ` <span style="opacity:.7">(${escapeHtml(student.emergency_contact_relationship)})</span>` : ""}</span>`
+            ? `<span style="font-size:11.5px;color:var(--ink-dim)">🚨 <span style="color:var(--ink)">${escapeHtml(student.emergency_contact_name)}</span>${student.emergency_contact_phone ? ` · <a href="tel:${escapeHtml(student.emergency_contact_phone)}" style="color:var(--ink-dim);text-decoration:none">${escapeHtml(student.emergency_contact_phone)}</a>` : ""}${student.emergency_contact_relationship ? ` <span style="opacity:.7">(${escapeHtml(student.emergency_contact_relationship)})</span>` : ""}</span>`
             : "";
           const chips = [];
           if (student.allergies)
@@ -3537,20 +3541,33 @@
             chips.push(`<span title="${escapeHtml(student.medical_notes)}" style="display:inline-block;padding:1px 6px;font-size:10.5px;background:#fef9c3;color:#854d0e;border:1px solid #fde68a;border-radius:4px">⚕ medical</span>`);
           if (student.photo_permission === false)
             chips.push(`<span title="Parent declined photo permission" style="display:inline-block;padding:1px 6px;font-size:10.5px;background:#f3f4f6;color:#374151;border:1px solid #d1d5db;border-radius:4px">📷 no photos</span>`);
+          // Edit button (only if user has edit_students perm). Click opens
+          // the same Add Student modal in edit mode (preloaded + UPDATE).
+          const editBtn = canEditStudents
+            ? `<button class="btn small" data-act="edit-student" data-student-id="${escapeHtml(student.id)}" style="padding:3px 9px;font-size:11.5px">✎ Edit</button>`
+            : "";
           row.innerHTML = `
             <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
-              <span style="font-weight:500">
+              <span style="font-weight:500;color:var(--ink)">
                 ${escapeHtml(student.first_name || "")} ${escapeHtml(student.last_name || "")}${localBadge}${student.dob ? ` <span style="font-size:11px;color:var(--ink-dim);font-weight:400">· DoB ${escapeHtml(student.dob)}</span>` : ""}${student.grade ? ` <span style="font-size:11px;color:var(--ink-dim);font-weight:400">· ${escapeHtml(student.grade)}</span>` : ""}
               </span>
               <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
                 ${chips.join("")}
                 <span class="role-tag ${statusClass}">${escapeHtml(status)}</span>
                 ${drop_reason ? `<span style="font-size:11px;color:var(--ink-dim)">· ${escapeHtml(drop_reason)}</span>` : ""}
+                ${editBtn}
               </span>
             </div>
             ${parentLine ? `<div style="font-size:12px;color:var(--ink-dim);margin-top:4px;line-height:1.5">${parentLine}</div>` : ""}
             ${ecLine ? `<div style="margin-top:3px">${ecLine}</div>` : ""}
           `;
+          const editBtnEl = $('[data-act="edit-student"]', row);
+          if (editBtnEl) {
+            editBtnEl.onclick = (e) => {
+              e.stopPropagation();
+              openStudentModal(cls, student);
+            };
+          }
           enrollList.appendChild(row);
         });
       }
@@ -3834,7 +3851,7 @@
           const canEdit = canTakeAttendanceFor(cls, d);
           const row = document.createElement("div");
           row.className = "assign-row";
-          row.style.cssText = "display:flex;gap:8px;align-items:center;padding:6px 8px;background:var(--surface,#fff);border:1px solid var(--border);border-radius:6px";
+          row.style.cssText = "display:flex;gap:8px;align-items:center;padding:6px 8px;background:var(--panel-raised);color:var(--ink);border:1px solid var(--border);border-radius:6px";
           const dateLabel = new Date(d + "T00:00:00").toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
           const lateBit = stats.latePickups > 0
             ? ` · <span style="color:#a36a00">${stats.latePickups} late pickup${stats.latePickups === 1 ? "" : "s"} (${stats.lateMinutes} min)</span>`
@@ -3898,43 +3915,89 @@
    * to email the parent a public token-gated form (student-intake.html).
    */
   let addStudentTargetClassId = null;
+  let editingStudentId = null;       // T11: non-null when modal is in edit mode
   let reconcileCandidateId = null;
 
-  function openAddStudentModal(cls) {
-    addStudentTargetClassId = cls.id;
-    $("#addStudentClassBanner").innerHTML =
-      `Adding a student to <b>${escapeHtml(cls.name || "this class")}</b>` +
-      (cls.location ? ` <span style="color:var(--ink-dim)">· ${escapeHtml(cls.location)}</span>` : "");
-    $("#addStudentSourceWarn").style.display = cls.source === "jackrabbit" ? "" : "none";
-    // Reset every field
-    $("#as_first_name").value = "";
-    $("#as_last_name").value  = "";
-    $("#as_dob").value        = "";
-    $("#as_gender").value     = "";
-    $("#as_grade").value      = "";
-    $("#as_school_name").value = "";
-    $("#as_ec_name").value    = "";
-    $("#as_ec_phone").value   = "";
-    $("#as_ec_relationship").value = "";
-    $("#as_authorized_pickup").value = "";
-    $("#as_allergies").value  = "";
-    $("#as_medical_notes").value = "";
-    $("#as_notes").value      = "";
-    $("#as_intake_email").value = "";
+  // Unified Add/Edit student modal entry point. Pass `studentToEdit` to
+  // open in edit mode (preloads fields, save does UPDATE not INSERT,
+  // hides the parent-intake send banner since we already have a row).
+  function openStudentModal(cls, studentToEdit) {
+    addStudentTargetClassId = cls?.id || null;
+    editingStudentId = studentToEdit?.id || null;
+    const editing = !!studentToEdit;
+
+    // Modal title + class banner + send-intake banner visibility
+    const titleEl = document.querySelector("#addStudentModalOverlay .modal-head h3");
+    if (titleEl) titleEl.textContent = editing ? "Edit student" : "Add student";
+    const intakeShortcut = document.querySelector("#addStudentModalOverlay .intake-shortcut");
+    if (intakeShortcut) intakeShortcut.style.display = editing ? "none" : "";
+    // The "or fill it out yourself" divider only makes sense in add mode
+    const divider = intakeShortcut?.nextElementSibling;
+    if (divider && divider.textContent && divider.textContent.includes("or fill it out yourself")) {
+      divider.style.display = editing ? "none" : "";
+    }
+    const saveBtn = $("#addStudentSave");
+    if (saveBtn) saveBtn.textContent = editing ? "Save changes" : "Add to class";
+
+    if (editing) {
+      $("#addStudentClassBanner").innerHTML =
+        `Editing <b>${escapeHtml((studentToEdit.first_name || "") + " " + (studentToEdit.last_name || ""))}</b>` +
+        (cls?.name ? ` in <b>${escapeHtml(cls.name)}</b>` : "");
+      $("#addStudentSourceWarn").style.display = "none";
+    } else {
+      $("#addStudentClassBanner").innerHTML =
+        `Adding a student to <b>${escapeHtml(cls?.name || "this class")}</b>` +
+        (cls?.location ? ` <span style="color:var(--ink-dim)">· ${escapeHtml(cls.location)}</span>` : "");
+      $("#addStudentSourceWarn").style.display = cls?.source === "jackrabbit" ? "" : "none";
+    }
+
+    // Seed every field (empty for add, prefilled for edit)
+    const s = studentToEdit || {};
+    $("#as_first_name").value      = s.first_name || "";
+    $("#as_last_name").value       = s.last_name  || "";
+    $("#as_dob").value             = s.dob        || "";
+    $("#as_gender").value          = s.gender     || "";
+    $("#as_grade").value           = s.grade      || "";
+    $("#as_school_name").value     = s.school_name || "";
+    $("#as_ec_name").value         = s.emergency_contact_name || "";
+    $("#as_ec_phone").value        = s.emergency_contact_phone || "";
+    $("#as_ec_relationship").value = s.emergency_contact_relationship || "";
+    $("#as_authorized_pickup").value = s.authorized_pickup || "";
+    $("#as_allergies").value       = s.allergies || "";
+    $("#as_medical_notes").value   = s.medical_notes || "";
+    $("#as_notes").value           = s.notes || "";
+    $("#as_intake_email").value    = "";
     $("#as_intake_status").style.display = "none";
     $("#as_intake_status").innerHTML = "";
-    const photoNotAsked = document.querySelector('input[name="as_photo_perm"][value=""]');
-    if (photoNotAsked) photoNotAsked.checked = true;
-    // Reset parents repeater to a single empty row
+    // Photo permission tri-state radio
+    const photoVal = s.photo_permission === true ? "yes"
+                   : s.photo_permission === false ? "no"
+                   : "";
+    document.querySelectorAll('input[name="as_photo_perm"]').forEach((r) => {
+      r.checked = (r.value === photoVal);
+    });
+
+    // Parents repeater: seed from arrays, or one empty row in add mode
     $("#as_parents_list").innerHTML = "";
-    addAsParentRow();
+    const names  = Array.isArray(s.parent_names)  ? s.parent_names  : [];
+    const emails = Array.isArray(s.parent_emails) ? s.parent_emails : [];
+    const phones = Array.isArray(s.parent_phones) ? s.parent_phones : [];
+    const seedCount = Math.max(names.length, emails.length, phones.length, 1);
+    for (let i = 0; i < seedCount; i++) {
+      addAsParentRow({ name: names[i] || "", email: emails[i] || "", phone: phones[i] || "" });
+    }
+
     $("#addStudentModalOverlay").classList.add("open");
     setTimeout(() => $("#as_first_name").focus(), 50);
   }
 
+  // Back-compat shim — older callers use openAddStudentModal(cls).
+  function openAddStudentModal(cls) { openStudentModal(cls, null); }
+
   function closeAddStudentModal() {
     $("#addStudentModalOverlay").classList.remove("open");
     addStudentTargetClassId = null;
+    editingStudentId = null;
   }
 
   function addAsParentRow(seed) {
@@ -3997,8 +4060,6 @@
   }
 
   async function saveAddStudent() {
-    const classId = addStudentTargetClassId;
-    if (!classId) { showToast("No class selected", "error"); return; }
     const first = $("#as_first_name").value.trim();
     const last  = $("#as_last_name").value.trim();
     if (!first || !last) { showToast("First and last name are required", "error"); return; }
@@ -4017,11 +4078,10 @@
     const notes  = $("#as_notes").value.trim() || null;
     const parents = readAsParentsArrays();
 
-    showLoader(true);
-    const newStudentId = (crypto && crypto.randomUUID) ? crypto.randomUUID() : null;
-    if (!newStudentId) { showLoader(false); showToast("This browser lacks crypto.randomUUID", "error"); return; }
-    const studentPayload = {
-      id: newStudentId,
+    // Common payload shape — used by both INSERT (add) and UPDATE (edit).
+    // UPDATE intentionally does NOT touch source / jackrabbit_student_id /
+    // created_by — those are write-once at create time.
+    const fields = {
       first_name: first,
       last_name: last,
       dob,
@@ -4039,6 +4099,34 @@
       medical_notes: medNotes,
       photo_permission: photoPerm,
       notes,
+    };
+
+    // ── EDIT mode: UPDATE the existing row, leave enrollment alone ─────
+    if (editingStudentId) {
+      showLoader(true);
+      const { error } = await sb.from("students")
+        .update(fields)
+        .eq("id", editingStudentId);
+      showLoader(false);
+      if (error) {
+        showToast("Save failed: " + error.message, "error");
+        return;
+      }
+      await reloadAll(); renderAll();
+      closeAddStudentModal();
+      showToast(`${first} ${last} updated`, "success");
+      return;
+    }
+
+    // ── ADD mode: INSERT student + INSERT enrollment ──────────────────
+    const classId = addStudentTargetClassId;
+    if (!classId) { showToast("No class selected", "error"); return; }
+    showLoader(true);
+    const newStudentId = (crypto && crypto.randomUUID) ? crypto.randomUUID() : null;
+    if (!newStudentId) { showLoader(false); showToast("This browser lacks crypto.randomUUID", "error"); return; }
+    const studentPayload = {
+      id: newStudentId,
+      ...fields,
       source: "dk_local",
       jackrabbit_student_id: null,
       created_by: state.session?.user?.id || null,
