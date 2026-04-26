@@ -195,11 +195,18 @@ response-console-v3/
     │                                      tables, classes.school_id FK,
     │                                      mark_class_cancellation_notified
     │                                      RPC. See §4.21.
-    └── phase_t7a_par_promo_events.sql    ← par_promotion_events (impression /
-                                            click / dismiss) + par_promo_event_kind
-                                            enum. Self-INSERT, admin-only SELECT.
-                                            Foundation for the freemium-conversion
-                                            work. See §4.26.
+    ├── phase_t7a_par_promo_events.sql    ← par_promotion_events (impression /
+    │                                        click / dismiss) + par_promo_event_kind
+    │                                        enum. Self-INSERT, admin-only SELECT.
+    │                                        Foundation for the freemium-conversion
+    │                                        work. See §4.26.
+    └── phase_t10_inventory.sql           ← inventory_items + inventory_assignments
+                                            tables, public inventory-photos Storage
+                                            bucket, new edit_inventory permission.
+                                            Items attach to a class session OR an
+                                            event; conflict detection via timestamp-
+                                            range overlap on assignment rows.
+                                            See §4.27.
 ```
 
 **Pre-T4 migrations (not in repo) live at the parent folder:**
@@ -625,6 +632,38 @@ The `super_admin` / `admin` split exists specifically so a future copy test can 
 
 **Out of scope for T7a:** usage-based triggers (T7b — schema already supports via new variant keys); dismiss UX (enum has the value, no UI yet); admin-side funnel dashboard (read-only SQL today, in-app card later); per-impression metadata payloads.
 
+### 4.27 Inventory — items + class/event assignments + conflict detection (T10)
+
+T10 adds a physical-inventory ledger for the franchise: props, costumes, supplies, and equipment that get checked out to a class session or an event. The shape is two tables (`inventory_items`, `inventory_assignments`), one new permission (`edit_inventory`, super_admin/admin/manager), and a public Storage bucket (`inventory-photos`) for reference photos.
+
+**Schema (one assignment table, polymorphic to class OR event).** `inventory_assignments` carries `item_id`, nullable `class_id`, nullable `event_id`, `session_date` (date, set when class_id is), `usage_starts_at` + `usage_ends_at` (timestamptz materialized at write time), `returned_at` (null = still assigned), `notes`, `created_by`. A check constraint enforces exactly one of `class_id` / `event_id` is set; another enforces `class_id` ⇒ `session_date` is set. **Why one table not two:** the conflict overlap query is "any two assignments for the same item whose [usage_starts_at, usage_ends_at) windows overlap" — trivially expressible against one table, would require a UNION across two. Splitting would also force every read-side helper (`inventoryAssignmentsForItem`, the schedule lookup, the conflict math) to handle both shapes.
+
+**Why materialize the time window on the assignment row.** Classes don't have explicit timestamps — they're recurring on a session_date with the time string parsed from `classes.times`. The assignment writer materializes the window at write time (`classSessionTimeWindow(cls, sessionDate)` for class assignments, `events.starts_at..ends_at` for event assignments) so the conflict overlap query is a single column-level comparison. **Side effect:** if `classes.times` is later edited, existing inventory assignments retain their snapshotted window. This is intentional — a teacher who already pulled a costume for the original time slot doesn't need their assignment silently re-scoped. Admins re-assign explicitly via the editor if the time genuinely changed.
+
+**Conflict detection is surfaced everywhere, never blocked at the DB.** The DB lets overlapping assignments through (admins occasionally need to override double-bookings); a partial unique index does prevent the *same item assigned to the same class session twice* and the *same item assigned to the same event twice*, but cross-target overlaps are detection-only. Conflicts surface in:
+
+- **Inventory tab cards** — red `⚠ N conflicts` row computed by `itemConflictCount(itemId)` (O(n²) within an item's active assignments; cheap because items rarely have more than a handful of overlapping holds).
+- **Inventory editor "Current & upcoming assignments" list** — overlapping rows get a red border + `⚠ conflict` pill, computed pairwise across the item's active assignments.
+- **Assign-picker** — every item shows a "⚠ Already assigned: …" warning under it if its existing assignments overlap the target's time window. Items already assigned to *this exact* target are checkbox-disabled (the partial unique index would reject the insert anyway).
+- **Class detail panel chips** — the "Inventory for [date]:" chip row marks any chip with an active conflict in red with a `⚠`. Hover shows what else it's pinned to.
+- **Event editor inventory list** — overlapping rows get the same red border + conflict pill + an "Also assigned: …" detail line.
+
+**Photos: public bucket, mirroring the `infographics` pattern.** `inventory-photos` is a public Storage bucket; reads via `getPublicUrl`, writes gated on `edit_inventory`. `inventory_items.photo_urls` is a `text[]` of the public URLs (no separate join). **Why public, not curriculum-style watermarked:** inventory photos aren't sensitive — they're "what does this prop look like" reference shots. Adding an Edge Function intermediary would be ceremony with no security benefit. Photo deletes call `inventoryStoragePathFromUrl()` to strip the path back out of the public URL so the bucket object can be removed too. New-item flow uploads photos to a `_pending/` prefix before the item id exists, then writes the public URLs into `photo_urls` on save. Cancelling a new-item edit removes the buffered uploads from the bucket.
+
+**Permissions: one new name, `edit_inventory`.** Added to super_admin/admin/manager bundles in both `has_permission()` SQL and `PERM_BUNDLES` JS. Teachers + viewers SELECT-only — they need to see what's been pulled for their classes (chip row on the class detail panel) but can't write. SELECT on both tables is open to any signed-in user, mirroring classes/schools/events: the schedule + class detail + event editor all need to render assignments for everyone, and a teacher-private filter would just add complexity for no security benefit (assignment data isn't sensitive).
+
+**UI surfaces:**
+
+- **New top-level "Inventory" tab** — visible to every signed-in role (read-only for teachers/viewers). Header has search input, Show-archived toggle, and `+ New item` (gated). Tag filter chips. Card grid with photo, location, tags, status (`📍 Assigned to …` or `✓ Available`), conflict badge, and a `↗ Re-order` link if `reorder_url` is set. Cards are clickable → opens the item editor. Mobile registers it as a Tools-sheet overflow item with the 📦 icon.
+- **Item editor modal** — name, description, storage_location, tags (comma-separated), reorder_url, notes, archive toggle, Photos section (with upload), and (for existing items) a "Current & upcoming assignments" list with mark-returned / mark-active / remove actions per row.
+- **Assign-picker modal** — opened from the class detail panel "📦 Assign inventory" button or the event editor's "+ Assign inventory…" button. Shows a banner of what we're assigning to + the time window. Checkbox-list of items with conflict warnings, search filter, and a notes field. Multi-select.
+- **Class detail panel** — admin/manager get the "📦 Assign inventory" action button next to "Cancel class" / "Notify daily contact". *Everyone* (including teachers) sees an "Inventory for [next session date]:" chip row when items are assigned, so a teacher knows what's been pulled. Click a chip → opens the item editor.
+- **Event editor** — admin/manager+ see an Inventory section below Staff with the assignment list and a "+ Assign inventory…" button. Only renders for *existing* events (saved); new events have no id yet to attach assignments to. (Admins create the event first, then re-open it to assign inventory — same shape as the staff-list flow for `pendingNewEventStaff`.)
+
+**Re-order link is the small thing that pays for itself.** `inventory_items.reorder_url` lets the franchise stash the vendor URL for items they've ordered before. The Inventory card surfaces it as `↗ Re-order` and the editor has a dedicated input. It's a "save the search next time" pattern — when a costume tears or supplies run out, Sharon clicks one link instead of fishing through Amazon history.
+
+**Out of scope for T10:** quantity tracking (each item is a single physical unit; if the franchise needs N pairs of pirate hats, create N items or one item with `(qty 12)` in the name); check-out → check-in workflow with required returns (we just track `returned_at` as an optional manual mark); barcode/QR scanning; per-school inventory scoping (closures-style — would need `inventory_items.school_id` and a school filter); inventory on the home bento (no surface yet — could be a "Items missing from your class" card for teachers in v2).
+
 ---
 
 ## 5. Gotchas, quirks, and "don't touch this"
@@ -719,6 +758,14 @@ The `super_admin` / `admin` split exists specifically so a future copy test can 
 
 **Multi-day events appear on every covered day.** `eventsForDate(date)` checks `iso(starts_at) ≤ date ≤ iso(ends_at)`, so a Sat–Sun training renders on both Saturday and Sunday in all three views. Day view's `eventStartTimeOn(ev, date)` returns midnight of `date` for events that started earlier so they sort to the top of that day's list (rather than appearing at their original 9 AM start time on a day they're already in progress). Week view positions them at the actual hour of the day they began the multi-day window — for follow-on days they show at the column top with their full duration. **Don't try to "split" a multi-day event into per-day rendering with separate start/end times** — the event row in the DB is the source of truth and the schedule must reflect that one row, not generate phantom rows. If a franchise wants per-session events (e.g. a 3-day workshop with distinct daily titles), that's three separate event rows.
 
+**Inventory assignments materialize the time window at write time and don't auto-update if the parent class's `times` string changes (T10).** `inventory_assignments.usage_starts_at` / `usage_ends_at` are snapshotted from `classSessionTimeWindow(cls, sessionDate)` (for class assignments) or `events.starts_at`/`ends_at` (for event assignments) when the row is inserted. **This is intentional** — a teacher who already pulled a costume for the original 3 PM slot shouldn't have their assignment silently re-scoped if the admin later edits the class to 4 PM. Conflict overlap math runs against the snapshotted columns, so old assignments stay visible as historical conflicts even after the class moves. If you genuinely want to retime an assignment, delete + re-create it; the editor's Remove button on each assignment row is the one-click path. Don't add a trigger to keep `usage_starts_at` in sync with `classes.times` — same reason RLS doesn't try to evaluate the `times` string (CLAUDE.md §4.22 lead-window rationale).
+
+**Inventory conflicts are detection-only, never DB-blocked except for exact-target duplicates (T10).** Two partial unique indexes prevent the *same item assigned to the same class session twice* (`inventory_assignments_class_unique`) and the *same item assigned to the same event twice* (`inventory_assignments_event_unique`), both excluding returned rows. Cross-target overlaps (same item assigned to a class at 3 PM AND an event at 3 PM the same day) are NOT blocked — admins occasionally need to override double-bookings (e.g. "the tail end of the class overlaps the start of the demo, but we'll grab the prop in between"). The UI surfaces conflicts in five places (Inventory card badges, editor assignment list, assign-picker, class-panel chips, event-editor inventory list) so they can't slip past. **Don't add a CHECK or trigger to block overlaps** — you'd break legitimate admin overrides.
+
+**The `inventory-photos` bucket is PUBLIC, unlike `curriculum-assets` and `teacher-documents`.** Inventory photos are reference shots ("what does this prop look like"), not sensitive PII or licensed corporate curriculum. Public bucket + `getPublicUrl` is the right pattern; the URLs go straight into `inventory_items.photo_urls` and render via `<img>` from anywhere. **Don't add an Edge Function intermediary** — there's no per-row authorization story (everyone signed in can already SELECT the item row + URL via the table policy), no audit log requirement (no compliance angle), and no lead-window. If you ever need to delete a photo from the bucket, use `inventoryStoragePathFromUrl()` to strip the path back out of the public URL — the helper handles the `/object/public/inventory-photos/<path>` URL shape Supabase mints.
+
+**The "+ Assign inventory…" button on the event editor only renders for SAVED events (T10).** New-event creation has no event id yet, and `inventory_assignments.event_id` is NOT NULL. Same shape as `pendingNewEventStaff` for the staff list, but inventory assignments are heavier (capture a time window, conflict-check, multi-select) and the franchise workflow is "create event, then come back to assign inventory" — a click-back is fine. **Don't add a `pendingNewEventInventory[]` buffer** — every conflict check needs the resolved event time window which is only authoritative after `events.insert()` returns. If the admin is in the middle of editing dates, mid-buffer assignments would conflict-check against stale times.
+
 **Mobile header collapses to a single row at ≤720px.** Brand text (the "PAR DK / Response Console" stack) hides — only the logo remains, scaled down to 28px. The standalone `#signOutBtn` is hidden via `display: none !important` and the user-chip becomes a `<button>` that opens a `.user-menu` popover. The popover holds the user's name/email/role/PAR-link CTA + a Sign-out menu item. **`<a>` cannot live inside a `<button>`** — that's why the legacy "Connect to PAR" anchor inside the chip moved to the menu. If you put HTML back inside `#userChip`, keep it span/text only or browsers will silently break the chip's click handling. The popover is positioned absolute against `.header-top` (which sets `position: relative`) — don't remove that or the menu floats relative to the wrong ancestor.
 
 ---
@@ -753,6 +800,8 @@ The `super_admin` / `admin` split exists specifically so a future copy test can 
 - **Phase T7 — freemium upgrade prompt + conversion tracking.** Split into two slices.
   - **T7a (✅ shipped):** PAR card has five variants keyed off role × link state (`unlinked_admin` / `unlinked_teacher` / `linked_franchise_owner` / `linked_admin` / `linked_teacher`); every impression and click logs to the new append-only `par_promotion_events` table. Self-INSERT, admin-only SELECT. See `migrations/phase_t7a_par_promo_events.sql`, `T7A_VERIFICATION.md`, and §4.26.
   - **T7b (🔲 not started):** Usage-based triggers ("you've taken attendance 20 times, want PAR for your family too?") via new variant keys keyed off `attendance` / `clock_ins` row counts; dismiss UX (the `dismiss` enum value already exists); admin-side funnel dashboard reading `par_promotion_events` aggregates. Calibrate trigger thresholds against a week of T7a data before shipping.
+
+- **Phase T10 — physical inventory (props/costumes/supplies/equipment) + class/event assignments + conflict detection.** ✅ **Shipped.** Two new tables (`inventory_items`, `inventory_assignments`) with a polymorphic-target shape (assignment carries nullable `class_id` + nullable `event_id`, exactly-one-set check). One new permission `edit_inventory` (super_admin/admin/manager) added to both SQL `has_permission()` and JS `PERM_BUNDLES`. Public `inventory-photos` Storage bucket mirrors the `infographics` pattern. SELECT on both tables open to all signed-in users so the schedule + class detail + event editor can render assignments for everyone. New top-level **Inventory** tab with search + tag-filter chips + card grid (photo, location, tags, status, conflict badge, re-order link). Item editor modal handles CRUD + photo upload + an inline "Current & upcoming assignments" list with mark-returned/remove. Assign-picker modal opens from the class detail panel "📦 Assign inventory" button or the event editor's "+ Assign inventory…" button — multi-select with conflict warnings. Class detail panel surfaces an "Inventory for [date]:" chip row to all roles (teachers see what's been pulled). Conflict math is a timestamp-range overlap on `usage_starts_at` / `usage_ends_at` (materialized at write time from class session_date+times or event starts_at/ends_at). Out of scope for v1: quantity tracking, check-out/check-in workflow, barcode scanning, per-school scoping, home-bento integration. See `migrations/phase_t10_inventory.sql` and §4.27.
 
 ### Wave 1 leftovers (pre-freemium ops work)
 
@@ -823,4 +872,5 @@ JACKRABBIT_ORG_ID                # "551000" for the Charleston franchise
 | T6d — Role management UI + profiles.teacher_id + returning-user invitation redemption | ✅ Shipped |
 | T9 — Special events (free classes, trainings, promotional events) + multi-staff assignment | ✅ Shipped |
 | T7a — PAR promotion variant copy + impression/click logging | ✅ Shipped |
+| T10 — Inventory items + class/event assignments + conflict detection | ✅ Shipped |
 | T7b — Usage-based smart triggers (attendance / clock-in thresholds) + dismiss UX + admin funnel dashboard | 🔲 Not started |
