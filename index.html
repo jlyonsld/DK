@@ -845,9 +845,9 @@
     </div>
   </div>
 
-  <!-- Add student modal (teacher-added / DK-local student; chains into an enrollment) -->
+  <!-- Add student modal (T11: full intake fields + parent self-fill option) -->
   <div class="modal-overlay" id="addStudentModalOverlay">
-    <div class="modal" style="max-width:520px">
+    <div class="modal" style="max-width:680px">
       <div class="modal-head">
         <h3>Add student</h3>
         <button class="btn ghost small" id="addStudentModalClose">✕</button>
@@ -857,6 +857,28 @@
         <div id="addStudentSourceWarn" style="display:none;padding:8px 12px;background:#fff7e6;border:1px solid #f0d88a;border-radius:8px;font-size:12.5px;margin-bottom:12px;color:#7a5b00">
           This class is synced from Jackrabbit. Adding here may create a duplicate the next time Jackrabbit syncs — you'll see a reconcile prompt if that happens.
         </div>
+
+        <!-- Quick-send banner: enter a parent email and skip filling everything else here -->
+        <div class="intake-shortcut" style="padding:12px;border:1px dashed var(--border);border-radius:10px;margin-bottom:14px;background:rgba(16,185,129,.04)">
+          <div style="font-size:13px;font-weight:600;margin-bottom:6px">📧 Send the parent a form to fill out</div>
+          <div style="font-size:12.5px;color:var(--ink-dim);margin-bottom:8px">
+            We'll email this parent a link to complete the full enrollment form themselves. The student appears in this class once they submit.
+          </div>
+          <div class="field-row" style="align-items:end;margin:0">
+            <div class="field" style="flex:1;min-width:200px;margin:0">
+              <label>Parent email</label>
+              <input type="email" id="as_intake_email" placeholder="parent@example.com" />
+            </div>
+            <button class="btn primary" id="as_send_intake_btn" type="button" style="flex:0 0 auto">Send form</button>
+          </div>
+          <div id="as_intake_status" style="display:none;font-size:12.5px;margin-top:8px"></div>
+        </div>
+
+        <div style="text-align:center;margin:12px 0;font-size:11.5px;color:var(--ink-dim);text-transform:uppercase;letter-spacing:.5px">
+          — or fill it out yourself —
+        </div>
+
+        <h4 style="margin:14px 0 8px;font-size:13px;text-transform:uppercase;letter-spacing:.5px;color:var(--ink-dim)">Student</h4>
         <div class="field-row">
           <div class="field">
             <label>First name *</label>
@@ -867,14 +889,97 @@
             <input type="text" id="as_last_name" placeholder="Lyons" />
           </div>
         </div>
+        <div class="field-row">
+          <div class="field" style="flex:0 0 180px">
+            <label>Date of birth</label>
+            <input type="date" id="as_dob" />
+          </div>
+          <div class="field" style="flex:0 0 160px">
+            <label>Gender</label>
+            <select id="as_gender">
+              <option value="">—</option>
+              <option value="female">Female</option>
+              <option value="male">Male</option>
+              <option value="nonbinary">Non-binary</option>
+              <option value="other">Other / Prefer not to say</option>
+            </select>
+          </div>
+          <div class="field" style="flex:1;min-width:120px">
+            <label>Grade</label>
+            <input type="text" id="as_grade" placeholder="K, 1st, etc." />
+          </div>
+        </div>
         <div class="field">
-          <label>Date of birth <span class="field-sub">(optional — helps match if JR imports them later)</span></label>
-          <input type="date" id="as_dob" />
+          <label>Day school <span class="field-sub">(optional)</span></label>
+          <input type="text" id="as_school_name" placeholder="Mt Pleasant Elementary" />
+        </div>
+
+        <h4 style="margin:18px 0 8px;font-size:13px;text-transform:uppercase;letter-spacing:.5px;color:var(--ink-dim)">Parents / guardians</h4>
+        <div id="as_parents_list"></div>
+        <button type="button" class="btn small" id="as_add_parent_btn">+ Add another parent</button>
+
+        <h4 style="margin:18px 0 8px;font-size:13px;text-transform:uppercase;letter-spacing:.5px;color:var(--ink-dim)">Emergency contact</h4>
+        <div class="field-row">
+          <div class="field">
+            <label>Name</label>
+            <input type="text" id="as_ec_name" />
+          </div>
+          <div class="field">
+            <label>Phone</label>
+            <input type="tel" id="as_ec_phone" />
+          </div>
+          <div class="field">
+            <label>Relationship</label>
+            <input type="text" id="as_ec_relationship" placeholder="Grandparent" />
+          </div>
+        </div>
+        <div class="field">
+          <label>Other authorized pickup <span class="field-sub">(optional)</span></label>
+          <textarea id="as_authorized_pickup" rows="2" placeholder="Names + phones of anyone else allowed to pick up"></textarea>
+        </div>
+
+        <h4 style="margin:18px 0 8px;font-size:13px;text-transform:uppercase;letter-spacing:.5px;color:var(--ink-dim)">Health &amp; safety</h4>
+        <div class="field">
+          <label>Allergies</label>
+          <textarea id="as_allergies" rows="2" placeholder="Food, environmental, medication. Blank = none reported."></textarea>
+        </div>
+        <div class="field">
+          <label>Medical / behavioral notes</label>
+          <textarea id="as_medical_notes" rows="2" placeholder="Asthma, ADHD, sensory needs, etc."></textarea>
+        </div>
+        <div class="field">
+          <label>Photo / video permission</label>
+          <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:4px;font-size:13.5px">
+            <label style="font-weight:400;display:inline-flex;align-items:center;gap:6px;cursor:pointer"><input type="radio" name="as_photo_perm" value="yes" /> Yes</label>
+            <label style="font-weight:400;display:inline-flex;align-items:center;gap:6px;cursor:pointer"><input type="radio" name="as_photo_perm" value="no" /> No</label>
+            <label style="font-weight:400;display:inline-flex;align-items:center;gap:6px;cursor:pointer"><input type="radio" name="as_photo_perm" value="" checked /> Not asked</label>
+          </div>
+        </div>
+
+        <div class="field" style="margin-top:14px">
+          <label>Notes <span class="field-sub">(internal — visible to staff only)</span></label>
+          <textarea id="as_notes" rows="2"></textarea>
         </div>
       </div>
       <div class="modal-foot">
         <button class="btn" id="addStudentCancel">Cancel</button>
         <button class="btn primary" id="addStudentSave">Add to class</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Send-intake result modal: shows the link if email failed / Resend not configured -->
+  <div class="modal-overlay" id="intakeResultOverlay">
+    <div class="modal" style="max-width:520px">
+      <div class="modal-head">
+        <h3 id="intakeResultTitle">Form sent</h3>
+        <button class="btn ghost small" id="intakeResultClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="intakeResultBody" style="font-size:13.5px;line-height:1.5"></div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn primary" id="intakeResultDone">Done</button>
       </div>
     </div>
   </div>

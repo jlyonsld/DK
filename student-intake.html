@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Drama Kids · Enrollment Form</title>
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+  <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16.png" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <meta name="theme-color" content="#0b1638" />
+  <style>
+    :root {
+      --bg: #f5f4ef;
+      --panel: #ffffff;
+      --ink: #1a1f2e;
+      --ink-dim: #6b7384;
+      --border: #e3e1d9;
+      --accent: #10b981;
+      --accent-dark: #059669;
+      --error: #dc2626;
+      --error-bg: #fef2f2;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg); color: var(--ink);
+      min-height: 100vh;
+    }
+    .wrap { max-width: 640px; margin: 0 auto; padding: 24px 16px 64px; }
+    .brand {
+      display: flex; gap: 12px; align-items: center;
+      margin-bottom: 24px;
+    }
+    .brand img { width: 40px; height: 40px; border-radius: 8px; }
+    .brand h1 { font-size: 18px; margin: 0; font-weight: 600; }
+    .brand-sub { font-size: 13px; color: var(--ink-dim); }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 24px;
+      margin-bottom: 16px;
+    }
+    .card h2 {
+      font-size: 17px; font-weight: 600;
+      margin: 0 0 4px 0;
+    }
+    .card .lede {
+      font-size: 14px; color: var(--ink-dim);
+      margin: 0 0 18px 0; line-height: 1.45;
+    }
+    .field { margin-bottom: 14px; }
+    .field-row {
+      display: flex; gap: 10px; flex-wrap: wrap;
+    }
+    .field-row .field { flex: 1; min-width: 140px; }
+    label {
+      display: block; font-size: 13px; font-weight: 500;
+      margin-bottom: 5px; color: var(--ink);
+    }
+    label .opt {
+      color: var(--ink-dim); font-weight: 400; font-size: 12px;
+    }
+    input[type="text"], input[type="email"], input[type="tel"],
+    input[type="date"], select, textarea {
+      width: 100%;
+      padding: 9px 11px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-size: 14px;
+      font-family: inherit;
+      background: white;
+      color: var(--ink);
+    }
+    input:focus, select:focus, textarea:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.12);
+    }
+    textarea { min-height: 70px; resize: vertical; }
+    .parent-row {
+      padding: 12px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      margin-bottom: 10px;
+      background: rgba(0,0,0,0.015);
+    }
+    .parent-row-head {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 8px;
+    }
+    .parent-row-head strong { font-size: 13px; }
+    .btn {
+      padding: 10px 18px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: white;
+      cursor: pointer;
+      font-size: 14px;
+      font-family: inherit;
+      color: var(--ink);
+    }
+    .btn:hover { background: #fafaf6; }
+    .btn.primary {
+      background: var(--accent);
+      color: white;
+      border-color: var(--accent);
+      font-weight: 600;
+    }
+    .btn.primary:hover { background: var(--accent-dark); }
+    .btn.danger-text { color: var(--error); border-color: transparent; padding: 6px 8px; }
+    .btn.small { padding: 6px 12px; font-size: 13px; }
+    .submit-row {
+      display: flex; justify-content: flex-end; gap: 10px;
+      margin-top: 10px;
+    }
+    .checkbox-row {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 14px;
+    }
+    .checkbox-row input { width: auto; }
+    .photo-perm {
+      display: flex; gap: 14px; flex-wrap: wrap; margin-top: 4px;
+    }
+    .photo-perm label {
+      display: flex; align-items: center; gap: 6px;
+      font-weight: 400; cursor: pointer; margin: 0;
+    }
+    .err {
+      color: var(--error); background: var(--error-bg);
+      padding: 12px 14px; border-radius: 8px;
+      border: 1px solid #fecaca;
+      font-size: 14px; margin-bottom: 16px;
+    }
+    .success-card {
+      text-align: center; padding: 36px 24px;
+    }
+    .success-card .check {
+      width: 56px; height: 56px;
+      background: var(--accent); border-radius: 50%;
+      color: white; font-size: 30px;
+      display: flex; align-items: center; justify-content: center;
+      margin: 0 auto 18px;
+    }
+    .loading-card { text-align: center; padding: 48px; color: var(--ink-dim); }
+    .spinner {
+      display: inline-block; width: 20px; height: 20px;
+      border: 2px solid #ddd; border-top-color: var(--accent);
+      border-radius: 50%; animation: spin 1s linear infinite;
+      vertical-align: middle; margin-right: 8px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .req { color: var(--error); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="brand">
+      <img src="logo.png" alt="Drama Kids" onerror="this.style.display='none'" />
+      <div>
+        <h1>Drama Kids · Enrollment</h1>
+        <div class="brand-sub" id="brandSub">Loading…</div>
+      </div>
+    </div>
+
+    <div id="loadingCard" class="card loading-card">
+      <span class="spinner"></span>Verifying your link…
+    </div>
+
+    <div id="errorCard" class="card" style="display:none">
+      <div class="err" id="errorMsg"></div>
+      <p style="font-size:13px;color:var(--ink-dim);margin:0">
+        If you believe this is a mistake, reply to the email you received and we'll send a new link.
+      </p>
+    </div>
+
+    <form id="intakeForm" style="display:none">
+      <div class="card">
+        <h2>Student information</h2>
+        <p class="lede">Tell us about your child.</p>
+
+        <div class="field-row">
+          <div class="field">
+            <label>First name <span class="req">*</span></label>
+            <input type="text" id="f_first_name" required />
+          </div>
+          <div class="field">
+            <label>Last name <span class="req">*</span></label>
+            <input type="text" id="f_last_name" required />
+          </div>
+        </div>
+
+        <div class="field-row">
+          <div class="field" style="flex:0 0 200px">
+            <label>Date of birth</label>
+            <input type="date" id="f_dob" />
+          </div>
+          <div class="field" style="flex:0 0 160px">
+            <label>Gender <span class="opt">(optional)</span></label>
+            <select id="f_gender">
+              <option value="">—</option>
+              <option value="female">Female</option>
+              <option value="male">Male</option>
+              <option value="nonbinary">Non-binary</option>
+              <option value="other">Other / Prefer not to say</option>
+            </select>
+          </div>
+          <div class="field" style="flex:1;min-width:140px">
+            <label>Grade <span class="opt">(e.g. K, 1st, 3rd)</span></label>
+            <input type="text" id="f_grade" placeholder="K" />
+          </div>
+        </div>
+
+        <div class="field">
+          <label>Day school <span class="opt">(optional)</span></label>
+          <input type="text" id="f_school_name" placeholder="Mt Pleasant Elementary" />
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Parents / guardians</h2>
+        <p class="lede">At least one is required. Add a second if both want to be on the contact list.</p>
+        <div id="parentsList"></div>
+        <button type="button" class="btn small" id="addParentBtn">+ Add another parent / guardian</button>
+      </div>
+
+      <div class="card">
+        <h2>Emergency contact</h2>
+        <p class="lede">Someone we can reach if no parent is available.</p>
+        <div class="field-row">
+          <div class="field">
+            <label>Name</label>
+            <input type="text" id="f_ec_name" />
+          </div>
+          <div class="field">
+            <label>Phone</label>
+            <input type="tel" id="f_ec_phone" />
+          </div>
+          <div class="field">
+            <label>Relationship</label>
+            <input type="text" id="f_ec_relationship" placeholder="Grandparent" />
+          </div>
+        </div>
+        <div class="field" style="margin-top:6px">
+          <label>Other authorized pickup people <span class="opt">(optional)</span></label>
+          <textarea id="f_authorized_pickup" placeholder="Names + phone numbers of anyone else allowed to pick up your child"></textarea>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Health &amp; safety</h2>
+        <p class="lede">Anything our teachers should know.</p>
+        <div class="field">
+          <label>Allergies</label>
+          <textarea id="f_allergies" placeholder="Food, environmental, medication. Leave blank if none."></textarea>
+        </div>
+        <div class="field">
+          <label>Medical conditions / accommodations</label>
+          <textarea id="f_medical_notes" placeholder="Asthma, ADHD, sensory needs, behavioral notes, etc."></textarea>
+        </div>
+        <div class="field">
+          <label>Photo / video permission</label>
+          <div class="photo-perm">
+            <label><input type="radio" name="photoPerm" value="yes" /> Yes — OK to use in social / marketing</label>
+            <label><input type="radio" name="photoPerm" value="no" /> No — please don't</label>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Anything else?</h2>
+        <p class="lede">Optional notes you'd like the studio to know.</p>
+        <div class="field">
+          <textarea id="f_notes" placeholder="Their first time on stage? Sibling already enrolled? Anything else."></textarea>
+        </div>
+      </div>
+
+      <div id="submitErr" class="err" style="display:none"></div>
+      <div class="submit-row">
+        <button type="submit" class="btn primary" id="submitBtn">Submit enrollment</button>
+      </div>
+    </form>
+
+    <div id="successCard" class="card success-card" style="display:none">
+      <div class="check">✓</div>
+      <h2 style="margin:0 0 6px">Thank you!</h2>
+      <p style="color:var(--ink-dim);margin:0">
+        Your enrollment for <span id="successClassName">your child's class</span> is complete.
+        Drama Kids will be in touch with next steps.
+      </p>
+    </div>
+  </div>
+
+  <script>
+    const SUBMIT_URL = "https://ybolygqdbjqowfoqvnsz.supabase.co/functions/v1/dk-submit-intake-form";
+    const ANON_KEY = "sb_publishable_rDgEjg8yIHWO9Oq1hjbDfA_sdGdMptA";
+
+    const params = new URLSearchParams(window.location.search);
+    const token = (params.get("token") || "").trim();
+
+    const loadingCard = document.getElementById("loadingCard");
+    const errorCard = document.getElementById("errorCard");
+    const errorMsg = document.getElementById("errorMsg");
+    const form = document.getElementById("intakeForm");
+    const successCard = document.getElementById("successCard");
+    const submitErr = document.getElementById("submitErr");
+    const submitBtn = document.getElementById("submitBtn");
+    const parentsList = document.getElementById("parentsList");
+
+    function showError(msg) {
+      loadingCard.style.display = "none";
+      form.style.display = "none";
+      errorCard.style.display = "";
+      errorMsg.textContent = msg;
+    }
+
+    if (!token) {
+      showError("This page needs an enrollment link. Please use the link from your email.");
+    } else {
+      // No client-side validation step beyond presence — the submit Edge
+      // Function does all real validation. Show the form immediately.
+      loadingCard.style.display = "none";
+      form.style.display = "";
+      document.getElementById("brandSub").textContent =
+        "Please fill out a few details for your child's enrollment.";
+      addParentRow();
+    }
+
+    document.getElementById("addParentBtn").addEventListener("click", function () {
+      if (parentsList.children.length >= 4) return;
+      addParentRow();
+    });
+
+    function addParentRow() {
+      const idx = parentsList.children.length + 1;
+      const row = document.createElement("div");
+      row.className = "parent-row";
+      row.innerHTML = `
+        <div class="parent-row-head">
+          <strong>Parent / guardian ${idx}</strong>
+          ${idx > 1 ? '<button type="button" class="btn danger-text" data-action="remove">Remove</button>' : ""}
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>Full name</label>
+            <input type="text" class="p_name" />
+          </div>
+          <div class="field">
+            <label>Email</label>
+            <input type="email" class="p_email" />
+          </div>
+          <div class="field">
+            <label>Phone</label>
+            <input type="tel" class="p_phone" />
+          </div>
+        </div>
+      `;
+      const removeBtn = row.querySelector('[data-action="remove"]');
+      if (removeBtn) {
+        removeBtn.addEventListener("click", function () {
+          row.remove();
+          renumberParents();
+        });
+      }
+      parentsList.appendChild(row);
+    }
+
+    function renumberParents() {
+      Array.from(parentsList.children).forEach(function (row, i) {
+        const head = row.querySelector(".parent-row-head strong");
+        if (head) head.textContent = "Parent / guardian " + (i + 1);
+      });
+    }
+
+    function val(id) {
+      const el = document.getElementById(id);
+      return el ? (el.value || "").trim() : "";
+    }
+
+    form.addEventListener("submit", async function (e) {
+      e.preventDefault();
+      submitErr.style.display = "none";
+      submitBtn.disabled = true;
+      submitBtn.textContent = "Submitting…";
+
+      const parentNames = [];
+      const parentEmails = [];
+      const parentPhones = [];
+      Array.from(parentsList.querySelectorAll(".parent-row")).forEach(function (row) {
+        const n = row.querySelector(".p_name").value.trim();
+        const e = row.querySelector(".p_email").value.trim();
+        const p = row.querySelector(".p_phone").value.trim();
+        if (n) parentNames.push(n);
+        if (e) parentEmails.push(e);
+        if (p) parentPhones.push(p);
+      });
+
+      const photoPermRadio = document.querySelector('input[name="photoPerm"]:checked');
+      const photoPermission = !photoPermRadio ? null
+        : photoPermRadio.value === "yes" ? true : false;
+
+      const payload = {
+        first_name: val("f_first_name"),
+        last_name: val("f_last_name"),
+        dob: val("f_dob") || null,
+        gender: val("f_gender") || null,
+        parent_names: parentNames,
+        parent_emails: parentEmails,
+        parent_phones: parentPhones,
+        notes: val("f_notes") || null,
+        allergies: val("f_allergies") || null,
+        medical_notes: val("f_medical_notes") || null,
+        photo_permission: photoPermission,
+        emergency_contact_name: val("f_ec_name") || null,
+        emergency_contact_phone: val("f_ec_phone") || null,
+        emergency_contact_relationship: val("f_ec_relationship") || null,
+        school_name: val("f_school_name") || null,
+        grade: val("f_grade") || null,
+        authorized_pickup: val("f_authorized_pickup") || null,
+      };
+
+      if (!payload.first_name || !payload.last_name) {
+        submitErr.style.display = "";
+        submitErr.textContent = "Please enter your child's first and last name.";
+        submitBtn.disabled = false;
+        submitBtn.textContent = "Submit enrollment";
+        return;
+      }
+      if (parentNames.length === 0 && parentEmails.length === 0 && parentPhones.length === 0) {
+        submitErr.style.display = "";
+        submitErr.textContent = "Please fill in at least one parent / guardian.";
+        submitBtn.disabled = false;
+        submitBtn.textContent = "Submit enrollment";
+        return;
+      }
+
+      try {
+        const res = await fetch(SUBMIT_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "apikey": ANON_KEY,
+            "Authorization": "Bearer " + ANON_KEY,
+          },
+          body: JSON.stringify({ token: token, payload: payload }),
+        });
+        const data = await res.json().catch(function () { return {}; });
+        if (!res.ok || !data.ok) {
+          submitErr.style.display = "";
+          submitErr.textContent = data.error || ("Submission failed (HTTP " + res.status + ").");
+          submitBtn.disabled = false;
+          submitBtn.textContent = "Submit enrollment";
+          return;
+        }
+
+        form.style.display = "none";
+        successCard.style.display = "";
+        if (data.class_name) {
+          document.getElementById("successClassName").textContent = data.class_name;
+        }
+      } catch (e) {
+        submitErr.style.display = "";
+        submitErr.textContent = "Network error: " + (e.message || String(e));
+        submitBtn.disabled = false;
+        submitBtn.textContent = "Submit enrollment";
+      }
+    });
+  </script>
+</body>
+</html>
