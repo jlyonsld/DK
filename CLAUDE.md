@@ -200,6 +200,15 @@ response-console-v3/
     │                                        enum. Self-INSERT, admin-only SELECT.
     │                                        Foundation for the freemium-conversion
     │                                        work. See §4.26.
+    ├── phase_t7b_par_promo_dismiss.sql    ← Adds par_promo_events_self_read
+    │                                        policy so the dismiss UX can check
+    │                                        own-history client-side. No table
+    │                                        changes. See §4.26.
+    ├── phase_t13_per_school_closures.sql  ← Adds nullable closures.school_id
+    │                                        FK so multi-school franchises can
+    │                                        scope a closure to one location.
+    │                                        NULL = global (preserves legacy
+    │                                        rows). See §4.21.
     ├── phase_t10_inventory.sql           ← inventory_items + inventory_assignments
     │                                       tables, public inventory-photos Storage
     │                                       bucket, new edit_inventory permission.
@@ -327,7 +336,12 @@ sub_claims               — teachers' offers to cover an open sub_request.
 closures                 — holidays / non-class dates rendered on Schedule views
 dk_config                — singleton row for franchise-level config
                            (par_franchise_org_id, sender_email, sender_name)
-role_audit               — audit log for profile.role changes
+role_audit               — audit log for profile.role changes; AFTER INSERT
+                           trigger queues a mirror to PAR via role_audit_outbox
+role_audit_outbox        — durable outbox for DK→PAR audit mirroring (T6e).
+                           Drained every minute by process_role_audit_outbox()
+                           via pg_cron with exponential backoff (1m→24h, 6
+                           attempts). RLS-locked; access via SECURITY DEFINER.
 install_nonces           — replay protection for spoke install tokens
 sync_log                 — append-only log of sync + webhook events
 ```
@@ -526,6 +540,14 @@ The notify modal (`openNotifyModal({ kind, cls, sessionDate, ... })`) handles th
 
 Permissions: schools and class_cancellations writes are gated on the existing `edit_classes` permission — no new permission name. Anyone signed in can SELECT both tables (the schedule needs cancellation data for every viewer to render line-throughs correctly).
 
+**T13 (✅ shipped) — per-school closures.** `closures` gets a nullable `school_id` FK to `schools` (NULL = legacy global behavior, preserves every pre-T13 row without backfill). Multi-school franchises can now scope a closure to one location — e.g. "Mt Pleasant ES — snow day" leaves classes at every other school untouched. The closures modal grows a school dropdown (defaults to "All schools (global)"), and the existing list rows show a 🌐/📍 scope chip so admins can scan global vs. scoped at a glance.
+
+**Rendering rule (load-bearing — see §5 gotcha):**
+- **Global closures** (`school_id is null`) trigger the prominent visual treatments: red full-cell hatch on Month view, the cell-wide `.closed` styling on Week view, AND per-class block dimming for every class on that day.
+- **Per-school closures** ONLY dim individual class blocks/rows whose `classes.school_id` matches; the cell-level red hatch stays off. The closure pill on Day/Week/Month still mentions the closure (with school name in parens) so the admin sees the full picture, but the visual prominence is reserved for "everyone is off."
+
+Three new helpers in `app.js`: `globalClosuresForDate(date)` filters to `school_id is null`; `closuresForClassOnDate(cls, date)` returns the closures that affect this specific class (global OR matching school); `closureLabelWithScope(cl)` formats labels like "Snow day (Mt Pleasant ES)" for tooltips and pills. Per-class dimming uses a new `.sched-closed` CSS class (analogous to `.sched-cancelled` but with a 🗓 badge and amber color so closure ≠ cancellation visually). No new permission name — `edit_closures` covers writes regardless of scope.
+
 ### 4.22 Curriculum library is private-by-default with three slices
 
 DK corporate is serious about access to its curriculum, so the library is built as a layered cake instead of a single feature. Each slice ships independently:
@@ -576,7 +598,7 @@ The **role-management modal** edits role + linked teacher + granted permissions 
 
 **The four RPCs:**
 
-- **`set_profile_role(p_profile_id, p_new_role, p_reason)`** — server-side guards: caller must be `is_admin_or_above()`; only super_admin can grant or revoke the super_admin role; refuses to demote the LAST super_admin (counts other super_admins; raises if zero). The T0 `profiles_role_audit` trigger fires on the resulting UPDATE so every change lands in `role_audit` automatically. The reason text is logged via `raise notice` for ad-hoc inspection — a future migration could widen `role_audit` to carry it as a column if it turns out to matter for compliance.
+- **`set_profile_role(p_profile_id, p_new_role, p_reason)`** — server-side guards: caller must be `is_admin_or_above()`; only super_admin can grant or revoke the super_admin role; refuses to demote the LAST super_admin (counts other super_admins; raises if zero). The T0 `profiles_role_audit` trigger fires on the resulting UPDATE so every change lands in `role_audit` automatically. The reason text is persisted on `role_audit.reason` — `set_profile_role` calls `set_config('par.audit_reason', p_reason, true)` (transaction-local) and the trigger reads it via `current_setting('par.audit_reason', true)`, so the reason makes it into the row instead of just a `raise notice`. **If you add another role-mutating RPC, propagate the reason via `set_config` or it'll land NULL in audit.** The same `role_audit` insert also fires `role_audit_emit_to_par()`, which queues a row in `role_audit_outbox`; a 1-min pg_cron worker (`process_role_audit_outbox()`) drains the outbox to PAR's `spoke-emit-audit` Edge Function with exponential backoff (1m→5m→15m→1h→6h→24h, 6 attempts max). Idempotency is enforced PAR-side via a unique partial index on `metadata->>'spoke_audit_id'`, so multi-send from retries is safe. The trigger no longer calls `pg_net` directly — outbox writes are transactional with the `role_audit` insert.
 - **`set_profile_permissions(p_profile_id, p_granted, p_revoked)`** — overwrites the two text[] columns. Granted/revoked permission names aren't validated against the bundle: `has_permission()` is the runtime gate, so a typo'd name silently grants nothing rather than erroring. UI shows the canonical list of names; this RPC trusts what the UI sends. Same super_admin guard as `set_profile_role` (only super_admin can edit a super_admin row's permissions).
 - **`link_profile_to_teacher(p_profile_id, p_teacher_id)`** — links / unlinks (NULL = unlink). The unique partial index `profiles_teacher_id_unique` (where teacher_id is not null) enforces one-profile-per-teacher; the RPC just gates the write.
 - **`redeem_invitation_for(p_profile_id)`** — handles the case `handle_new_user` can't catch. The trigger only fires on `auth.users INSERT` (first-ever sign-in). If a user already has a DK profile when an admin creates the invitation, nothing redeems it. The RPC finds the most-recent pending non-expired `teacher_invitations` row by the target profile's auth email, promotes the role, links `profile.teacher_id` from the invitation if set, backfills `teachers.email` if missing, and stamps `accepted_at`. Authorization: caller is the target user themselves OR `is_admin_or_above()` — so the same RPC powers both the admin "Redeem invite" button on the Users tab AND a (future) self-service path on the user's own profile.
@@ -640,7 +662,30 @@ The `super_admin` / `admin` split exists specifically so a future copy test can 
 
 **Realtime publication:** `par_promotion_events` is in `supabase_realtime`. Not strictly required for v1 (no card re-renders on someone-else-logged-an-impression), but consistent with the rest of the schema and cheap. If T7b lands aggregate-counter cards on an admin dashboard, they'll get live updates for free.
 
-**Out of scope for T7a:** usage-based triggers (T7b — schema already supports via new variant keys); dismiss UX (enum has the value, no UI yet); admin-side funnel dashboard (read-only SQL today, in-app card later); per-impression metadata payloads.
+**T7b (✅ shipped) — usage-tier variants, dismiss UX, admin funnel report.** Layered onto the same `par_promotion_events` table, no schema rewrite. One tiny migration (`phase_t7b_par_promo_dismiss.sql`) adds a parallel permissive `par_promo_events_self_read` policy gated on `profile_id = auth.uid()` so the dismiss check can read own-history client-side. Multiple permissive policies are OR'd — admins still see everything via `par_promo_events_admin_read`. Reverses T7a's "per-user reads aren't useful" stance now that the dismiss UX needs them.
+
+Two new tier-keyed variants for unlinked teachers, picked by `resolveParVariant()` after counting **distinct (class_id, session_date) sessions** unioned across `state.attendance` (entries on classes the teacher is on) and `state.clockIns` (rows where teacher_id = me). Union avoids under-counting teachers who use only one of the two surfaces:
+
+| Variant | Threshold | Pitch |
+|---|---|---|
+| `unlinked_teacher_attendance_20` | ≥20 sessions | "You've taught 20+ sessions — PAR keeps your family schedule too" |
+| `unlinked_teacher_attendance_50` | ≥50 sessions | "50+ sessions taught — meet PAR" |
+
+Tier order is strongest-first; resolver picks the highest tier the user qualifies for AND hasn't dismissed in the last `PAR_DISMISS_DAYS` (7). Thresholds and dismiss-window live as constants next to `PAR_VARIANT_COPY` so a single PR retunes both numbers + copy. **Linked variants stay unchanged** (Sharon already pays via the franchise org). **`unlinked_admin` doesn't get a usage tier** — admins don't measurably benefit from a "you've used DK heavily" pitch the way a teacher benefits from "you'd use this for your family too," and the original copy test was scoped to teachers.
+
+**Dismiss UX is tier-only by design.** Only `dismissable: true` variants render the small `×` button; the four base variants (`unlinked_admin`, `unlinked_teacher`, all `linked_*`) double as nav so hiding them would orphan the link. The button is a sibling of the anchor, not nested inside it (button-in-anchor is invalid HTML and triggers navigation on click). On click, the handler `preventDefault + stopPropagation`s, calls `logParPromoEvent(variant, "dismiss")`, AND optimistically pushes a synthetic row into `state.parPromoEvents` (id `_local_<ts>`) so the next render flips to the lower tier without waiting for the realtime round-trip. The funnel report filters out `_local_*` rows so a just-clicked dismiss doesn't double-count.
+
+`isVariantDismissed(variantKey)` reads `state.parPromoEvents` (loaded in `reloadAll()` under the new self-read policy) and checks for any `dismiss` row newer than `now - PAR_DISMISS_DAYS`. The dismissed tier surfaces again automatically after the window — no scheduled job, just a date comparison at render time.
+
+**Admin funnel report** is a new `REPORTS` registry entry (§4.15 plug-in pattern), admin-only via the existing `ROLE_TAB_VISIBILITY` gate plus a defensive `isAdminOrAbove()` guard inside `renderParFunnelReport`. Aggregates the existing date-range state into:
+- Summary cards: Impressions / Clicks / Dismisses / CTR / Dismiss rate.
+- By-variant table: variant_key × {impressions, clicks, dismisses, CTR, dismiss-%}, sorted impressions-desc.
+- Daily impressions sparkline: continuous day series across the range (empty days render a gray 1px stub, not a gap), bars scaled to the tallest day.
+- CSV export: raw events for spreadsheet analysis (CreatedAt, ProfileId, Variant, Kind, Surface, Metadata).
+
+`par_promotion_events` is added to `setupRealtime()`'s watched tables, so the funnel updates live across browsers within the 300ms debounce — useful for watching a real-time A/B unfold without manual refresh.
+
+**Out of scope for T7b:** copy-test variant ids in `metadata` (the field exists, no producer yet); per-day click + dismiss overlay on the sparkline (single-color impression bars are easier to read at 90+ days); per-user funnel drilldown (admin can grep the CSV); thresholds for `unlinked_admin` (intentionally no admin tier — see above); auto-promotion of variants out of dismissal after a behavior change ("they took 50 more sessions, re-pitch them" — the 7-day window already handles this gracefully).
 
 ### 4.27 Inventory — items + class/event assignments + conflict detection (T10)
 
@@ -819,6 +864,14 @@ T11 turns the previously bare-bones Add Student modal (first / last / DoB only) 
 
 **The intake-row "Pending parent forms" subsection is gated on RLS, not role.** Admins see all pending intakes for a class; teachers see them only if they're on `class_teachers` for that class (RLS policy `intake_requests_select_teacher` does the email-match join through `teachers.email`). If a teacher reports they don't see a pending form they expected, check whether their `teachers.email` is set AND matches their `auth.jwt() ->> 'email'`. Same fragility as the teacher-bento "today's shifts" lookup pre-T6d (CLAUDE.md §5).
 
+**Cell-level red hatch on Month view fires ONLY for global closures (T13).** The `closed-full` class on a `.sched-month-cell` and the cell-wide `.closed` modifier on a `.sched-week-daycol` come from `globalClosuresForDate(d)`, NOT `closuresForDate(d)`. This is by design: a per-school closure ("Mt Pleasant ES is on a snow day") shouldn't darken every other school's classes on the grid for that day — it would tell the admin nothing useful. Per-school closures dim only the affected class rows via the `.sched-closed` class. **Don't refactor the cell treatment to use `closuresForDate`** — you'll re-introduce the multi-school noise problem T13 fixed. If you genuinely want a "any closure today" cell hint, add a separate, lighter visual (e.g. a corner dot) — don't overload the red hatch.
+
+**`closuresForClassOnDate` is the only correct way to ask "is this class closed today?" (T13).** Don't filter `state.closures` by date alone — a class at School A is unaffected by a closure scoped to School B, but the naive filter would say it's closed. The helper handles both global (school_id null → affects every class) and scoped (school_id matches `cls.school_id`) cases. If a class has neither `cls.school_id` nor `cls.location` set (a manually-added class with no school), only global closures will show it as closed — which is correct, since there's nothing to scope a per-school closure against.
+
+**Base PAR-card variants must NOT be dismissable (T7b).** Only variants flagged `dismissable: true` in `PAR_VARIANT_COPY` render the `×` button. The four base variants — `unlinked_admin`, `unlinked_teacher`, `linked_admin`, `linked_franchise_owner`, `linked_teacher` — all double as the user's primary nav to PAR; hiding them orphans the link. **Don't add a `dismissable: true` to any base variant** — the only honest UX response to a dismiss on a base would be to render nothing, and there's no replacement nav surface for it. If a future requirement actually wants "hide PAR forever," add it as a profile-level setting, not a per-event dismiss. The dismiss button is also a sibling of the anchor, not nested inside it; nested interactive content is invalid HTML and clicks pass through to the anchor on some browsers, navigating the user to PAR even when they meant to dismiss.
+
+**`isVariantDismissed` reads from `state.parPromoEvents`, not Supabase directly (T7b).** The check runs on every `renderParBridgeCard()` call (once per home tab render). Querying live would mean a Supabase round-trip per render, which the realtime debounce already handles for free — the in-memory cache is rehydrated by `reloadAll()` and updated by the optimistic `_local_*` push on dismiss-click. **Don't refactor the check to query the DB directly** — you'd reintroduce the latency the optimistic push exists to hide. If `state.parPromoEvents` ever grows huge (years of activity at scale), paginate the SELECT in `reloadAll` to "last 60 days" — the dismiss check only needs `PAR_DISMISS_DAYS` of history and the funnel report's date picker tops out at 90 days by preset.
+
 ---
 
 ## 6. Open issues and half-built features
@@ -850,7 +903,7 @@ T11 turns the previously bare-bones Add Student modal (first / last / DoB only) 
 
 - **Phase T7 — freemium upgrade prompt + conversion tracking.** Split into two slices.
   - **T7a (✅ shipped):** PAR card has five variants keyed off role × link state (`unlinked_admin` / `unlinked_teacher` / `linked_franchise_owner` / `linked_admin` / `linked_teacher`); every impression and click logs to the new append-only `par_promotion_events` table. Self-INSERT, admin-only SELECT. See `migrations/phase_t7a_par_promo_events.sql`, `T7A_VERIFICATION.md`, and §4.26.
-  - **T7b (🔲 not started):** Usage-based triggers ("you've taken attendance 20 times, want PAR for your family too?") via new variant keys keyed off `attendance` / `clock_ins` row counts; dismiss UX (the `dismiss` enum value already exists); admin-side funnel dashboard reading `par_promotion_events` aggregates. Calibrate trigger thresholds against a week of T7a data before shipping.
+  - **T7b (✅ shipped):** Usage-tier variants `unlinked_teacher_attendance_20` / `_50` (thresholds against unioned attendance + clock-in session counts), 7-day dismiss UX with optimistic local update, admin **PAR funnel** report (Reports-tab entry with summary cards + by-variant table + daily impressions sparkline + CSV export). One small migration (`phase_t7b_par_promo_dismiss.sql`) adds the `par_promo_events_self_read` policy that the dismiss check reads against. No new permission name. See `migrations/phase_t7b_par_promo_dismiss.sql`, `T7B_VERIFICATION.md`, and §4.26.
 
 - **Phase T10 — physical inventory (props/costumes/supplies/equipment) + class/event assignments + conflict detection.** ✅ **Shipped.** Two new tables (`inventory_items`, `inventory_assignments`) with a polymorphic-target shape (assignment carries nullable `class_id` + nullable `event_id`, exactly-one-set check). One new permission `edit_inventory` (super_admin/admin/manager) added to both SQL `has_permission()` and JS `PERM_BUNDLES`. Public `inventory-photos` Storage bucket mirrors the `infographics` pattern. SELECT on both tables open to all signed-in users so the schedule + class detail + event editor can render assignments for everyone. New top-level **Inventory** tab with search + tag-filter chips + card grid (photo, location, tags, status, conflict badge, re-order link). Item editor modal handles CRUD + photo upload + an inline "Current & upcoming assignments" list with mark-returned/remove. Assign-picker modal opens from the class detail panel "📦 Assign inventory" button or the event editor's "+ Assign inventory…" button — multi-select with conflict warnings. Class detail panel surfaces an "Inventory for [date]:" chip row to all roles (teachers see what's been pulled). Conflict math is a timestamp-range overlap on `usage_starts_at` / `usage_ends_at` (materialized at write time from class session_date+times or event starts_at/ends_at). Out of scope for v1: quantity tracking, check-out/check-in workflow, barcode scanning, per-school scoping, home-bento integration. See `migrations/phase_t10_inventory.sql` and §4.27.
 
@@ -880,7 +933,7 @@ T11 turns the previously bare-bones Add Student modal (first / last / DoB only) 
 
 - **The class `times` regex parser is strict.** See §5. Non-JR classes entered manually with unusual time formats may break the Week view (they'd silently not render blocks).
 
-- **Closures are still global, not per-school.** A closure on a given date flags EVERY class on the month grid that day, regardless of `classes.school_id`. Fine for single-location franchises; wrong for multi-school franchises where e.g. Mt Pleasant ES is closed but West Ashley ES isn't. Phase T8 promoted schools to first-class (see §4.21) — the natural follow-up is `closures.school_id` (nullable = all schools, non-null = per-school) and a school filter on the closures modal. Until that ships, single-class cancellations should go through `class_cancellations` (the "Cancel class" button) rather than closures.
+- **Single-class cancellations still go through `class_cancellations`, not closures.** Closures cancel a whole school's classes on a date; the per-class "Cancel class" button on the class detail panel is the right surface for one session no-showing. Don't paper over a per-class issue with a per-school closure — it'll dim every other class at that school for the day too. (T13 made closures per-school-aware; this rough edge no longer applies to multi-school franchises wanting "this whole district is off" — they pick the school in the closure modal.)
 
 - **Month-view `+N more` is calibrated to the web row cap.** The renderer computes overflow as `classes.length - 3`. On ≤720px CSS hides the 3rd row, so a cell with 4 classes visually shows 2 rows + "+1 more" even though 2 are hidden. Tap opens Day view where all render, so it's mild — but if it matters, move the overflow computation into CSS via `:nth-child` counters or re-render on viewport change.
 
@@ -927,4 +980,5 @@ JACKRABBIT_ORG_ID                # "551000" for the Charleston franchise
 | T7a — PAR promotion variant copy + impression/click logging | ✅ Shipped |
 | T10 — Inventory items + class/event assignments + conflict detection | ✅ Shipped |
 | T11 — Student intake (PII columns + parent self-fill enrollment form) | ✅ Shipped |
-| T7b — Usage-based smart triggers (attendance / clock-in thresholds) + dismiss UX + admin funnel dashboard | 🔲 Not started |
+| T7b — Usage-tier variants (≥20 / ≥50 sessions) + dismiss UX + admin PAR-funnel report | ✅ Shipped |
+| T13 — Per-school closures (nullable closures.school_id, scoped vs. global rendering) | ✅ Shipped |
