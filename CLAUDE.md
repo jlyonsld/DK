@@ -340,8 +340,12 @@ role_audit               — audit log for profile.role changes; AFTER INSERT
                            trigger queues a mirror to PAR via role_audit_outbox
 role_audit_outbox        — durable outbox for DK→PAR audit mirroring (T6e).
                            Drained every minute by process_role_audit_outbox()
-                           via pg_cron with exponential backoff (1m→24h, 6
-                           attempts). RLS-locked; access via SECURITY DEFINER.
+                           via pg_cron job named `role-audit-outbox`, with
+                           exponential backoff (1m→24h, 6 attempts). RLS-locked;
+                           access via SECURITY DEFINER. Backlog visible via
+                           the `role_audit_outbox_summary` view (status counts +
+                           oldest pending). PAR-side tripwire on /admin shows
+                           lag if DK's outbox stops delivering.
 install_nonces           — replay protection for spoke install tokens
 sync_log                 — append-only log of sync + webhook events
 ```
