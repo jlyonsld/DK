@@ -176,6 +176,7 @@
             <div style="display:flex; gap:8px; align-items:center;">
               <button class="btn small" id="manageCategoriesBtn">⚙ Manage categories</button>
               <button class="btn small" id="manageInfographicsBtn">🖼 Manage infographics</button>
+              <button class="btn small" id="manageMailchimpBtn">⚙ Mailchimp</button>
               <button class="btn primary small" id="newTemplateBtn">＋ New template</button>
             </div>
           </div>
@@ -769,12 +770,15 @@
       <div class="modal-body">
         <div class="field">
           <label>Add a closure</label>
-          <div style="display:flex;gap:6px;align-items:center">
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
             <input type="date" id="closureDate" style="flex:0 0 160px" />
-            <input type="text" id="closureLabel" placeholder="e.g. Winter break" style="flex:1" />
+            <input type="text" id="closureLabel" placeholder="e.g. Winter break" style="flex:1;min-width:180px" />
+            <select id="closureSchool" style="flex:0 0 200px">
+              <option value="">All schools (global)</option>
+            </select>
             <button class="btn primary small" id="closureAdd">Add</button>
           </div>
-          <div class="field-hint">Classes scheduled on this date will be visually flagged on the Schedule views.</div>
+          <div class="field-hint">Pick a school to scope the closure to that location only. Global closures dim every class on the date and add a red hatch on the month grid; per-school closures dim only the affected class rows.</div>
         </div>
         <div class="field">
           <label>Existing closures</label>
@@ -1667,6 +1671,90 @@
       <div class="modal-foot">
         <button class="btn" id="categoriesModalDone">Done</button>
         <button class="btn primary" id="newCategoryBtn">＋ New category</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- T12: Mailchimp settings modal — opened from the Templates tab head.
+       Super_admin only. Connect/test the API key, pick the audience,
+       expose the webhook URL, audit the merge fields, and surface the
+       sync-outbox status. -->
+  <div class="modal-overlay" id="mailchimpOverlay">
+    <div class="modal" style="max-width:680px">
+      <div class="modal-head">
+        <h3>Mailchimp sync</h3>
+        <button class="btn ghost small" id="mailchimpModalClose">✕</button>
+      </div>
+      <div class="modal-body">
+
+        <!-- Connect -->
+        <section class="mc-section">
+          <h4>1. Connect</h4>
+          <div class="field">
+            <label>API key</label>
+            <input type="password" id="mc_api_key" placeholder="paste full key (e.g. abc123def…-us21)" autocomplete="off" />
+            <div class="field-hint" id="mc_api_key_hint">
+              From Mailchimp → Profile → Extras → API keys → Create A Key. We parse the server prefix from the suffix.
+            </div>
+          </div>
+          <div style="display:flex; gap:8px; align-items:center; margin-top:8px;">
+            <button class="btn small" id="mc_test_btn">Test connection</button>
+            <span id="mc_test_status" class="muted small"></span>
+          </div>
+          <div class="field" id="mc_audience_field" style="display:none; margin-top:14px;">
+            <label>Audience</label>
+            <select id="mc_audience_select"></select>
+          </div>
+          <div style="display:flex; gap:8px; align-items:center; margin-top:10px;">
+            <label class="checkbox-label" style="font-size:13px;">
+              <input type="checkbox" id="mc_double_opt_in" checked />
+              Use Mailchimp's confirmation email (double opt-in) for new subscribers
+            </label>
+          </div>
+          <div class="field-hint" style="margin-top:6px;">
+            With double opt-in on, new contacts arrive in Mailchimp as <b>pending</b> until they click the confirmation email — safer for deliverability. Off = instant subscribe (only check this if your audience permission allows it).
+          </div>
+        </section>
+
+        <!-- Webhook -->
+        <section class="mc-section">
+          <h4>2. Webhook</h4>
+          <div class="field">
+            <label>Paste this URL into Mailchimp → Audience → Settings → Webhooks</label>
+            <div style="display:flex; gap:8px;">
+              <input type="text" id="mc_webhook_url" readonly style="flex:1; font-family:monospace; font-size:12px;" />
+              <button class="btn small" id="mc_webhook_copy">Copy</button>
+            </div>
+            <div class="field-hint">
+              In Mailchimp's webhook setup, check all event types (subscribes, unsubscribes, profile updates, cleaned addresses, email changes). The secret in the URL authenticates Mailchimp's calls back to us — keep it private.
+            </div>
+          </div>
+        </section>
+
+        <!-- Merge fields -->
+        <section class="mc-section">
+          <h4>3. Merge fields</h4>
+          <div id="mc_merge_fields_status" class="muted small">Test the connection above to see merge-field status.</div>
+          <div id="mc_merge_fields_list" style="margin-top:8px;"></div>
+        </section>
+
+        <!-- Sync status pill -->
+        <section class="mc-section">
+          <h4>4. Sync status</h4>
+          <div id="mc_sync_status_pill" class="mc-pill mc-pill-idle">Loading…</div>
+          <div style="display:flex; gap:8px; align-items:center; margin-top:10px;">
+            <button class="btn small" id="mc_retry_stuck">Retry stuck rows</button>
+            <span id="mc_retry_status" class="muted small"></span>
+          </div>
+          <div class="field-hint" style="margin-top:6px;">
+            Rows retry up to 5 times before they go "stuck." The drain runs every 60 seconds.
+          </div>
+        </section>
+
+      </div>
+      <div class="modal-foot">
+        <button class="btn" id="mc_modal_done">Done</button>
+        <button class="btn primary" id="mc_save_btn">Save</button>
       </div>
     </div>
   </div>

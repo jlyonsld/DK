@@ -216,16 +216,43 @@ response-console-v3/
     │                                       event; conflict detection via timestamp-
     │                                       range overlap on assignment rows.
     │                                       See §4.27.
-    └── phase_t11_student_intake.sql       ← students PII columns (allergies,
-                                            medical_notes, photo_permission,
-                                            emergency contact, school_name,
-                                            grade, authorized_pickup) +
-                                            student_intake_requests table
-                                            (sha256-hashed token, 14-day expiry).
-                                            cancel_student_intake RPC. Backs
-                                            the expanded Add Student modal +
-                                            parent-self-fill form
-                                            (student-intake.html). See §4.28.
+    ├── phase_t11_student_intake.sql       ← students PII columns (allergies,
+    │                                       medical_notes, photo_permission,
+    │                                       emergency contact, school_name,
+    │                                       grade, authorized_pickup) +
+    │                                       student_intake_requests table
+    │                                       (sha256-hashed token, 14-day expiry).
+    │                                       cancel_student_intake RPC. Backs
+    │                                       the expanded Add Student modal +
+    │                                       parent-self-fill form
+    │                                       (student-intake.html). See §4.28.
+    ├── phase_t12_mailchimp_sync.sql       ← Per-franchise Mailchimp sync.
+    │                                       Adds dk_config columns
+    │                                       (mailchimp_api_key, _server_prefix,
+    │                                       _audience_id, _webhook_secret,
+    │                                       _double_opt_in default true) +
+    │                                       students.marketing_status (subscribed/
+    │                                       unsubscribed/cleaned/pending) +
+    │                                       mailchimp_sync_outbox (per-row
+    │                                       upsert/archive queue) +
+    │                                       mailchimp_sync_log (append-only
+    │                                       audit, both directions). Triggers
+    │                                       on students INSERT/UPDATE +
+    │                                       enrollments any-change enqueue
+    │                                       outbox rows. pg_cron job
+    │                                       `dk-mailchimp-drain` (every 60s)
+    │                                       drains via the like-named Edge
+    │                                       Function. Vault secret
+    │                                       `mailchimp_drain_cron_secret`
+    │                                       authenticates the cron call. See §4.29.
+    └── phase_t12_mailchimp_cron_secret_rpc.sql
+                                          ← Tiny RPC wrapper
+                                            `get_mailchimp_drain_cron_secret()`
+                                            (security definer, service-role only)
+                                            so the drain Edge Function can read
+                                            the vault secret via PostgREST
+                                            without exposing the vault schema
+                                            directly. See §4.29.
 ```
 
 **Pre-T4 migrations (not in repo) live at the parent folder:**
@@ -260,6 +287,9 @@ DK Optimization/                ← parent folder, NOT a git repo
 | `jackrabbit-sync` | false | pg_cron-scheduled job that pulls class openings from Jackrabbit and upserts `classes`. |
 | `zapier-enrollment-webhook` | false | Authed via `X-Zap-Secret` header. Zapier pushes enrollment/student changes here. |
 | `curriculum-fetch` | false | T5c. The ONLY path that mints signed URLs against the private `curriculum-assets` bucket. Verifies caller is the assigned teacher (or an admin/manager preview), re-runs the lead-window check server-side, mints a 5-minute signed URL via service-role, and inserts a row into `curriculum_access_log`. **Verifies the JWT manually inside the handler via `auth.getUser(jwt)`** — same pattern as `par-identity-proxy`. We tried `verify_jwt: true` first but the platform's gateway rejections weren't appearing in function logs, which made debugging impossible. Manual verification still requires a valid JWT but gives full log visibility + descriptive error messages. See §4.22. |
+| `dk-mailchimp-drain` | false | T12. Triggered every 60s by pg_cron (`dk-mailchimp-drain` job). Reads up to 50 rows from `mailchimp_sync_outbox`, resolves student → most-recent enrollment → class → school, and PUTs each parent into the configured Mailchimp audience with allow-listed merge fields (FNAME, LNAME, STUDENT, CLASS, SCHOOL, STATUS) + dk-/class:/school: tags. Authenticated via `X-Cron-Secret` header compared against the `mailchimp_drain_cron_secret` vault entry (read via the `get_mailchimp_drain_cron_secret()` RPC at request time — NOT via an Edge Function env var, so the secret never has to be set out-of-band). Returns `{ skipped: 'not_configured' }` if `dk_config.mailchimp_api_key` is null. See §4.29. |
+| `mailchimp-webhook` | false | T12. Public endpoint that receives Mailchimp's audience webhooks. Authenticated by the `?secret=<token>` query param compared constant-time against `dk_config.mailchimp_webhook_secret`. Updates `students.marketing_status` on subscribe / unsubscribe / cleaned and rewrites the email in `parent_emails` arrays on `upemail`. Always returns 200 (even on lookup miss) so MC doesn't retry-storm against parents not yet in DK. See §4.29. |
+| `dk-mailchimp-ping` | true | T12. Helper called from the admin Mailchimp settings modal. Verifies a pasted API key reaches MC (`/3.0/ping`), lists audiences, lists merge fields for a chosen audience, and (optionally) creates missing required merge fields. Super_admin gate via `is_super_admin()` RPC under the user JWT. See §4.29. |
 
 **Tables in DK's public schema** (roughly in order of importance):
 
@@ -348,6 +378,13 @@ role_audit_outbox        — durable outbox for DK→PAR audit mirroring (T6e).
                            lag if DK's outbox stops delivering.
 install_nonces           — replay protection for spoke install tokens
 sync_log                 — append-only log of sync + webhook events
+mailchimp_sync_outbox    — T12. Per-row queue of upsert/archive ops for the
+                           Mailchimp drain. One row per (student, parent_email)
+                           per change; trigger-fed; drained every 60s. RLS:
+                           admin-read only, no client writes. See §4.29.
+mailchimp_sync_log       — T12. Append-only audit of every MC sync interaction
+                           (outbound upserts/tags/skips/failures + inbound
+                           webhook events). RLS: admin-read only. See §4.29.
 ```
 
 ---
@@ -752,6 +789,37 @@ T11 turns the previously bare-bones Add Student modal (first / last / DoB only) 
 
 **14-day expiry, no auto-purge.** Like `closures` and `install_nonces`, expired/cancelled intake rows accumulate. Volume is low (one per dk_local student) and they're useful audit trail (who sent what to whom, when). If volume becomes a concern, add a nightly pg_cron purge of `status in ('expired','cancelled') and sent_at < now() - interval '90 days'` — same pattern §5 calls out for closures.
 
+### 4.29 Mailchimp sync — outbox queue + drain + webhook (T12)
+
+T12 turns DK into the system of record for student / enrollment / class data and Mailchimp into the marketing-email send engine. Per-franchise audience: each PAR DK install points at its own Mailchimp account (no shared audience across franchises). Sync key is `lower(parent_email)`. **One-way for now** — DK pushes to MC; MC's webhooks only update `students.marketing_status` (subscribed / unsubscribed / cleaned / pending) and rewrite `parent_emails` array entries on `upemail`. No bidirectional student-row writes from MC.
+
+**Schema (one queue table, polymorphic op).** `mailchimp_sync_outbox` carries `(student_id, parent_email, op, attempts, completed_at, last_error)`. `op ∈ {upsert, archive}`. The `archive` path is plumbed but not yet emitted (when a parent email is dropped from `students.parent_emails`, we don't enqueue an archive — it's a v2 concern). One row per (student, parent_email) per change; trigger-fed; drained every 60s. **Why one polymorphic table, not two:** the drain reads the whole queue in `enqueued_at` order; splitting upsert/archive would force two SELECTs and a merge-sort. The CHECK on `op` keeps the discriminator strict.
+
+**Triggers fire from two places.** `students_mc_sync` runs `AFTER INSERT OR UPDATE OF first_name, last_name, parent_emails, parent_names, status` and inserts one outbox row per non-empty `parent_emails` entry. `enrollments_mc_sync` runs on every enrollments INSERT/UPDATE/DELETE, looks up the student's `parent_emails`, and enqueues the same. Both are `security definer` — the trigger is service-role-equivalent so it can write to the outbox even when the user-side INSERT/UPDATE is RLS-restricted (e.g. teacher adding a student via the dk_local flow). Triggers don't try to dedupe within a transaction; idempotent upsert at MC means double-enqueue is just a redundant API call, not a correctness bug. **The trigger column list is load-bearing** — adding a new students column doesn't mean it should re-trigger MC sync. Anything sensitive (allergies, medical_notes, payment_details, waivers) MUST stay off both this list and the drain's allow-list.
+
+**Drain is `dk-mailchimp-drain` (verify_jwt: false, every 60s via pg_cron).** Auth via the `X-Cron-Secret` header compared against the value returned by the `get_mailchimp_drain_cron_secret()` RPC. The RPC is `security definer` + revoked from public/authenticated/anon, granted only to `service_role`. **No Edge Function env var needed** — the secret lives in Postgres vault (`mailchimp_drain_cron_secret`) and the function reads it at request time. This avoids the dashboard-set-secret manual step that the spec originally called out. Both pg_cron and the Edge Function read the same vault entry, so the values agree by construction.
+
+**Drain processing loop:** read up to 50 rows where `completed_at is null AND attempts < 5` ordered by `enqueued_at`. For each row, stamp `attempted_at + attempts++` first (so we don't loop on a poison row); resolve student → most-recent enrollment (active wins, tiebreak by `enrolled_at desc`) → class → school; build the allow-list payload; PUT to MC's `/3.0/lists/<aud>/members/<md5(lower(email))>`; POST tags; stamp `completed_at` + write a `mailchimp_sync_log` row. **Allow-list is enforced twice** — the merge-fields object only has the six keys (FNAME, LNAME, STUDENT, CLASS, SCHOOL, STATUS), and a defensive loop strips anything not in `MC_ALLOWED_MERGE_FIELDS` before send. Adding a new merge field requires editing both the constant and the object construction.
+
+**Tags applied per parent:** `dk-<status>` (e.g. `dk-active`), `class:<slug>` (e.g. `class:wando-tk-fri-3pm`), `school:<slug>` (e.g. `school:wando-elementary`). Slugs lowercase + non-alphanumerics → `-`, capped at 60 chars. **Tags accumulate, they don't replace.** MC's tag POST sets active=true on the listed tags but leaves prior class/school tags in place. v1 accepts that — class tags lingering from old enrollments are harmless until someone manually prunes. A future "tag reconciliation" pass could GET existing tags + diff, but that's another MC API call per parent and the cost wasn't worth v1.
+
+**`statusIfNew` defaults to `pending` (double opt-in).** `dk_config.mailchimp_double_opt_in` defaults to `true`; set it to `false` (via the modal checkbox) to use `subscribed` instead. Don't try to subscribe people without explicit opt-in unless the franchise's MC audience permission setting allows it — MC will reject the request and send a deliverability warning. Pre-existing MC members aren't affected by this setting (only the `status_if_new` field).
+
+**Webhook is `mailchimp-webhook` (verify_jwt: false, public).** Auth is the `?secret=<token>` query param compared constant-time against `dk_config.mailchimp_webhook_secret`. The secret is minted client-side (`crypto.getRandomValues(32 bytes)` → hex) on first save of the modal and persisted to `dk_config` so the Edge Function and the URL Sharon copies into Mailchimp share the same value. **Always returns 200**, even on lookup miss — MC retries non-2xx responses for hours and we don't want stuck queues for parents not yet in DK (e.g., someone who signed up via a Mailchimp form first). MC's "validate URL" GET is a no-body request; we return 200 on GET too.
+
+**Webhook event handling:**
+- `subscribe` / `unsubscribe` / `cleaned` → flips `students.marketing_status` + stamps `marketing_status_updated_at` for every student row whose `parent_emails` contains the lowered email.
+- `profile` → just stamps `marketing_status_updated_at` (a "no real change" ping).
+- `upemail` → looks up by `data[old_email]`, replaces that array element with `data[new_email]` on every matching `students.parent_emails`. The `students_mc_sync` trigger then fires automatically and enqueues an upsert at the new email.
+
+**Status feedback in the drain.** Before a PUT, the drain checks the resolved student's `marketing_status`. If it's `unsubscribed` or `cleaned`, the row is marked complete with `last_error = 'skipped_unsubscribed'` (or `_cleaned`) and a log entry written — saves an MC API call. Mailchimp would honor the unsubscribe anyway, but skipping locally avoids the rate-limit budget burn for a long-unsubscribed parent who keeps generating outbox rows on every enrollment edit.
+
+**`dk-mailchimp-ping` (verify_jwt: true, super_admin only).** Helper for the admin settings modal. Verifies a pasted API key reaches MC (`/3.0/ping`), lists audiences (`/3.0/lists?...`), lists merge fields for a chosen audience, and (with `create_merge_fields: ["TAG"]`) creates missing required merge fields one at a time. **Super_admin gate runs under the user JWT** via `userClient.rpc("is_super_admin")` — same pattern as `dk-send-intake-form` (CLAUDE.md §4.28 + §5). If you call `is_super_admin()` under the service-role admin client, `auth.uid()` is null and it always returns false. Don't refactor this without preserving the user-bound RPC pattern.
+
+**UI surface — `⚙ Mailchimp` button in the Templates tab head (super_admin only).** Visibility gate is `isSuperAdmin()` directly in `applyRoleVisibility()` — same gate as `dk_config` writes. The modal `#mailchimpOverlay` has four sections (Connect / Webhook / Merge fields / Sync status) plus Save. The webhook URL only renders when `mailchimp_webhook_secret` is set — first save mints it. Audience picker hides until Test connection succeeds (or hydrates from `state.dkConfig.mailchimp_audience_id` on open). Merge-fields list re-runs on audience change so picking a different audience refreshes the missing-field check. Sync status pill rolls up `mailchimp_sync_outbox` (pending / stuck / done-in-24h) and reloads on modal open; **realtime updates land via `supabase_realtime` on `mailchimp_sync_outbox` + `mailchimp_sync_log`** (added to the publication by the migration), so a drain run while the modal is open updates the pill within the 300ms debounce.
+
+**Out of scope for v1 (deliberate, do not bolt on):** template push to MC's `/3.0/templates`; campaign creation from DK ("Send to class" → segment-by-tag); Mailchimp Transactional / Mandrill (paid, separate product); per-class sub-audiences (one audience, tags handle segmentation); inbound lead capture from MC sign-up forms → DK student row (natural extension once Meta→Mailchimp lead-intake is wired); bulk backfill of existing students into MC on first connect (admin can `update students set parent_emails = parent_emails` after connect to retrigger every row, but it's not a button).
+
 ---
 
 ## 5. Gotchas, quirks, and "don't touch this"
@@ -876,6 +944,20 @@ T11 turns the previously bare-bones Add Student modal (first / last / DoB only) 
 
 **`isVariantDismissed` reads from `state.parPromoEvents`, not Supabase directly (T7b).** The check runs on every `renderParBridgeCard()` call (once per home tab render). Querying live would mean a Supabase round-trip per render, which the realtime debounce already handles for free — the in-memory cache is rehydrated by `reloadAll()` and updated by the optimistic `_local_*` push on dismiss-click. **Don't refactor the check to query the DB directly** — you'd reintroduce the latency the optimistic push exists to hide. If `state.parPromoEvents` ever grows huge (years of activity at scale), paginate the SELECT in `reloadAll` to "last 60 days" — the dismiss check only needs `PAR_DISMISS_DAYS` of history and the funnel report's date picker tops out at 90 days by preset.
 
+**Mailchimp drain reads its cron secret via the `get_mailchimp_drain_cron_secret()` RPC, NOT a Deno env var (T12).** The vault entry `mailchimp_drain_cron_secret` is the source of truth. Both pg_cron (`select decrypted_secret from vault.decrypted_secrets...`) and the Edge Function (via the public RPC wrapper, which is `security definer` + grant-locked to `service_role`) read the same value. **Don't add a `MAILCHIMP_DRAIN_CRON_SECRET` env var to the Edge Function** — it would either drift from the vault entry (if you only updated one) or duplicate maintenance. The wrapper RPC exists specifically because PostgREST doesn't expose the `vault` schema by default; calling `admin.schema('vault').from('decrypted_secrets')` from supabase-js silently 404s. If you ever need a second cron secret for another function, add a second wrapper RPC (one per secret) — don't try to make a generic `get_vault_secret(name)` RPC because that would let any service-role caller read every vault entry by name.
+
+**Mailchimp drain is "skip if not configured," not "fail if not configured" (T12).** The function returns `{ skipped: 'not_configured' }` with HTTP 200 when `dk_config.mailchimp_api_key` is null, so the schema can ship before Sharon pastes credentials and the cron job doesn't error out every minute meanwhile. The outbox keeps accumulating — that's fine, it just flushes the backlog the first time someone saves a working API key + audience. **Don't change this to a 500** — pg_cron logs every non-2xx as a job failure and the dashboard noise is unnecessary.
+
+**Mailchimp merge-fields are an allow-list enforced TWICE in the drain (T12).** `MC_ALLOWED_MERGE_FIELDS` is a tuple, the merge-fields object literal only has the six keys, AND a defensive `for (const k in mergeFields)` loop strips anything not in the allow-list before the PUT. **Adding a new merge field requires editing both the constant and the object construction** — a one-sided edit either silently sends nothing new (object change without constant change) or no-ops because the new field never gets set (constant change without object change). The triple-redundancy is intentional: anything sensitive (allergies, medical_notes, payment_details, waivers) MUST never reach Mailchimp, and we'd rather have a typo cause "missing field" than "PII leak." If a future contributor wants to add SCHOOL_ZIPCODE or similar, do it in three places: the constant, the object construction in the drain, and the modal's required-merge-fields checklist (which lives in `dk-mailchimp-ping`'s `REQUIRED_MERGE_FIELDS`).
+
+**Mailchimp tags accumulate; old class/school tags don't get auto-removed (T12).** When a parent's child changes class, the next drain adds the new `class:<slug>` tag but leaves the old one in place. v1 accepts that — a parent who's been through three classes shows three `class:` tags, harmless for most segmentation queries. **Don't try to "fix" this by also POSTing the old tags as `status: inactive`** unless you're prepared to GET the existing tag list per parent + diff per drain run, which is one extra MC API call per row × 50 rows per minute. Fine for v2; not worth the cost in v1.
+
+**Mailchimp webhook ALWAYS returns 200, even on lookup miss (T12).** This is intentional — MC retries non-2xx for hours and we don't want stuck queues for parents not yet in DK. The body is just `"ok"`. The actual error (if any) goes into `mailchimp_sync_log` with `direction='inbound'`. **Don't return 4xx for a missing student** — a parent who signed up via a Mailchimp form first (no DK student row yet) is normal flow, not an error. If you genuinely need to detect "rejected webhook events," query the log table for `direction='inbound' AND error IS NOT NULL`.
+
+**Mailchimp webhook secret rotation invalidates the URL pasted into Mailchimp (T12).** Saving a different secret value to `dk_config.mailchimp_webhook_secret` (e.g. via raw SQL or a future "regenerate secret" button) breaks the URL Sharon pasted into Mailchimp. The webhook will start returning 401 until she re-pastes the new URL. The modal's "first save" only mints a new secret if one isn't already there — subsequent saves preserve the existing secret to avoid this trap. **If you ever add a "regenerate" button, surface a clear "you must update Mailchimp's webhook URL after this" warning** and bring the new URL up in a copy-modal flow before the old one stops working. Don't silently rotate.
+
+**Vercel deploys from `github.com/jlyonsld/DK` `main`, but Edge Functions deploy via Supabase MCP independently (T12 + general).** A new Edge Function (drain / webhook / ping) goes live the moment `mcp__973b87c9...__deploy_edge_function` succeeds — there's no Vercel involvement, no `main` push, no ~30-second propagation. **The repo's `edge-functions/*.ts` files are the SOURCE that's reviewed in PRs**, but the live behavior depends on the deployed function version (visible in the Supabase dashboard). If you edit the .ts file without redeploying, the live function keeps the old behavior; if you redeploy without committing the .ts edit, the next contributor has no PR review trail. Always do BOTH: edit the file, deploy via MCP, then commit. T12 follows this convention — its three .ts files are colocated with the migrations in `response-console-v3/edge-functions/`.
+
 ---
 
 ## 6. Open issues and half-built features
@@ -913,11 +995,13 @@ T11 turns the previously bare-bones Add Student modal (first / last / DoB only) 
 
 - **Phase T11 — student intake form (full PII fields + parent self-fill flow).** ✅ **Shipped.** Adds nine PII columns to `students` (allergies, medical_notes, photo_permission tri-state, emergency_contact_name/phone/relationship, school_name, grade, authorized_pickup) — parent contact arrays were already on the schema. New `student_intake_requests` table stores `sha256(token)` + class_id + parent_email + audit fields; raw token lives only in the URL emailed to the parent. Two Edge Functions: `dk-send-intake-form` (verify_jwt: true; admin gate via `has_permission('edit_students')` called under user-bound supabase-js client; emails via Resend with copy/paste fallback) and `dk-submit-intake-form` (verify_jwt: false; public; auth IS the token; atomically inserts student + enrollment + marks intake completed using service-role). New public page `student-intake.html` parallels `install.html`. Add Student modal expands with full intake fields + parents repeater + "📧 Send form to parent" shortcut. Class detail panel grows a "Pending parent forms" subsection above the enrollments list with Resend / Cancel actions, and enriches each enrolled-student row with parent name(s)/email/phone, emergency contact, and chips for `⚠ allergies`/`⚕ medical`/`📷 no photos`. No new permission name — reuses `edit_students`. `cancel_student_intake(uuid)` RPC powers the admin cancel surface. See `migrations/phase_t11_student_intake.sql`, `T11_VERIFICATION.md`, and §4.28.
 
+- **Phase T12 — Mailchimp sync (one-way DK → MC + MC webhooks back).** ✅ **Code-complete, awaiting Sharon's API key + audience selection.** Adds `dk_config.mailchimp_*` columns + `students.marketing_status` + `mailchimp_sync_outbox` queue + `mailchimp_sync_log` audit. Two triggers (`students_mc_sync` on identity-relevant column updates + `enrollments_mc_sync` on any enrollment change) enqueue one row per `(student, parent_email)` pair. Three Edge Functions: `dk-mailchimp-drain` (verify_jwt: false, every 60s via pg_cron, reads cron secret from vault via the `get_mailchimp_drain_cron_secret()` RPC, no-ops gracefully if MC not configured); `mailchimp-webhook` (verify_jwt: false, public, auth via `?secret=` query param against `dk_config.mailchimp_webhook_secret`, always returns 200); `dk-mailchimp-ping` (verify_jwt: true, super_admin only, ping/list audiences/list+create merge fields). Allow-listed merge fields: FNAME, LNAME, STUDENT, CLASS, SCHOOL, STATUS — sensitive PII (allergies, medical_notes, payment_details, waivers) explicitly excluded by triple-redundant gates. Tags applied per parent: `dk-<status>`, `class:<slug>`, `school:<slug>`. New super_admin-only `⚙ Mailchimp` button on the Templates tab head opens the connect / webhook / merge-fields-checklist / sync-status-pill modal. No new permission name — `dk_config` writes already gate on `is_super_admin()`. See `migrations/phase_t12_mailchimp_sync.sql`, `T12_MAILCHIMP_SYNC.md` (original spec), and §4.29.
+
 ### Wave 1 leftovers (pre-freemium ops work)
 
 - **FAQ page on the DK website.** Not started.
 - **Jackrabbit email template rewrite.** Not started.
-- **Meta → Mailchimp lead-intake automation.** Not started.
+- **Meta → Mailchimp lead-intake automation.** Not started — but T12's Mailchimp sync is the substrate it'll plug into. Once Meta's webhook lands a lead in MC, our `mailchimp-webhook` already updates `marketing_status`; the missing piece is reverse direction (MC member → DK student row), out of scope for T12.
 
 ### Known rough edges
 
@@ -986,3 +1070,4 @@ JACKRABBIT_ORG_ID                # "551000" for the Charleston franchise
 | T11 — Student intake (PII columns + parent self-fill enrollment form) | ✅ Shipped |
 | T7b — Usage-tier variants (≥20 / ≥50 sessions) + dismiss UX + admin PAR-funnel report | ✅ Shipped |
 | T13 — Per-school closures (nullable closures.school_id, scoped vs. global rendering) | ✅ Shipped |
+| T12 — Mailchimp sync (per-franchise audience, outbox queue, drain + webhook + ping Edge Functions, settings modal) | ✅ Code-complete, awaiting Sharon's API key + audience selection |

@@ -113,6 +113,11 @@
     // re-renders (debounced realtime mutations etc.) don't. Cleared
     // implicitly on full reload.
     _parPromoImpressions: new Set(),
+    // T7b: par_promotion_events rows. Non-admins see only their own
+    // (RLS par_promo_events_self_read); admins see all (admin_read).
+    // Used by isVariantDismissed() to gate tiered upsells AND by the
+    // PAR-funnel admin report to aggregate impressions/clicks/dismisses.
+    parPromoEvents: [],
     router: "home"
   };
 
@@ -457,7 +462,9 @@
       "payment_methods",
       "events", "event_staff",
       "inventory_items", "inventory_assignments",
-      "student_intake_requests"
+      "student_intake_requests",
+      "par_promotion_events",
+      "mailchimp_sync_outbox", "mailchimp_sync_log"
     ];
     realtimeChannel = sb.channel("dk-realtime");
     tablesToWatch.forEach((table) => {
@@ -646,7 +653,7 @@
   async function reloadAll() {
     showLoader(true);
     try {
-      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches, att, clk, subs, subClm, schs, canc, cur, curA, tpd, tdocs, waivers, wSigs, pms, prof, evs, evStaff, invItems, invAssigns, intakes] = await Promise.all([
+      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches, att, clk, subs, subClm, schs, canc, cur, curA, tpd, tdocs, waivers, wSigs, pms, prof, evs, evStaff, invItems, invAssigns, intakes, parPromo] = await Promise.all([
         sb.from("categories").select("*").order("sort_order", { ascending: true }),
         sb.from("templates").select("*").order("created_at", { ascending: true }),
         sb.from("classes").select("*").order("name", { ascending: true }),
@@ -679,7 +686,8 @@
         sb.from("event_staff").select("*"),
         sb.from("inventory_items").select("*").order("name", { ascending: true }),
         sb.from("inventory_assignments").select("*").order("usage_starts_at", { ascending: true }),
-        sb.from("student_intake_requests").select("*").order("sent_at", { ascending: false })
+        sb.from("student_intake_requests").select("*").order("sent_at", { ascending: false }),
+        sb.from("par_promotion_events").select("*").order("created_at", { ascending: false })
       ]);
       for (const r of [cats, tpls, cls, igs, tch, ct, ci, stu, enr]) if (r.error) throw r.error;
       // Non-admin roles may not have SELECT access to teacher_invitations /
@@ -754,6 +762,10 @@
       // teachers see pending/completed for classes they teach. Empty fallback
       // covers the brief window before phase_t11_student_intake.sql is applied.
       state.studentIntakeRequests = (intakes && !intakes.error) ? intakes.data : [];
+      // T7b: PAR promotion events. Non-admins see only their own rows
+      // (par_promo_events_self_read); admins see everything. Used for
+      // dismiss gating (isVariantDismissed) and the PAR funnel report.
+      state.parPromoEvents = (parPromo && !parPromo.error) ? parPromo.data : [];
     } catch (e) {
       console.error(e);
       showToast("Failed to load: " + e.message, "error");
@@ -1890,34 +1902,108 @@
     `;
   }
 
-  /* ═════════════ T7a — PAR promotion: variant + event logging ═════════════
+  /* ═════════════ T7a/T7b — PAR promotion: variant + event logging ═════════════
    *
    * Computes which copy/CTA the PAR card shows for the signed-in user,
-   * and records impressions/clicks to par_promotion_events for funnel
-   * analysis. Variant keys are intentionally stable strings (not enum)
-   * so we can A/B new copy without a schema migration — see
-   * `phase_t7a_par_promo_events.sql` for the table shape.
+   * and records impressions/clicks/dismisses to par_promotion_events for
+   * funnel analysis. Variant keys are intentionally stable strings (not
+   * enum) so we can A/B new copy without a schema migration — see
+   * `phase_t7a_par_promo_events.sql` and `phase_t7b_par_promo_dismiss.sql`.
    *
    * Variant matrix (CLAUDE.md §4.26):
-   *   unlinked_admin           — admin/manager/super_admin/viewer/null,
-   *                              no par_person_id. Pitch: link your DK
-   *                              email to PAR identity.
-   *   unlinked_teacher         — teacher, no par_person_id. Pitch: try
-   *                              PAR for your family schedule.
-   *   linked_franchise_owner   — super_admin AND linked. Neutral "Open
-   *                              PAR" — Sharon already pays via the
-   *                              franchise org, no upsell needed.
-   *   linked_admin             — admin/manager/viewer/null AND linked.
-   *                              Neutral "Open PAR".
-   *   linked_teacher           — teacher AND linked. Soft pitch: "Open
-   *                              PAR — try the family planner."
+   *   unlinked_admin                       — admin/manager/super_admin/viewer/null,
+   *                                          no par_person_id.
+   *   unlinked_teacher                     — teacher, no par_person_id (base copy).
+   *   unlinked_teacher_attendance_20       — T7b. Same audience as
+   *                                          unlinked_teacher, after they've
+   *                                          recorded ≥20 sessions of DK
+   *                                          activity. Stronger family-planner
+   *                                          pitch. Dismissable.
+   *   unlinked_teacher_attendance_50       — T7b. ≥50 sessions. Strongest tier.
+   *                                          Dismissable.
+   *   linked_franchise_owner / linked_admin / linked_teacher — unchanged.
+   *
+   * T7b dismiss semantics: when a tiered variant is dismissed, the resolver
+   * falls back to the next-lower tier the user still qualifies for (or to
+   * the base unlinked_teacher). Re-tries surface again after PAR_DISMISS_DAYS.
+   * The base variants (unlinked_admin / unlinked_teacher) are NOT dismissable
+   * — the card doubles as nav, hiding it would orphan the link.
    */
+
+  // T7b: tier order is strongest-first. Resolver picks the highest tier
+  // the user qualifies for AND hasn't dismissed inside the dismiss window.
+  // To tune thresholds, edit here — they intentionally live next to the
+  // copy table so a single PR re-tunes both numbers and copy.
+  const PAR_TEACHER_TIERS = [
+    { threshold: 50, key: "unlinked_teacher_attendance_50" },
+    { threshold: 20, key: "unlinked_teacher_attendance_20" }
+  ];
+  const PAR_DISMISS_DAYS = 7;
+
+  // Count of distinct DK teaching sessions for the signed-in teacher,
+  // unioning attendance-takings and clock-ins. We use both because a
+  // teacher may rely on one and not the other — substituting only
+  // attendance would under-count for teachers who clock in but don't
+  // record attendance every day, and vice versa. Distinct keying on
+  // (class_id, session_date) prevents double-counting one session that
+  // shows up in both tables.
+  function teacherSessionCount() {
+    const teacher = mySignedInTeacher();
+    if (!teacher) return 0;
+    const myClassIds = new Set(
+      state.classTeachers
+        .filter((ct) => ct.teacher_id === teacher.id)
+        .map((ct) => ct.class_id)
+    );
+    const sessions = new Set();
+    if (myClassIds.size > 0) {
+      for (const a of state.attendance) {
+        const enr = state.enrollments.find((e) => e.id === a.enrollment_id);
+        if (!enr || !myClassIds.has(enr.class_id)) continue;
+        sessions.add(enr.class_id + "|" + a.session_date);
+      }
+    }
+    for (const c of state.clockIns) {
+      if (c.teacher_id !== teacher.id || !c.class_id) continue;
+      sessions.add(c.class_id + "|" + c.session_date);
+    }
+    return sessions.size;
+  }
+
+  // T7b: did the signed-in user dismiss this variant within the dismiss
+  // window? Reads from state.parPromoEvents which is loaded under the
+  // par_promo_events_self_read RLS policy. Synthetic optimistic rows
+  // (id starting with `_local_`) are honored too so the UI updates
+  // immediately on dismiss-click without waiting for the realtime
+  // round-trip.
+  function isVariantDismissed(variantKey) {
+    const profileId = state.profile?.id;
+    if (!profileId) return false;
+    const cutoff = Date.now() - PAR_DISMISS_DAYS * 24 * 60 * 60 * 1000;
+    return state.parPromoEvents.some(
+      (ev) =>
+        ev.profile_id === profileId &&
+        ev.variant_key === variantKey &&
+        ev.event_kind === "dismiss" &&
+        new Date(ev.created_at).getTime() >= cutoff
+    );
+  }
+
   function resolveParVariant() {
     const p = state.profile;
     const linked = !!p?.par_person_id;
     const role = p?.role || null;
     if (!linked) {
-      return role === "teacher" ? "unlinked_teacher" : "unlinked_admin";
+      if (role === "teacher") {
+        const sessions = teacherSessionCount();
+        for (const tier of PAR_TEACHER_TIERS) {
+          if (sessions >= tier.threshold && !isVariantDismissed(tier.key)) {
+            return tier.key;
+          }
+        }
+        return "unlinked_teacher";
+      }
+      return "unlinked_admin";
     }
     if (role === "super_admin") return "linked_franchise_owner";
     if (role === "teacher")     return "linked_teacher";
@@ -1954,6 +2040,22 @@
       title: "Link DK to PAR",
       sub:   "Try the family planner",
       tooltip: "Link this email on PAR — also great for your family schedule"
+    },
+    unlinked_teacher_attendance_20: {
+      href:  "https://get-on-par.com/?view=settings&tab=linked-accounts",
+      icon:  "✨",
+      title: "You've taught 20+ sessions",
+      sub:   "PAR keeps your family schedule too — try it",
+      tooltip: "Link this email on PAR — also great for your family schedule",
+      dismissable: true
+    },
+    unlinked_teacher_attendance_50: {
+      href:  "https://get-on-par.com/?view=settings&tab=linked-accounts",
+      icon:  "🎉",
+      title: "50+ sessions taught — meet PAR",
+      sub:   "Manage family + work in one place",
+      tooltip: "Link this email on PAR — also great for your family schedule",
+      dismissable: true
     },
     linked_franchise_owner: {
       href:  "https://get-on-par.com/",
@@ -1997,9 +2099,19 @@
       logParPromoEvent(variant, "impression");
     }
 
+    // T7b: only tiered-upsell variants get a dismiss button. Base variants
+    // (unlinked_admin / unlinked_teacher / linked_*) double as nav, so
+    // hiding them would orphan the link. The button sits as a sibling
+    // of the anchor — putting an interactive button inside an anchor
+    // is invalid HTML and triggers navigation on click.
+    const dismissBtn = copy.dismissable
+      ? `<button type="button" class="par-dismiss" data-par-dismiss="${variant}"
+           title="Hide for ${PAR_DISMISS_DAYS} days" aria-label="Hide this prompt for ${PAR_DISMISS_DAYS} days">×</button>`
+      : "";
+
     return `
       <div class="bento-label"><span>On PAR</span></div>
-      <div class="bento-par-bridge">
+      <div class="bento-par-bridge${copy.dismissable ? " has-dismiss" : ""}">
         <a class="par-user" data-par-variant="${variant}"
            href="${copy.href}" target="_blank" rel="noopener"
            title="${escapeHtml(copy.tooltip)}">
@@ -2010,6 +2122,7 @@
           </span>
           <span class="par-arrow">→</span>
         </a>
+        ${dismissBtn}
       </div>
     `;
   }
@@ -2064,6 +2177,32 @@
     $$('[data-par-variant]', $("#bentoGrid")).forEach((a) => {
       a.addEventListener("click", () => {
         logParPromoEvent(a.dataset.parVariant, "click");
+      });
+    });
+    // T7b: dismiss tiered upsell variants. preventDefault + stopPropagation
+    // because the button sits visually atop the anchor; without those the
+    // click would also navigate to PAR. We log the dismiss event AND push
+    // a synthetic local row into state.parPromoEvents so the next render
+    // resolves to a lower-tier (or base) variant immediately, without
+    // waiting for the realtime round-trip.
+    $$('[data-par-dismiss]', $("#bentoGrid")).forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const variant = btn.dataset.parDismiss;
+        logParPromoEvent(variant, "dismiss");
+        if (state.profile?.id) {
+          state.parPromoEvents.unshift({
+            id:          "_local_" + Date.now(),
+            profile_id:  state.profile.id,
+            variant_key: variant,
+            event_kind:  "dismiss",
+            surface:     "home_bento_par_card",
+            metadata:    {},
+            created_at:  new Date().toISOString()
+          });
+        }
+        renderHomeTab();
       });
     });
   }
@@ -2133,6 +2272,11 @@
     // upload button now living inside the modal).
     if (manageInfographicsBtn) manageInfographicsBtn.style.display = hasPerm("edit_infographics") ? "" : "none";
     if (newInfographicBtn) newInfographicBtn.style.display = hasPerm("edit_infographics")  ? "" : "none";
+
+    // T12: "⚙ Mailchimp" launcher in the Templates tab head — super_admin
+    // only since dk_config writes (api key + audience) gate on is_super_admin().
+    const manageMailchimpBtn = $("#manageMailchimpBtn");
+    if (manageMailchimpBtn) manageMailchimpBtn.style.display = isSuperAdmin() ? "" : "none";
 
     const newCurriculumBtn = $("#newCurriculumBtn");
     if (newCurriculumBtn) newCurriculumBtn.style.display = hasPerm("edit_curriculum") ? "" : "none";
@@ -2253,9 +2397,48 @@
     });
   }
 
+  // T13: returns ALL closures (global + per-school) for the given date.
+  // Renderers that need to distinguish use `globalClosuresForDate` or
+  // `closuresForClassOnDate` instead.
   function closuresForDate(date) {
     const iso = isoDate(date);
     return state.closures.filter((c) => c.date === iso);
+  }
+
+  // T13: only closures with school_id IS NULL on the given date. These
+  // are the "everyone is off, all schools" closures (school holidays
+  // shared by every district, internal company-wide breaks). They drive
+  // the cell-level red hatch on Month view and the cell-wide `.closed`
+  // class on Week view. Per-school closures do NOT trigger those — they
+  // only mute the class rows whose school is affected.
+  function globalClosuresForDate(date) {
+    const iso = isoDate(date);
+    return state.closures.filter((c) => c.date === iso && !c.school_id);
+  }
+
+  // T13: closures that affect this specific class on this date —
+  // either a global closure OR a per-school closure matching the
+  // class's school_id. Used to dim individual class blocks/rows
+  // even when the surrounding cell isn't fully closed.
+  function closuresForClassOnDate(cls, date) {
+    const iso = isoDate(date);
+    const cSchool = cls?.school_id || null;
+    return state.closures.filter((c) => {
+      if (c.date !== iso) return false;
+      if (!c.school_id) return true;            // global → affects every class
+      return c.school_id === cSchool;           // scoped → must match
+    });
+  }
+
+  // T13: human-readable closure label including the school name in
+  // parens for non-global closures. Used by Day-view closure cards
+  // and Week/Month tooltips so admins can read "Snow day (Mt Pleasant ES)"
+  // and not have to chase down which school is closed.
+  function closureLabelWithScope(cl) {
+    if (!cl) return "";
+    if (!cl.school_id) return cl.label || "";
+    const sch = state.schools.find((s) => s.id === cl.school_id);
+    return sch ? `${cl.label} (${sch.name})` : cl.label;
   }
 
   /* ═════════════ EVENTS (T9) helpers ═════════════
@@ -2402,7 +2585,7 @@
 
     const closureHtml = closures.map((cl) => `
       <div class="sched-closure-card">
-        <div class="sched-closure-label">🗓 ${escapeHtml(cl.label)}</div>
+        <div class="sched-closure-label">🗓 ${escapeHtml(closureLabelWithScope(cl))}</div>
         ${cl.note ? `<div class="sched-closure-note">${escapeHtml(cl.note)}</div>` : ""}
       </div>
     `).join("");
@@ -2452,14 +2635,23 @@
       const timeStr = startAt ? startAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : (cls.times || "—");
       const showLine = i < items.length - 1;
       const hue = teacher ? teacherHue(teacher.id) : 210;
+      // T13: closure muting on the per-class row. If a global OR matching
+      // per-school closure exists for this class on this date, dim the row
+      // and append a 🗓 badge with the closure label.
+      const classClosures = closuresForClassOnDate(cls, date);
+      const closedClass = classClosures.length ? " sched-closed" : "";
+      const closedBadge = classClosures.length
+        ? `<span class="sched-sub-badge sched-closed-badge" title="${escapeHtml(classClosures.map(closureLabelWithScope).join(" · "))}">🗓</span>`
+        : "";
+      const inlineDim = isPast || classClosures.length ? 'style="opacity:.55"' : "";
       return `
-        <div class="sched-day-item" data-open-class="${escapeHtml(cls.id)}" ${isPast ? 'style="opacity:.55"' : ""}>
+        <div class="sched-day-item${closedClass}" data-open-class="${escapeHtml(cls.id)}" ${inlineDim}>
           <div class="sched-day-spine">
             <div class="sched-day-dot ${dotClass}" style="background:hsl(${hue}, 62%, 58%)"></div>
             ${showLine ? '<div class="sched-day-line"></div>' : ""}
           </div>
           <div class="sched-day-body" style="border-left:3px solid hsla(${hue}, 62%, 58%, .55)">
-            <div class="sched-day-time">${escapeHtml(timeStr)}</div>
+            <div class="sched-day-time">${escapeHtml(timeStr)}${closedBadge}</div>
             <div class="sched-day-title">${escapeHtml(cls.name)}</div>
             <div class="sched-day-sub">
               ${cls.location ? escapeHtml(cls.location) : ""}
@@ -2488,7 +2680,13 @@
         .sort((a, b) => a.startAt.getTime() - b.startAt.getTime());
       const events = eventsForDate(d)
         .map((ev) => ({ ev, startAt: eventStartTimeOn(ev, d), endAt: eventEndTimeOn(ev, d) }));
-      days.push({ date: d, classes, events, closures: closuresForDate(d) });
+      days.push({
+        date: d,
+        classes,
+        events,
+        closures: closuresForDate(d),
+        globalClosures: globalClosuresForDate(d)
+      });
     }
 
     const hourRows = [];
@@ -2516,9 +2714,13 @@
     const dayColumns = days.map((d) => {
       const iso = isoDate(d.date);
       const isToday = iso === todayIso;
-      const isClosed = d.closures.length > 0;
-      const closureLabel = isClosed
-        ? `<div class="sched-week-closure-pill" title="${escapeHtml(d.closures.map(c => c.label).join(" · "))}">🗓 ${escapeHtml(d.closures[0].label)}${d.closures.length > 1 ? ` +${d.closures.length - 1}` : ""}</div>`
+      // T13: cell-wide `closed` styling fires only for global closures.
+      // Per-school closures dim individual class blocks below; the pill
+      // still lists every closure with school name in parens so the
+      // admin sees the full picture at a glance.
+      const isClosed = d.globalClosures.length > 0;
+      const closureLabel = d.closures.length
+        ? `<div class="sched-week-closure-pill" title="${escapeHtml(d.closures.map(closureLabelWithScope).join(" · "))}">🗓 ${escapeHtml(closureLabelWithScope(d.closures[0]))}${d.closures.length > 1 ? ` +${d.closures.length - 1}` : ""}</div>`
         : "";
 
       const totalHeight = (SCHED_HOUR_END - SCHED_HOUR_START) * SCHED_HOUR_PX;
@@ -2538,12 +2740,21 @@
         const cancellation = classCancellationFor(cls.id, dayIso);
         const cancelClass = cancellation ? " sched-cancelled" : "";
         const cancelBadge = cancellation ? `<span class="sched-sub-badge sched-cancelled-badge" title="Class cancelled${cancellation.reason ? ": " + cancellation.reason : ""}">✗</span>` : "";
+        // T13: per-class closure dimming — applies whether the cell is
+        // globally closed (cell-level .closed already styles the column,
+        // so this is mostly redundant there) or only this class's school
+        // is closed.
+        const classClosures = closuresForClassOnDate(cls, d.date);
+        const closedClass = classClosures.length ? " sched-closed" : "";
+        const closedBadge = classClosures.length
+          ? `<span class="sched-sub-badge sched-closed-badge" title="${escapeHtml(classClosures.map(closureLabelWithScope).join(" · "))}">🗓</span>`
+          : "";
         return `
-          <div class="sched-week-block${cancelClass}" data-open-class="${escapeHtml(cls.id)}"
+          <div class="sched-week-block${cancelClass}${closedClass}" data-open-class="${escapeHtml(cls.id)}"
                style="top:${topPx}px;height:${heightPx}px;
                       background:hsla(${hue},62%,58%,.22);
                       border-left:3px solid hsl(${hue},62%,58%);">
-            <div class="sched-week-block-time">${escapeHtml(timeStr)}${cancelBadge}${subBadge}</div>
+            <div class="sched-week-block-time">${escapeHtml(timeStr)}${cancelBadge}${closedBadge}${subBadge}</div>
             <div class="sched-week-block-title">${escapeHtml(cls.name)}</div>
             ${teacher ? `<div class="sched-week-block-sub">${escapeHtml(teacher.full_name.split(/\s+/)[0])}</div>` : ""}
           </div>
@@ -2634,6 +2845,7 @@
       const inMonth = d.getMonth() === anchor.getMonth();
       const isToday = iso === todayIso;
       const closures = closuresForDate(d);
+      const globalClosures = globalClosuresForDate(d);
       const classRows = classesForDate(d)
         .map((c) => ({ kind: "class", cls: c, startAt: classStartTimeOn(c, d), teacher: primaryTeacherObj(c.id) }));
       const eventRows = eventsForDate(d)
@@ -2682,19 +2894,26 @@
         const cancellation = classCancellationFor(cls.id, iso);
         const cancelClass = cancellation ? " sched-cancelled" : "";
         const cancelBadge = cancellation ? `<span class="sched-sub-badge sched-cancelled-badge" title="Class cancelled${cancellation.reason ? ": " + cancellation.reason : ""}">✗</span>` : "";
+        // T13: per-class closure dimming.
+        const classClosures = closuresForClassOnDate(cls, d);
+        const closedRowClass = classClosures.length ? " sched-closed" : "";
+        const closedRowBadge = classClosures.length
+          ? `<span class="sched-sub-badge sched-closed-badge" title="${escapeHtml(classClosures.map(closureLabelWithScope).join(" · "))}">🗓</span>`
+          : "";
         const titleTxt = [
           cls.name,
           initials ? "— " + initials : "",
           timeStr ? "at " + timeStr : "",
-          cancellation ? "(cancelled)" : (subReq ? `(sub ${subReq.status})` : ""),
+          cancellation ? "(cancelled)" : classClosures.length ? "(closed)" : (subReq ? `(sub ${subReq.status})` : ""),
         ].filter(Boolean).join(" ");
         return `
-          <div class="sched-month-row${cancelClass}" data-open-class="${escapeHtml(cls.id)}"
+          <div class="sched-month-row${cancelClass}${closedRowClass}" data-open-class="${escapeHtml(cls.id)}"
                style="border-left-color:hsl(${hue}, 62%, 58%)"
                title="${escapeHtml(titleTxt)}">
             ${timeStr ? `<span class="sched-month-row-time">${escapeHtml(timeStr)}</span>` : ""}
             <span class="sched-month-row-name">${escapeHtml(cls.name)}</span>
             ${cancelBadge}
+            ${closedRowBadge}
             ${subBadge}
             ${initials ? `<span class="sched-month-row-initials">${escapeHtml(initials)}</span>` : ""}
           </div>
@@ -2705,12 +2924,17 @@
         ? `<div class="sched-month-row-more">+${overflow} more</div>`
         : "";
 
-      // Closure treatment: red for full-day closures. When the academic-
-      // calendar schema adds a short-day type, emit `closed-short` instead
-      // of `closed-full` to get the yellow hatch.
-      const closureClass = closures.length ? " closed-full" : "";
+      // Closure treatment: red for full-day GLOBAL closures only (T13).
+      // Per-school closures dim only the affected class rows below; the
+      // cell-level red hatch is reserved for "everyone is off." When the
+      // academic-calendar schema adds a short-day type, emit `closed-short`
+      // instead of `closed-full` to get the yellow hatch.
+      const closureClass = globalClosures.length ? " closed-full" : "";
+      // The closure badge inside the cell still shows the first closure
+      // (any scope). This way per-school closures still get a visible
+      // mention in the cell even though the cell isn't fully red.
       const closureHtml = closures.length
-        ? `<div class="sched-month-closure" title="${escapeHtml(closures.map(c => c.label).join(" · "))}">${escapeHtml(closures[0].label)}</div>`
+        ? `<div class="sched-month-closure" title="${escapeHtml(closures.map(closureLabelWithScope).join(" · "))}">${escapeHtml(closureLabelWithScope(closures[0]))}</div>`
         : "";
 
       cells.push(`
@@ -2748,6 +2972,17 @@
     // Default date to the current anchor for convenience
     const d = $("#closureDate");
     if (d && !d.value) d.value = state.sState.anchor;
+    // T13: populate the school dropdown each open so admins see schools
+    // added since the previous open. Default to "" (global) — the most
+    // common case for whole-district holidays.
+    const sel = $("#closureSchool");
+    if (sel) {
+      const current = sel.value;
+      sel.innerHTML = '<option value="">All schools (global)</option>'
+        + state.schools.slice().sort((a, b) => (a.name || "").localeCompare(b.name || ""))
+            .map((s) => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.name)}</option>`).join("");
+      sel.value = current || "";
+    }
     $("#closuresOverlay").classList.add("open");
     setTimeout(() => $("#closureLabel").focus(), 40);
   }
@@ -2763,13 +2998,22 @@
     wrap.innerHTML = state.closures
       .slice()
       .sort((a, b) => a.date.localeCompare(b.date))
-      .map((c) => `
+      .map((c) => {
+        // T13: per-school chip (or "Global" for cross-district closures).
+        // The chip is muted vs. the label so the date/title stay primary.
+        const sch = c.school_id ? state.schools.find((s) => s.id === c.school_id) : null;
+        const scopeChip = c.school_id
+          ? `<span class="closure-row-scope" title="Scoped to ${escapeHtml(sch ? sch.name : "this school")}">📍 ${escapeHtml(sch ? sch.name : "(unknown school)")}</span>`
+          : `<span class="closure-row-scope global" title="All schools — global closure">🌐 All schools</span>`;
+        return `
         <div class="closure-row" data-id="${escapeHtml(c.id)}">
           <div class="closure-row-date">${escapeHtml(c.date)}</div>
           <div class="closure-row-label">${escapeHtml(c.label)}</div>
+          ${scopeChip}
           <button class="btn ghost small" data-act="del-closure" data-id="${escapeHtml(c.id)}" title="Remove">✕</button>
         </div>
-      `).join("");
+      `;
+      }).join("");
     $$('[data-act="del-closure"]', wrap).forEach((b) => {
       b.onclick = async () => {
         const id = b.dataset.id;
@@ -2785,7 +3029,13 @@
     const date = $("#closureDate").value;
     const label = $("#closureLabel").value.trim();
     if (!date || !label) { showToast("Date and label are required", "error"); return; }
-    const { error } = await sb.from("closures").insert({ date, label });
+    // T13: empty value (the default "All schools (global)" option) inserts
+    // school_id = NULL. Multi-school franchises pick a school for scoped
+    // closures (e.g. one school's snow day).
+    const schoolId = $("#closureSchool")?.value || null;
+    const row = { date, label };
+    if (schoolId) row.school_id = schoolId;
+    const { error } = await sb.from("closures").insert(row);
     if (error) { showToast(error.message, "error"); return; }
     $("#closureLabel").value = "";
     await reloadAll(); renderAll(); renderClosuresList();
@@ -7553,6 +7803,7 @@
   const REPORTS = [
     { id: "attendance", label: "Attendance", render: renderAttendanceReport },
     { id: "teacher_hours", label: "Teacher hours", render: renderTeacherHoursReport },
+    { id: "par_funnel", label: "PAR funnel", render: renderParFunnelReport },
   ];
 
   function ensureReportDateDefaults() {
@@ -7973,6 +8224,205 @@
       };
     });
     $("#rpt_export_hours_csv").onclick = () => downloadTeacherHoursCsv(log, s.start, s.end);
+  }
+
+  /* ── T7b: PAR funnel report ─────────────────────────────────
+   * Aggregates par_promotion_events for the active date range.
+   * Admins read every row via par_promo_events_admin_read RLS;
+   * non-admins shouldn't reach this report (Reports tab is
+   * admin-only via ROLE_TAB_VISIBILITY) — guard anyway. */
+  function renderParFunnelReport(host) {
+    const s = state.rptState;
+
+    if (!isAdminOrAbove()) {
+      host.innerHTML = '<div style="padding:24px;color:var(--ink-dim);font-size:13px">PAR funnel is admin-only.</div>';
+      return;
+    }
+
+    const startMs = new Date(s.start + "T00:00:00").getTime();
+    const endMs   = new Date(s.end   + "T23:59:59.999").getTime();
+
+    // Filter to range. Drop synthetic optimistic rows (id starts with `_local_`)
+    // so a just-clicked dismiss doesn't double-count before the realtime
+    // round-trip refreshes state.parPromoEvents.
+    const rows = state.parPromoEvents.filter((ev) => {
+      if (typeof ev.id === "string" && ev.id.startsWith("_local_")) return false;
+      const t = new Date(ev.created_at).getTime();
+      return t >= startMs && t <= endMs;
+    });
+
+    // By variant × kind
+    const byVariant = new Map();
+    for (const ev of rows) {
+      let v = byVariant.get(ev.variant_key);
+      if (!v) { v = { impression: 0, click: 0, dismiss: 0 }; byVariant.set(ev.variant_key, v); }
+      v[ev.event_kind] = (v[ev.event_kind] || 0) + 1;
+    }
+
+    // Totals
+    let totImp = 0, totClk = 0, totDis = 0;
+    for (const v of byVariant.values()) {
+      totImp += v.impression;
+      totClk += v.click;
+      totDis += v.dismiss;
+    }
+    const ctr = totImp > 0 ? (totClk / totImp * 100).toFixed(1) : "0.0";
+    const dismissRate = totImp > 0 ? (totDis / totImp * 100).toFixed(1) : "0.0";
+
+    // Per day (impressions only — clicks/dismisses overlay sparseness)
+    const byDay = new Map();
+    for (const ev of rows) {
+      const day = ev.created_at.slice(0, 10);
+      let d = byDay.get(day);
+      if (!d) { d = { impression: 0, click: 0, dismiss: 0 }; byDay.set(day, d); }
+      d[ev.event_kind] = (d[ev.event_kind] || 0) + 1;
+    }
+    // Build a continuous daily series across the selected range so an
+    // empty day shows a 0-bar instead of a gap.
+    const dayRows = [];
+    let maxBar = 0;
+    const cur = new Date(s.start + "T00:00:00");
+    const last = new Date(s.end + "T00:00:00");
+    while (cur <= last) {
+      const k = isoDate(cur);
+      const d = byDay.get(k) || { impression: 0, click: 0, dismiss: 0 };
+      dayRows.push({ day: k, ...d });
+      if (d.impression > maxBar) maxBar = d.impression;
+      cur.setDate(cur.getDate() + 1);
+    }
+
+    // Sort variant rows: most-impressed first, with the unlabeled ones at the bottom.
+    const variantRows = [...byVariant.entries()]
+      .map(([key, v]) => {
+        const ctrPct = v.impression > 0 ? (v.click / v.impression * 100).toFixed(1) : "0.0";
+        const disPct = v.impression > 0 ? (v.dismiss / v.impression * 100).toFixed(1) : "—";
+        return { key, ...v, ctrPct, disPct };
+      })
+      .sort((a, b) => b.impression - a.impression);
+
+    const presetBtn = (label, days) =>
+      `<button data-rpt-preset="${days}" class="btn small">${escapeHtml(label)}</button>`;
+
+    host.innerHTML = `
+      <div style="display:flex;gap:8px;align-items:end;flex-wrap:wrap;padding:12px 0 16px;border-bottom:1px solid var(--border-subtle,#eee)">
+        <div class="field" style="flex:0 0 160px">
+          <label>From</label>
+          <input type="date" id="rpt_start" value="${escapeHtml(s.start)}" />
+        </div>
+        <div class="field" style="flex:0 0 160px">
+          <label>To</label>
+          <input type="date" id="rpt_end" value="${escapeHtml(s.end)}" />
+        </div>
+        <div style="display:flex;gap:4px">
+          ${presetBtn("Last 7d", 7)}
+          ${presetBtn("Last 30d", 30)}
+          ${presetBtn("Last 90d", 90)}
+        </div>
+        <div style="flex:1"></div>
+        <button class="btn small" id="rpt_export_par_csv">Export CSV (events)</button>
+      </div>
+
+      <div style="margin-top:16px">
+        <div class="section-title">Summary</div>
+        <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;padding:12px 0">
+          ${[
+            ["Impressions", totImp, ""],
+            ["Clicks",      totClk, totClk > 0 ? "var(--accent)" : ""],
+            ["Dismisses",   totDis, totDis > 0 ? "#a36a00" : ""],
+            ["CTR",         ctr + "%", ""],
+            ["Dismiss rate",dismissRate + "%", ""]
+          ].map(([k, v, col]) => `
+            <div style="padding:10px 12px;background:var(--surface-alt,#f5f4ef);border-radius:8px">
+              <div style="font-size:11px;color:var(--ink-dim);text-transform:uppercase;letter-spacing:.5px">${escapeHtml(k)}</div>
+              <div style="font-size:22px;font-weight:600;margin-top:2px;${col ? `color:${col}` : ""}">${v}</div>
+            </div>
+          `).join("")}
+        </div>
+      </div>
+
+      <div style="margin-top:16px">
+        <div class="section-title">By variant</div>
+        ${variantRows.length === 0 ? '<div style="padding:12px 0;color:var(--ink-dim);font-size:12.5px">No PAR-promotion events in this range.</div>' : `
+          <table style="width:100%;border-collapse:collapse;font-size:12.5px">
+            <thead>
+              <tr style="text-align:left;color:var(--ink-dim);border-bottom:1px solid var(--border)">
+                <th style="padding:6px 8px;font-weight:600">Variant</th>
+                <th style="padding:6px 8px;font-weight:600;text-align:right">Impressions</th>
+                <th style="padding:6px 8px;font-weight:600;text-align:right">Clicks</th>
+                <th style="padding:6px 8px;font-weight:600;text-align:right">Dismisses</th>
+                <th style="padding:6px 8px;font-weight:600;text-align:right">CTR</th>
+                <th style="padding:6px 8px;font-weight:600;text-align:right">Dismiss %</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${variantRows.map((r) => `
+                <tr style="border-bottom:1px solid var(--border-subtle,#eee)">
+                  <td style="padding:6px 8px;font-family:ui-monospace,monospace">${escapeHtml(r.key)}</td>
+                  <td style="padding:6px 8px;text-align:right">${r.impression}</td>
+                  <td style="padding:6px 8px;text-align:right">${r.click}</td>
+                  <td style="padding:6px 8px;text-align:right${r.dismiss > 0 ? ';color:#a36a00' : ''}">${r.dismiss}</td>
+                  <td style="padding:6px 8px;text-align:right">${r.ctrPct}%</td>
+                  <td style="padding:6px 8px;text-align:right">${r.disPct === "—" ? "—" : r.disPct + "%"}</td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        `}
+      </div>
+
+      <div style="margin-top:16px">
+        <div class="section-title">Daily impressions <span style="font-weight:400;color:var(--ink-dim);text-transform:none;letter-spacing:0">(${dayRows.length} days)</span></div>
+        ${maxBar === 0 ? '<div style="padding:12px 0;color:var(--ink-dim);font-size:12.5px">No impressions in this range.</div>' : `
+          <div style="display:flex;gap:2px;align-items:flex-end;height:120px;padding:8px 0;border-bottom:1px solid var(--border-subtle,#eee)">
+            ${dayRows.map((d) => {
+              const h = d.impression === 0 ? 1 : Math.max(2, Math.round((d.impression / maxBar) * 110));
+              const tip = `${d.day}: ${d.impression} impression${d.impression === 1 ? '' : 's'}, ${d.click} click${d.click === 1 ? '' : 's'}, ${d.dismiss} dismiss${d.dismiss === 1 ? '' : 'es'}`;
+              return `<div title="${escapeHtml(tip)}" style="flex:1;min-width:3px;height:${h}px;background:${d.impression === 0 ? 'var(--border-subtle,#eee)' : 'var(--accent,#2d2d2d)'};border-radius:2px 2px 0 0"></div>`;
+            }).join("")}
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:10.5px;color:var(--ink-dim);margin-top:4px">
+            <span>${escapeHtml(dayRows[0]?.day || "")}</span>
+            <span>${escapeHtml(dayRows[dayRows.length - 1]?.day || "")}</span>
+          </div>
+        `}
+      </div>
+    `;
+
+    // Wire controls
+    $("#rpt_start").onchange = (e) => { state.rptState.start = e.target.value; renderReportsTab(); };
+    $("#rpt_end").onchange   = (e) => { state.rptState.end   = e.target.value; renderReportsTab(); };
+    host.querySelectorAll("[data-rpt-preset]").forEach((b) => {
+      b.onclick = () => {
+        const days = parseInt(b.dataset.rptPreset, 10);
+        const today = new Date();
+        const start = new Date(today); start.setDate(start.getDate() - (days - 1));
+        state.rptState.start = isoDate(start);
+        state.rptState.end   = isoDate(today);
+        renderReportsTab();
+      };
+    });
+    $("#rpt_export_par_csv").onclick = () => downloadParFunnelCsv(rows, s.start, s.end);
+  }
+
+  function downloadParFunnelCsv(rows, start, end) {
+    const esc = (v) => {
+      const s = String(v == null ? "" : v);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const header = ["CreatedAt","ProfileId","Variant","Kind","Surface","Metadata"].join(",");
+    const body = rows.map((r) => [
+      r.created_at, r.profile_id, r.variant_key, r.event_kind, r.surface, JSON.stringify(r.metadata || {})
+    ].map(esc).join(",")).join("\n");
+    const csv = header + "\n" + body + "\n";
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `par-funnel-${start}-to-${end}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   }
 
   function downloadTeacherHoursCsv(rows, start, end) {
@@ -9023,6 +9473,284 @@
     $("#infographicsOverlay").classList.remove("open");
   }
 
+  /* ═════════════ T12: Mailchimp settings modal ═════════════
+   *
+   * Super_admin-only setup for the per-franchise Mailchimp sync. The
+   * Edge Function `dk-mailchimp-ping` is the only path that talks to
+   * Mailchimp's API from the browser-side (we call it with the user's
+   * JWT; it gates on is_super_admin() server-side). Saving the modal
+   * writes dk_config (api_key, server_prefix, audience_id, double_opt_in,
+   * webhook_secret if missing) and the next 60-second pg_cron tick of
+   * dk-mailchimp-drain flushes whatever's in the outbox. */
+
+  // Module-local state for the modal — a mc-specific object that lives
+  // alongside state.dkConfig so the merge-fields list and audience picker
+  // can be rebuilt without re-pinging Mailchimp every keystroke.
+  state._mc = state._mc || { audiences: [], mergeFields: [], serverPrefix: null };
+
+  function openMailchimpModal() {
+    if (!isSuperAdmin()) { showToast("Super_admins only", "error"); return; }
+
+    // Hydrate inputs from state.dkConfig.
+    const cfg = state.dkConfig || {};
+    $("#mc_api_key").value = cfg.mailchimp_api_key || "";
+    $("#mc_double_opt_in").checked = cfg.mailchimp_double_opt_in !== false;
+
+    // Webhook URL — show as soon as we have a stored secret; the input is
+    // empty until first save.
+    refreshMailchimpWebhookUrl();
+
+    // If we already have an audience saved, prefill the picker without forcing a ping.
+    if (cfg.mailchimp_audience_id) {
+      $("#mc_audience_field").style.display = "";
+      $("#mc_audience_select").innerHTML = `<option value="${escapeHtml(cfg.mailchimp_audience_id)}">${escapeHtml(cfg.mailchimp_audience_id)}</option>`;
+    } else {
+      $("#mc_audience_field").style.display = "none";
+    }
+
+    $("#mc_test_status").textContent = "";
+    $("#mc_merge_fields_status").textContent = cfg.mailchimp_audience_id
+      ? "Click Test connection to refresh the merge-field status."
+      : "Test the connection above to see merge-field status.";
+    $("#mc_merge_fields_list").innerHTML = "";
+
+    refreshMailchimpStatusPill();
+    $("#mailchimpOverlay").classList.add("open");
+  }
+
+  function closeMailchimpModal() {
+    $("#mailchimpOverlay").classList.remove("open");
+  }
+
+  function refreshMailchimpWebhookUrl() {
+    const cfg = state.dkConfig || {};
+    const secret = cfg.mailchimp_webhook_secret;
+    const supabaseUrl = (window.SUPABASE_URL || (typeof config !== "undefined" && config?.supabaseUrl) || "").replace(/\/+$/, "");
+    if (secret && supabaseUrl) {
+      $("#mc_webhook_url").value = `${supabaseUrl}/functions/v1/mailchimp-webhook?secret=${encodeURIComponent(secret)}`;
+    } else {
+      $("#mc_webhook_url").value = "(saved after first connection — click Save below)";
+    }
+  }
+
+  // Test connection: call dk-mailchimp-ping with the pasted key. If an
+  // audience is already selected (or saved), include it so the response
+  // also returns merge-field info.
+  async function testMailchimpConnection() {
+    const apiKey = ($("#mc_api_key").value || "").trim();
+    if (!apiKey) { $("#mc_test_status").textContent = "Paste an API key first."; return; }
+
+    const audienceId = $("#mc_audience_select").value || (state.dkConfig?.mailchimp_audience_id || null);
+
+    $("#mc_test_status").textContent = "Testing…";
+    try {
+      const { data, error } = await sb.functions.invoke("dk-mailchimp-ping", {
+        body: { api_key: apiKey, audience_id: audienceId || undefined },
+      });
+      if (error) {
+        const detail = await readEdgeFunctionErrorDetail(error);
+        $("#mc_test_status").textContent = `❌ ${detail || error.message}`;
+        return;
+      }
+      state._mc.audiences = data?.audiences || [];
+      state._mc.serverPrefix = data?.server_prefix || null;
+      state._mc.mergeFields = data?.merge_fields || [];
+      $("#mc_test_status").textContent = `✓ Connected (${data?.account_name || "Mailchimp"} · ${state._mc.audiences.length} audience${state._mc.audiences.length === 1 ? "" : "s"})`;
+
+      // Populate audience picker.
+      $("#mc_audience_field").style.display = "";
+      const sel = $("#mc_audience_select");
+      sel.innerHTML = state._mc.audiences.map((a) =>
+        `<option value="${escapeHtml(a.id)}">${escapeHtml(a.name)} — ${a.member_count || 0} contacts</option>`
+      ).join("");
+      if (audienceId && state._mc.audiences.some((a) => a.id === audienceId)) sel.value = audienceId;
+
+      renderMailchimpMergeFields(data?.required_merge_fields || [], state._mc.mergeFields);
+
+      // If user picks a different audience after the first test, re-ping
+      // for that audience's merge fields. Wired once.
+      sel.onchange = async () => {
+        $("#mc_merge_fields_status").textContent = "Loading merge fields for this audience…";
+        try {
+          const { data: d2, error: e2 } = await sb.functions.invoke("dk-mailchimp-ping", {
+            body: { api_key: apiKey, audience_id: sel.value },
+          });
+          if (e2) {
+            const detail = await readEdgeFunctionErrorDetail(e2);
+            $("#mc_merge_fields_status").textContent = `❌ ${detail || e2.message}`;
+            return;
+          }
+          state._mc.mergeFields = d2?.merge_fields || [];
+          renderMailchimpMergeFields(d2?.required_merge_fields || [], state._mc.mergeFields);
+        } catch (e3) {
+          $("#mc_merge_fields_status").textContent = `❌ ${e3.message || String(e3)}`;
+        }
+      };
+    } catch (e) {
+      $("#mc_test_status").textContent = `❌ ${e.message || String(e)}`;
+    }
+  }
+
+  function renderMailchimpMergeFields(required, existing) {
+    const existingByTag = new Map((existing || []).map((m) => [m.tag, m]));
+    const wrap = $("#mc_merge_fields_list");
+    wrap.innerHTML = "";
+    let missing = 0;
+    (required || []).forEach((req) => {
+      const has = existingByTag.has(req.tag);
+      if (!has) missing += 1;
+      const row = document.createElement("div");
+      row.className = "mc-mf-row";
+      row.innerHTML = `
+        <span class="mc-mf-tag">*|${escapeHtml(req.tag)}|*</span>
+        <span class="mc-mf-name">${escapeHtml(req.name)}</span>
+        <span class="${has ? "mc-mf-status-ok" : "mc-mf-status-missing"}">${has ? "✓ exists" : "missing"}</span>
+        ${has ? "" : `<button class="btn small" data-create-mf="${escapeHtml(req.tag)}">Create</button>`}
+      `;
+      wrap.appendChild(row);
+    });
+    $("#mc_merge_fields_status").textContent = missing === 0
+      ? `✓ All ${required.length} merge fields present.`
+      : `${missing} of ${required.length} merge field${missing === 1 ? "" : "s"} missing — click Create to add them.`;
+    wrap.querySelectorAll("[data-create-mf]").forEach((btn) => {
+      btn.onclick = () => createMissingMergeField(btn.getAttribute("data-create-mf"));
+    });
+  }
+
+  async function createMissingMergeField(tag) {
+    const apiKey = ($("#mc_api_key").value || "").trim();
+    const audienceId = $("#mc_audience_select").value;
+    if (!apiKey || !audienceId) return;
+    try {
+      const { data, error } = await sb.functions.invoke("dk-mailchimp-ping", {
+        body: { api_key: apiKey, audience_id: audienceId, create_merge_fields: [tag] },
+      });
+      if (error) {
+        const detail = await readEdgeFunctionErrorDetail(error);
+        showToast(`Create failed: ${detail || error.message}`, "error");
+        return;
+      }
+      state._mc.mergeFields = data?.merge_fields || state._mc.mergeFields;
+      renderMailchimpMergeFields(data?.required_merge_fields || [], state._mc.mergeFields);
+      showToast(`Created merge field ${tag}`, "ok");
+    } catch (e) {
+      showToast(`Create failed: ${e.message || String(e)}`, "error");
+    }
+  }
+
+  // Save: write the four dk_config columns + mint webhook_secret if not yet set.
+  async function saveMailchimpSettings() {
+    if (!isSuperAdmin()) { showToast("Super_admins only", "error"); return; }
+    const apiKey = ($("#mc_api_key").value || "").trim();
+    const audienceId = $("#mc_audience_select").value || null;
+    const doubleOptIn = $("#mc_double_opt_in").checked;
+    if (!apiKey) { showToast("Paste an API key first", "error"); return; }
+    if (!audienceId) { showToast("Pick an audience first", "error"); return; }
+
+    // Parse server prefix from key suffix (e.g. "abc...-us21" → "us21")
+    const parts = apiKey.split("-");
+    const last = parts[parts.length - 1].trim();
+    if (!/^[a-z]{2}\d+$/.test(last)) {
+      showToast("API key suffix doesn't look like a server prefix (e.g. -us21)", "error");
+      return;
+    }
+    const serverPrefix = last;
+
+    // Mint a webhook secret if we don't already have one.
+    let webhookSecret = state.dkConfig?.mailchimp_webhook_secret;
+    if (!webhookSecret) {
+      const arr = new Uint8Array(32);
+      crypto.getRandomValues(arr);
+      webhookSecret = Array.from(arr).map((b) => b.toString(16).padStart(2, "0")).join("");
+    }
+
+    const { error } = await sb.from("dk_config").update({
+      mailchimp_api_key: apiKey,
+      mailchimp_server_prefix: serverPrefix,
+      mailchimp_audience_id: audienceId,
+      mailchimp_webhook_secret: webhookSecret,
+      mailchimp_double_opt_in: doubleOptIn,
+    }).eq("id", 1);
+
+    if (error) {
+      showToast(`Save failed: ${error.message}`, "error");
+      return;
+    }
+    // Refresh local state immediately so the webhook URL appears without waiting
+    // for the realtime debounce.
+    state.dkConfig = {
+      ...(state.dkConfig || {}),
+      mailchimp_api_key: apiKey,
+      mailchimp_server_prefix: serverPrefix,
+      mailchimp_audience_id: audienceId,
+      mailchimp_webhook_secret: webhookSecret,
+      mailchimp_double_opt_in: doubleOptIn,
+    };
+    refreshMailchimpWebhookUrl();
+    showToast("Mailchimp settings saved. Drain runs every 60s.", "ok");
+  }
+
+  async function refreshMailchimpStatusPill() {
+    const pill = $("#mc_sync_status_pill");
+    if (!pill) return;
+    pill.className = "mc-pill mc-pill-idle";
+    pill.textContent = "Loading…";
+    try {
+      const { count: pendingCount } = await sb.from("mailchimp_sync_outbox")
+        .select("id", { count: "exact", head: true })
+        .is("completed_at", null)
+        .lt("attempts", 5);
+      const { count: stuckCount } = await sb.from("mailchimp_sync_outbox")
+        .select("id", { count: "exact", head: true })
+        .is("completed_at", null)
+        .gte("attempts", 5);
+      const since24h = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+      const { count: doneCount } = await sb.from("mailchimp_sync_outbox")
+        .select("id", { count: "exact", head: true })
+        .gte("completed_at", since24h);
+
+      const cls = stuckCount > 0 ? "mc-pill-failed"
+        : pendingCount > 0 ? "mc-pill-pending"
+        : "mc-pill-ok";
+      pill.className = `mc-pill ${cls}`;
+      pill.textContent = `${pendingCount || 0} pending · ${stuckCount || 0} stuck · ${doneCount || 0} done in last 24h`;
+    } catch (e) {
+      pill.className = "mc-pill mc-pill-failed";
+      pill.textContent = `Status load failed: ${e.message || String(e)}`;
+    }
+  }
+
+  async function retryStuckMailchimpRows() {
+    if (!isAdminOrAbove()) { showToast("Admins only", "error"); return; }
+    $("#mc_retry_status").textContent = "Resetting…";
+    const { error, count } = await sb.from("mailchimp_sync_outbox")
+      .update({ attempts: 0, last_error: null }, { count: "exact" })
+      .is("completed_at", null)
+      .gte("attempts", 5);
+    if (error) {
+      $("#mc_retry_status").textContent = `❌ ${error.message}`;
+      return;
+    }
+    $("#mc_retry_status").textContent = `Reset ${count || 0} row${count === 1 ? "" : "s"}. Next drain runs within 60s.`;
+    refreshMailchimpStatusPill();
+  }
+
+  // Defensive parser for non-2xx Edge Function responses (CLAUDE.md §5).
+  // The user-visible error.message is the generic wrapper; the real JSON
+  // body is on error.context (pre-2.50) or response (2.50+).
+  async function readEdgeFunctionErrorDetail(error) {
+    try {
+      const respObj = error?.context || error?.response;
+      if (!respObj) return null;
+      const cloned = typeof respObj.clone === "function" ? respObj.clone() : respObj;
+      const body = await cloned.json();
+      return body?.error || body?.detail || JSON.stringify(body);
+    } catch (_) {
+      return null;
+    }
+  }
+
+
   /* ═════════════ T6c: Payment methods manage-list modal ═════════════ */
 
   function openPaymentMethodsModal() {
@@ -9416,6 +10144,24 @@
     $("#infographicsModalClose").onclick = closeInfographicsModal;
     $("#infographicsModalDone").onclick  = closeInfographicsModal;
     $("#infographicsOverlay").onclick    = (e) => { if (e.target.id === "infographicsOverlay") closeInfographicsModal(); };
+
+    // T12: Mailchimp settings modal (Templates tab head, super_admin only)
+    const mcOpenBtn = $("#manageMailchimpBtn");
+    if (mcOpenBtn) mcOpenBtn.onclick = openMailchimpModal;
+    $("#mailchimpModalClose").onclick = closeMailchimpModal;
+    $("#mc_modal_done").onclick       = closeMailchimpModal;
+    $("#mailchimpOverlay").onclick    = (e) => { if (e.target.id === "mailchimpOverlay") closeMailchimpModal(); };
+    $("#mc_test_btn").onclick    = testMailchimpConnection;
+    $("#mc_save_btn").onclick    = saveMailchimpSettings;
+    $("#mc_retry_stuck").onclick = retryStuckMailchimpRows;
+    $("#mc_webhook_copy").onclick = () => {
+      const inp = $("#mc_webhook_url");
+      if (!inp.value || inp.value.startsWith("(")) return;
+      navigator.clipboard.writeText(inp.value).then(
+        () => showToast("Webhook URL copied", "ok"),
+        () => showToast("Copy failed — select + copy manually", "error"),
+      );
+    };
 
     // T6c: payment-methods manage modal
     const pmEditBtn = $("#t_payment_method_edit");
