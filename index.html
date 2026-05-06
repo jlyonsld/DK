@@ -1749,6 +1749,15 @@
           <div class="field-hint" style="margin-top:6px;">
             Rows retry up to 5 times before they go "stuck." The drain runs every 60 seconds.
           </div>
+          <div style="display:flex; gap:8px; align-items:center; margin-top:14px;">
+            <button class="btn small" id="mc_backfill_btn">Resync all students</button>
+            <span id="mc_backfill_status" class="muted small"></span>
+          </div>
+          <div class="field-hint" style="margin-top:6px;">
+            One-shot: enqueues every student × parent email into the outbox so the
+            current roster lands in Mailchimp. Use after first connect, or after
+            switching to a different audience.
+          </div>
         </section>
 
       </div>

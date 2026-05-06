@@ -9735,6 +9735,28 @@
     refreshMailchimpStatusPill();
   }
 
+  // T12b: super_admin one-shot to seed MC from the existing student roster.
+  // Confirms first because re-running creates redundant upsert ops (idempotent
+  // at MC, but burns API budget on a 5k-roster franchise).
+  async function backfillMailchimpFromRoster() {
+    if (!isSuperAdmin()) { showToast("Super_admins only", "error"); return; }
+    if (!confirm("Enqueue every student × parent email into the Mailchimp outbox? Safe to run more than once but each run burns API budget (drain caps at ~50/min).")) return;
+    const statusEl = $("#mc_backfill_status");
+    const btn = $("#mc_backfill_btn");
+    btn.disabled = true;
+    statusEl.textContent = "Enqueuing…";
+    const { data, error } = await sb.rpc("enqueue_mailchimp_backfill");
+    btn.disabled = false;
+    if (error) {
+      statusEl.textContent = `❌ ${error.message}`;
+      return;
+    }
+    const enq = data?.enqueued ?? 0;
+    const cov = data?.students_covered ?? 0;
+    statusEl.textContent = `✓ Enqueued ${enq} row${enq === 1 ? "" : "s"} across ${cov} student${cov === 1 ? "" : "s"}. Drain processes ~50/min.`;
+    refreshMailchimpStatusPill();
+  }
+
   // Defensive parser for non-2xx Edge Function responses (CLAUDE.md §5).
   // The user-visible error.message is the generic wrapper; the real JSON
   // body is on error.context (pre-2.50) or response (2.50+).
@@ -10154,6 +10176,8 @@
     $("#mc_test_btn").onclick    = testMailchimpConnection;
     $("#mc_save_btn").onclick    = saveMailchimpSettings;
     $("#mc_retry_stuck").onclick = retryStuckMailchimpRows;
+    const mcBackfillBtn = $("#mc_backfill_btn");
+    if (mcBackfillBtn) mcBackfillBtn.onclick = backfillMailchimpFromRoster;
     $("#mc_webhook_copy").onclick = () => {
       const inp = $("#mc_webhook_url");
       if (!inp.value || inp.value.startsWith("(")) return;

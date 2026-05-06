@@ -245,14 +245,31 @@ response-console-v3/
     │                                       Function. Vault secret
     │                                       `mailchimp_drain_cron_secret`
     │                                       authenticates the cron call. See §4.29.
-    └── phase_t12_mailchimp_cron_secret_rpc.sql
-                                          ← Tiny RPC wrapper
-                                            `get_mailchimp_drain_cron_secret()`
-                                            (security definer, service-role only)
-                                            so the drain Edge Function can read
-                                            the vault secret via PostgREST
-                                            without exposing the vault schema
-                                            directly. See §4.29.
+    ├── phase_t12_mailchimp_cron_secret_rpc.sql
+    │                                     ← Tiny RPC wrapper
+    │                                       `get_mailchimp_drain_cron_secret()`
+    │                                       (security definer, service-role only)
+    │                                       so the drain Edge Function can read
+    │                                       the vault secret via PostgREST
+    │                                       without exposing the vault schema
+    │                                       directly. See §4.29.
+    ├── phase_t12b_mailchimp_backfill.sql ← T12b. `enqueue_mailchimp_backfill()`
+    │                                       RPC. Super_admin only. Enqueues
+    │                                       one mailchimp_sync_outbox row per
+    │                                       (student × parent_email). Powers
+    │                                       the "Resync all students" button
+    │                                       in the Mailchimp settings modal.
+    │                                       See §4.29.
+    └── phase_t14_nightly_housekeeping.sql ← T14. `nightly_housekeeping()` +
+                                            pg_cron job `nightly-housekeeping`
+                                            (03:30 UTC daily). Marks pending-
+                                            but-expired student_intake_requests
+                                            as 'expired', then purges
+                                            install_nonces > 30d, closures
+                                            > 90d, and terminal intake_requests
+                                            > 90d. Returns a jsonb summary
+                                            visible in cron.job_run_details.
+                                            See §4.30.
 ```
 
 **Pre-T4 migrations (not in repo) live at the parent folder:**
@@ -818,7 +835,28 @@ T12 turns DK into the system of record for student / enrollment / class data and
 
 **UI surface — `⚙ Mailchimp` button in the Templates tab head (super_admin only).** Visibility gate is `isSuperAdmin()` directly in `applyRoleVisibility()` — same gate as `dk_config` writes. The modal `#mailchimpOverlay` has four sections (Connect / Webhook / Merge fields / Sync status) plus Save. The webhook URL only renders when `mailchimp_webhook_secret` is set — first save mints it. Audience picker hides until Test connection succeeds (or hydrates from `state.dkConfig.mailchimp_audience_id` on open). Merge-fields list re-runs on audience change so picking a different audience refreshes the missing-field check. Sync status pill rolls up `mailchimp_sync_outbox` (pending / stuck / done-in-24h) and reloads on modal open; **realtime updates land via `supabase_realtime` on `mailchimp_sync_outbox` + `mailchimp_sync_log`** (added to the publication by the migration), so a drain run while the modal is open updates the pill within the 300ms debounce.
 
-**Out of scope for v1 (deliberate, do not bolt on):** template push to MC's `/3.0/templates`; campaign creation from DK ("Send to class" → segment-by-tag); Mailchimp Transactional / Mandrill (paid, separate product); per-class sub-audiences (one audience, tags handle segmentation); inbound lead capture from MC sign-up forms → DK student row (natural extension once Meta→Mailchimp lead-intake is wired); bulk backfill of existing students into MC on first connect (admin can `update students set parent_emails = parent_emails` after connect to retrigger every row, but it's not a button).
+**Bulk backfill on first connect (T12b — ✅ shipped).** "Resync all students" button in the Mailchimp settings modal (Sync status section, super_admin only). Calls `enqueue_mailchimp_backfill()` RPC which iterates every `students` row with non-empty `parent_emails` and enqueues one outbox row per `(student, parent_email)` pair. Confirms before firing because re-running on a 5k roster burns API budget (idempotent at MC, drain caps at ~50/min). Refuses to run if `mailchimp_api_key` or `mailchimp_audience_id` is null — no point seeding an outbox the drain will silently skip. Returns `{enqueued, students_covered, enqueued_at}` jsonb so the modal can show "✓ Enqueued N rows across M students." Replaces the previous "admin can `update students set parent_emails = parent_emails` after connect" workaround.
+
+**Out of scope for v1 (deliberate, do not bolt on):** template push to MC's `/3.0/templates`; campaign creation from DK ("Send to class" → segment-by-tag); Mailchimp Transactional / Mandrill (paid, separate product); per-class sub-audiences (one audience, tags handle segmentation); inbound lead capture from MC sign-up forms → DK student row (natural extension once Meta→Mailchimp lead-intake is wired).
+
+### 4.30 Nightly housekeeping — install_nonces / closures / intake purge (T14)
+
+Three tables grow unbounded if left alone (CLAUDE.md §5/§6 has called this out since T2/T8/T11 shipped): `install_nonces`, `closures`, `student_intake_requests`. Volume per franchise is small (low hundreds per year), but every spoke install carries the same debt — cheaper to ship one purge job once than to revisit per-franchise.
+
+**One function, four steps, daily at 03:30 UTC.** `nightly_housekeeping()` is `security definer`, runs as the cron postgres role, and:
+
+1. **Marks pending-but-expired intake rows as `'expired'`.** Without this pre-step, a parent intake link whose `expires_at` passed but which was never resent or cancelled would linger in `pending` forever and never enter the purge window.
+2. **Deletes `install_nonces` older than 30 days.** Replay protection only needs the 5-minute token expiry window; 30 days is many orders of magnitude past any legitimate replay risk.
+3. **Deletes `closures` whose `date < current_date - 90 days`.** Schedule views never look back that far; if an admin needs historical record, the closure was emailed/posted in real time. Per-school + global closures purge identically.
+4. **Deletes `student_intake_requests` in `('expired','cancelled')` older than 90 days post-`sent_at`.** **Completed rows are NOT purged** — `submitted_payload` is the only place the parent's original submission survives reconciliation/edits to the resulting student row.
+
+Returns a jsonb summary `{ran_at, intake_marked_expired, install_nonces_purged, closures_purged, intake_requests_purged}` so the values land in `cron.job_run_details` for inspection. Function is locked down — execute revoked from public/anon/authenticated; only the postgres superuser (which cron runs as) can invoke it.
+
+The pg_cron job name is `nightly-housekeeping` (consistent with the existing `dk-mailchimp-drain` / `nightly-jackrabbit-sync` / `role-audit-outbox` naming). Schedule re-create is idempotent — the `do $$ ... $$` block unschedules-then-reschedules, so re-applying the migration won't double up.
+
+**Why the conservative retention windows.** Each table is useful audit trail at short range. 30/90/90 covers "last quarter" for any forensic need (who installed when, what days were closed, what intakes failed) while keeping growth bounded. If a future contributor wants longer or shorter retention, edit the four interval literals and re-apply — no schema change needed.
+
+**Why NOT a per-row TTL or partitioning.** Volume is low enough that a daily DELETE is sub-millisecond per table. Partitioning by month would add operational ceremony with no measurable benefit until volume crosses six figures, which won't happen at franchise scale.
 
 ---
 
@@ -854,7 +892,7 @@ T12 turns DK into the system of record for student / enrollment / class data and
 
 **PAR and DK share `PAR_SPOKE_API_KEY` and `SPOKE_INSTALL_SIGNING_SECRET`.** If you rotate either, rotate on BOTH Supabase projects simultaneously or the federation breaks.
 
-**The closures table has no cleanup.** `install_nonces` too. Both grow unbounded. Cheap for now (<1000 rows/year) but eventually worth a nightly pg_cron purge of old rows.
+**The closures + install_nonces + student_intake_requests purge runs nightly (T14).** `nightly_housekeeping()` at 03:30 UTC purges install_nonces > 30d, closures > 90d, and terminal intake_requests > 90d (after first flipping pending-but-expired intakes to `'expired'`). Don't add per-table cleanup logic anywhere else; route any new retention rule through this function so the four interval literals stay co-located. Completed intake rows are intentionally retained (their `submitted_payload` is the audit trail). See §4.30.
 
 **Classes' `times` field is parsed by a brittle regex.** See `parseClassDurationMinutes()` in `app.js`. If Jackrabbit ever changes its openings-feed time format, the week-view block heights break. We default to 60 min duration on parse failure, so it degrades gracefully.
 
@@ -1015,7 +1053,7 @@ T12 turns DK into the system of record for student / enrollment / class data and
 
 - **Zoom/Apple/Outlook sync** — none. DK is not a calendar app.
 
-- **`install_nonces` and `closures` grow unbounded.** See §5.
+- ~~**`install_nonces` and `closures` grow unbounded.**~~ Resolved by T14 (`nightly_housekeeping()` cron). See §4.30.
 
 - **Teacher bento matches via email.** See §5. Fragile if a teacher has an alternate email on file; ignored case-insensitively in lookups.
 
@@ -1071,3 +1109,5 @@ JACKRABBIT_ORG_ID                # "551000" for the Charleston franchise
 | T7b — Usage-tier variants (≥20 / ≥50 sessions) + dismiss UX + admin PAR-funnel report | ✅ Shipped |
 | T13 — Per-school closures (nullable closures.school_id, scoped vs. global rendering) | ✅ Shipped |
 | T12 — Mailchimp sync (per-franchise audience, outbox queue, drain + webhook + ping Edge Functions, settings modal) | ✅ Code-complete, awaiting Sharon's API key + audience selection |
+| T12b — Mailchimp roster backfill button (`enqueue_mailchimp_backfill()` RPC + super_admin "Resync all students" button) | ✅ Shipped |
+| T14 — Nightly housekeeping (`nightly_housekeeping()` + pg_cron job purging install_nonces > 30d, closures > 90d, terminal intake_requests > 90d) | ✅ Shipped |
