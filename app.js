@@ -8046,6 +8046,42 @@
     return "Drama Kids — following up on your inquiry";
   }
 
+  // Render the body for the live preview pane: any remaining {placeholder}
+  // wraps in a bold yellow chip; everything else (filled values + plain
+  // text) renders normally. Lets the admin scan the body and instantly
+  // see where unfilled vars still live.
+  function leadHighlightedBody(body) {
+    return escapeHtml(body || "").replace(/\{([a-zA-Z0-9_]+)\}/g, (_m, name) => {
+      return `<span class="lead-var-unfilled">{${escapeHtml(name)}}</span>`;
+    });
+  }
+
+  function updateLeadReplyPreview() {
+    const previewEl = $("#lead_reply_preview");
+    const bodyEl    = $("#lead_reply_body");
+    if (!previewEl || !bodyEl) return;
+    const text = bodyEl.value || "";
+    previewEl.innerHTML = leadHighlightedBody(text);
+
+    // Also keep the unfilled-list banner in sync (it summarizes which
+    // variable names still need values; the preview shows where they sit).
+    const unfilledEl = $("#lead_reply_unfilled");
+    if (unfilledEl) {
+      const seen = [];
+      const re = /\{([a-zA-Z0-9_]+)\}/g;
+      let m;
+      while ((m = re.exec(text)) !== null) {
+        if (!seen.includes(m[1])) seen.push(m[1]);
+      }
+      if (seen.length > 0) {
+        unfilledEl.innerHTML = `⚠ Unfilled placeholders: ${seen.map((v) => `<code>{${escapeHtml(v)}}</code>`).join(", ")}`;
+        unfilledEl.style.display = "";
+      } else {
+        unfilledEl.style.display = "none";
+      }
+    }
+  }
+
   function applyLeadReplyTemplate() {
     const lead = state.leads.find((x) => x.id === state.lState.editingId);
     if (!lead) return;
@@ -8057,23 +8093,7 @@
     const body = tpl ? substitute(tpl.body || "", ctx) : "";
     $("#lead_reply_body").value = body;
     $("#lead_reply_subject").value = buildLeadReplySubject(tpl, lead);
-
-    // Surface any {variable} that didn't get replaced (template uses
-    // a non-lead variable like {class_name}). Admin can edit those by
-    // hand in the body — this is a hint, not a blocker.
-    const unfilled = [];
-    const re = /\{([a-zA-Z0-9_]+)\}/g;
-    let m;
-    while ((m = re.exec(body)) !== null) {
-      if (!unfilled.includes(m[1])) unfilled.push(m[1]);
-    }
-    const unfilledEl = $("#lead_reply_unfilled");
-    if (unfilled.length > 0) {
-      unfilledEl.innerHTML = `⚠ Unfilled placeholders: ${unfilled.map((v) => `<code>{${escapeHtml(v)}}</code>`).join(", ")}`;
-      unfilledEl.style.display = "";
-    } else {
-      unfilledEl.style.display = "none";
-    }
+    updateLeadReplyPreview();
   }
 
   function openLeadReply(lead) {
@@ -8114,8 +8134,12 @@
     } else {
       $("#lead_reply_body").value = "";
       $("#lead_reply_subject").value = buildLeadReplySubject(null, lead);
-      $("#lead_reply_unfilled").style.display = "none";
+      updateLeadReplyPreview();
     }
+
+    // Wire textarea live preview — re-bind every open so we don't double-fire.
+    const bodyEl = $("#lead_reply_body");
+    if (bodyEl) bodyEl.oninput = updateLeadReplyPreview;
 
     overlay.classList.add("open");
   }

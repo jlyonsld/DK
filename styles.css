@@ -3812,7 +3812,7 @@ footer code {
   flex-wrap: wrap;
   gap: 8px;
   padding: 10px 0 14px 0;
-  border-bottom: 1px solid var(--hairline, hsla(210, 20%, 70%, .25));
+  border-bottom: 1px solid var(--border);
   margin-bottom: 14px;
 }
 
@@ -3823,8 +3823,8 @@ footer code {
 }
 
 .lead-card {
-  background: var(--surface, #fff);
-  border: 1px solid var(--hairline, hsla(210, 20%, 70%, .25));
+  background: var(--panel);
+  border: 1px solid var(--border);
   border-radius: 10px;
   padding: 14px;
   display: flex;
@@ -3842,7 +3842,7 @@ footer code {
 .lead-card-name {
   font-weight: 600;
   font-size: 14px;
-  color: var(--ink, #222);
+  color: var(--ink);
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3850,7 +3850,7 @@ footer code {
 
 .lead-card-meta {
   font-size: 12px;
-  color: var(--ink-dim, #555);
+  color: var(--ink-dim);
 }
 
 .lead-card-details {
@@ -3861,18 +3861,18 @@ footer code {
 }
 
 .lead-detail-line {
-  color: var(--ink-dim, #555);
+  color: var(--ink-dim);
 }
 .lead-detail-line a {
-  color: var(--accent, #1f7ad8);
+  color: var(--accent);
   text-decoration: none;
 }
 .lead-detail-line a:hover { text-decoration: underline; }
 
 .lead-card-notes {
   font-size: 12px;
-  color: var(--ink-dim, #555);
-  background: var(--surface-alt, #fafafa);
+  color: var(--ink-dim);
+  background: var(--panel-raised);
   padding: 6px 8px;
   border-radius: 6px;
 }
@@ -3940,33 +3940,34 @@ footer code {
   display: flex;
   gap: 12px;
   padding: 4px 0;
-  border-bottom: 1px dashed hsla(210, 20%, 70%, .25);
+  border-bottom: 1px dashed var(--border);
 }
 .lead-detail-row:last-child { border-bottom: none; }
 .lead-detail-key {
   flex: 0 0 140px;
   font-weight: 600;
-  color: var(--ink-dim, #555);
+  color: var(--ink-dim);
 }
 .lead-detail-val {
   flex: 1;
-  color: var(--ink, #222);
+  color: var(--ink);
   word-break: break-word;
 }
 .lead-detail-raw {
   margin-top: 14px;
   padding-top: 10px;
-  border-top: 1px solid var(--hairline, hsla(210, 20%, 70%, .25));
+  border-top: 1px solid var(--border);
 }
 .lead-detail-raw summary {
   cursor: pointer;
   font-size: 12px;
-  color: var(--ink-dim, #555);
+  color: var(--ink-dim);
 }
 .lead-detail-raw pre {
   margin-top: 8px;
   padding: 10px;
-  background: var(--surface-alt, #fafafa);
+  background: var(--panel-raised);
+  color: var(--ink);
   border-radius: 6px;
   font-size: 11px;
   max-height: 320px;
@@ -3978,8 +3979,8 @@ footer code {
 /* Reply + promote target banners share styling */
 .lead-reply-target,
 .lead-promote-banner {
-  background: var(--surface-alt, #fafafa);
-  border: 1px solid var(--hairline, hsla(210, 20%, 70%, .25));
+  background: var(--panel-raised);
+  border: 1px solid var(--border);
   border-radius: 8px;
   padding: 10px 12px;
   margin-bottom: 14px;
@@ -3987,26 +3988,26 @@ footer code {
 .lead-reply-target-name {
   font-weight: 600;
   font-size: 14px;
-  color: var(--ink, #222);
+  color: var(--ink);
 }
 .lead-reply-target-meta {
   font-size: 12px;
-  color: var(--ink-dim, #555);
+  color: var(--ink-dim);
   margin-top: 3px;
 }
 
 .lead-reply-unfilled {
   margin-top: 8px;
   padding: 6px 10px;
-  background: hsla(38, 90%, 50%, .12);
-  border: 1px solid hsla(38, 90%, 50%, .35);
-  color: hsl(38, 85%, 38%);
+  background: rgba(251, 191, 36, .12);
+  border: 1px solid rgba(251, 191, 36, .35);
+  color: rgb(252, 211, 77);
   border-radius: 6px;
   font-size: 12px;
 }
 .lead-reply-unfilled code {
-  font-family: monospace;
-  background: hsla(38, 90%, 50%, .18);
+  font-family: var(--font-mono, monospace);
+  background: rgba(251, 191, 36, .18);
   padding: 1px 4px;
   border-radius: 3px;
 }
@@ -4014,11 +4015,48 @@ footer code {
 .lead-promote-hint {
   margin-top: 10px;
   padding: 8px 10px;
-  background: var(--surface-alt, #fafafa);
+  background: var(--panel-raised);
   border-radius: 6px;
   font-size: 12px;
-  color: var(--ink-dim, #555);
+  color: var(--ink-dim);
   line-height: 1.4;
+}
+
+/* Live preview of the reply body — placeholders bold/colored, filled
+   text renders normally so admin can see at a glance where unfilled
+   {vars} remain. Updates on every keystroke. */
+.lead-reply-preview-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ink-dim);
+  margin: 12px 0 4px 0;
+  font-weight: 600;
+}
+.lead-reply-preview {
+  background: var(--panel-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.lead-reply-preview .lead-var-unfilled {
+  display: inline-block;
+  background: rgba(251, 191, 36, .18);
+  color: rgb(252, 211, 77);
+  border: 1px solid rgba(251, 191, 36, .4);
+  font-family: var(--font-mono, monospace);
+  font-weight: 700;
+  font-size: 12px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  margin: 0 1px;
 }
 
 @media (max-width: 720px) {
