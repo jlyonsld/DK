@@ -4096,6 +4096,13 @@ footer code {
   padding: 1px 6px;
   border-radius: 4px;
   margin: 0 1px;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.lead-reply-preview .lead-var-unfilled:hover {
+  background: rgba(251, 191, 36, .32);
+  border-color: rgba(251, 191, 36, .65);
+  color: rgb(254, 240, 138);
 }
 
 @media (max-width: 720px) {

@@ -8097,10 +8097,48 @@
   // wraps in a bold yellow chip; everything else (filled values + plain
   // text) renders normally. Lets the admin scan the body and instantly
   // see where unfilled vars still live.
+  //
+  // Each chip carries data-name + data-occ (occurrence index) so a click
+  // can locate the matching {var} in the textarea by ordinal — supports
+  // templates that reference the same variable multiple times.
   function leadHighlightedBody(body) {
+    const counts = {};
     return escapeHtml(body || "").replace(/\{([a-zA-Z0-9_]+)\}/g, (_m, name) => {
-      return `<span class="lead-var-unfilled">{${escapeHtml(name)}}</span>`;
+      const occ = counts[name] || 0;
+      counts[name] = occ + 1;
+      return `<span class="lead-var-unfilled" data-name="${escapeHtml(name)}" data-occ="${occ}">{${escapeHtml(name)}}</span>`;
     });
+  }
+
+  // Click on a yellow chip in the preview → select the matching {var}
+  // in the textarea so the admin can immediately type a replacement.
+  // Uses occurrence index so the Nth chip in the preview maps to the
+  // Nth `{name}` in the textarea source.
+  function selectLeadPlaceholderInTextarea(name, occ) {
+    const ta = $("#lead_reply_body");
+    if (!ta) return;
+    const body = ta.value || "";
+    const target = `{${name}}`;
+    let count = 0;
+    let idx = 0;
+    while (true) {
+      const found = body.indexOf(target, idx);
+      if (found === -1) break;
+      if (count === occ) {
+        ta.focus();
+        ta.setSelectionRange(found, found + target.length);
+        return;
+      }
+      count += 1;
+      idx = found + target.length;
+    }
+    // Fallback (admin edited the body and the occ no longer aligns) —
+    // select the first remaining instance instead of doing nothing.
+    const first = body.indexOf(target);
+    if (first !== -1) {
+      ta.focus();
+      ta.setSelectionRange(first, first + target.length);
+    }
   }
 
   function updateLeadReplyPreview() {
@@ -8188,11 +8226,22 @@
     const bodyEl = $("#lead_reply_body");
     if (bodyEl) bodyEl.oninput = updateLeadReplyPreview;
 
-    // Click anywhere in the read-only preview → focus the editable textarea.
-    // Helps users who instinctively click the preview to type into it.
+    // Preview click delegation: clicking a yellow chip selects the
+    // corresponding {var} in the textarea (so a quick keystroke replaces
+    // it). Clicking anywhere else just focuses the textarea so users
+    // who instinctively click the preview to type land in the right box.
     const previewEl = $("#lead_reply_preview");
     if (previewEl && bodyEl) {
-      previewEl.onclick = () => bodyEl.focus();
+      previewEl.onclick = (e) => {
+        const chip = e.target && e.target.closest && e.target.closest(".lead-var-unfilled");
+        if (chip) {
+          const name = chip.dataset.name || "";
+          const occ  = parseInt(chip.dataset.occ || "0", 10) || 0;
+          selectLeadPlaceholderInTextarea(name, occ);
+          return;
+        }
+        bodyEl.focus();
+      };
     }
 
     // Bidirectional scroll sync — keeps the preview vertically aligned
