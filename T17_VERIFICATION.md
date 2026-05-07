@@ -13,9 +13,20 @@
 The PAR side (Margin already built it):
 
 - `spoke-create-task` Edge Function exists on PAR.
-- Spoke `dk` registered at PAR's `/admin/spokes` (slug `dk`, raw API key
-  minted once and pasted into DK's Edge Function env).
-- `admin_install_spoke('dk', '<charleston-org-uuid>')` ran once on PAR.
+- Spoke `dk` registered in `public.spokes`.
+- API key in `public.spoke_api_keys` (raw key pasted into DK's
+  `DK_SPOKE_API_KEY` Edge Function secret; PAR keeps only the SHA-256 hash).
+- Install row in `public.spoke_installations` for Charleston's org with
+  `installed_by` = your PAR user uuid.
+- **Capability row in `public.spoke_capabilities`** for
+  `(spoke_slug='dk', endpoint='spoke-create-task')` — separate gate beyond
+  install. Without it, `spoke-create-task` returns `403 capability_missing`.
+
+**Why direct INSERTs (not `admin_install_spoke()`):** the RPC reads
+`auth.uid()` and rejects SQL Editor calls (`auth_required` — service-role
+context has null uid). Either invoke from PAR's signed-in admin UI OR
+INSERT directly into `spoke_installations`. See CLAUDE.md §4.33 "T17b
+lessons learned".
 
 ## 1. Migration spot-checks
 
@@ -111,8 +122,7 @@ Before setting `DK_SPOKE_API_KEY` on the DK Edge Function:
 
 1. Tasks tab → click "Send to PAR" on any task.
 2. Toast shows: "PAR not wired — missing env: DK_SPOKE_API_KEY. Set
-   DK_SPOKE_API_KEY and run admin_install_spoke('dk', <franchise-org>)
-   on PAR."
+   DK_SPOKE_API_KEY on DK + INSERT the four PAR-side rows."
 3. Task's "Send to PAR" button stays available (the local row is
    unchanged; `par_task_id` is still null).
 
@@ -122,8 +132,9 @@ dk_config.par_franchise_org_id`.
 
 ## 6. End-to-end PAR push (after T17b)
 
-After `DK_SPOKE_API_KEY` is set + `admin_install_spoke('dk', <org>)`
-has run on PAR:
+After `DK_SPOKE_API_KEY` is set on DK + the four PAR-side rows exist
+(`spokes`, `spoke_api_keys`, `spoke_installations`, `spoke_capabilities`
+— see Prereqs § 0):
 
 1. Tasks tab → "Send to PAR" on a task that hasn't been sent.
 2. Toast: "Sent to PAR".
