@@ -4022,6 +4022,183 @@ footer code {
   line-height: 1.4;
 }
 
+/* ── Tasks tab (T17) ── */
+
+.task-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 0 14px;
+}
+
+.task-group {
+  margin-bottom: 22px;
+}
+.task-group-head {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-dim);
+  padding: 6px 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 10px;
+}
+.task-group-count {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--panel-raised);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--ink-dim);
+}
+
+.task-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 12px;
+}
+
+.task-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.task-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+.task-card-title {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--ink);
+  flex: 1;
+}
+.task-card-desc {
+  font-size: 12px;
+  color: var(--ink-dim);
+  line-height: 1.4;
+  white-space: pre-wrap;
+}
+.task-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--ink-dim);
+  align-items: center;
+}
+.task-owner, .task-due {
+  font-size: 12px;
+  color: var(--ink-dim);
+}
+.task-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-top: 4px;
+}
+
+.task-status-select {
+  font-size: 11px;
+  padding: 2px 6px;
+}
+
+.task-status-chip,
+.task-pri-chip {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.task-status-open {
+  background: hsla(210, 80%, 55%, .14);
+  color: hsl(210, 75%, 42%);
+  border: 1px solid hsla(210, 80%, 55%, .35);
+}
+.task-status-progress {
+  background: hsla(38, 90%, 50%, .14);
+  color: hsl(38, 85%, 38%);
+  border: 1px solid hsla(38, 90%, 50%, .35);
+}
+.task-status-done {
+  background: hsla(150, 60%, 45%, .14);
+  color: hsl(150, 55%, 35%);
+  border: 1px solid hsla(150, 60%, 45%, .35);
+}
+.task-status-archived {
+  background: hsla(220, 10%, 60%, .14);
+  color: hsl(220, 8%, 42%);
+  border: 1px solid hsla(220, 10%, 60%, .35);
+}
+.task-pri-low {
+  background: hsla(220, 10%, 60%, .12);
+  color: hsl(220, 8%, 42%);
+  border: 1px solid hsla(220, 10%, 60%, .3);
+}
+.task-pri-med {
+  background: hsla(38, 80%, 55%, .12);
+  color: hsl(38, 70%, 38%);
+  border: 1px solid hsla(38, 80%, 55%, .3);
+}
+.task-pri-high {
+  background: hsla(0, 70%, 55%, .14);
+  color: hsl(0, 65%, 42%);
+  border: 1px solid hsla(0, 70%, 55%, .35);
+}
+
+.task-par-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: hsla(150, 60%, 45%, .14);
+  color: hsl(150, 55%, 35%);
+  border: 1px solid hsla(150, 60%, 45%, .35);
+}
+
+.task-import-hint {
+  font-size: 12px;
+  color: var(--ink-dim);
+  background: var(--panel-raised);
+  padding: 8px 10px;
+  border-radius: 6px;
+  margin-bottom: 10px;
+  line-height: 1.4;
+}
+.task-import-hint code {
+  background: rgba(0,0,0,.06);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 11px;
+}
+.task-import-status {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--ink-dim);
+  font-style: italic;
+}
+#task_importer_text {
+  width: 100%;
+  font-family: ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 /* Reply editor: textarea + read-only preview side-by-side. Both panes
    match in width / padding / font / line-height so wrapped lines align,
    and JS keeps scrollTop in sync so the user can edit a paragraph and

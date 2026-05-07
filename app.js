@@ -817,6 +817,7 @@
     renderEventsTab();
     renderInventoryTab();
     renderLeadsTab();
+    renderTasksTab();
     renderCurriculumTab();
     renderReportsTab();
     renderUsersTab();
@@ -2271,7 +2272,7 @@
     // visible mtabs will center themselves naturally.
     const toolsBtn = $("#mobileToolsBtn");
     if (toolsBtn) {
-      const anyTool = ["templates","schools","subrequests","events","inventory","leads","curriculum","reports","users"].some(canSeeTab);
+      const anyTool = ["templates","schools","subrequests","events","inventory","leads","tasks","curriculum","reports","users"].some(canSeeTab);
       toolsBtn.style.display = anyTool ? "" : "none";
     }
 
@@ -8499,6 +8500,439 @@
     showToast(`Promoted — new student id ${String(data).slice(0, 8)}…`, "success");
   }
 
+  /* ═════════════ Tasks tab (T17) ═════════════
+   * DK-side surface for the task federation pattern Margin built
+   * 2026-05-06 (CLAUDE.md §4.33). Tasks live in DK; "Send to PAR"
+   * forwards to PAR's spoke-create-task via the dk-create-par-task
+   * Edge Function and stamps the returned uuid onto par_task_id.
+   *
+   * SELECT is open to any signed-in user (teachers see tasks delegated
+   * to them). Writes gate on manage_tasks; status flip by an owner uses
+   * the set_task_status RPC which permits owner-self updates.
+   */
+
+  const TASK_STATUS_META = {
+    open:        { label: "Open",        chip: "task-status-open" },
+    in_progress: { label: "In progress", chip: "task-status-progress" },
+    done:        { label: "Done",        chip: "task-status-done" },
+    archived:    { label: "Archived",    chip: "task-status-archived" },
+  };
+
+  const TASK_FILTERS = [
+    { id: "open",        label: "Open" },
+    { id: "in_progress", label: "In progress" },
+    { id: "done",        label: "Done" },
+    { id: "archived",    label: "Archived" },
+    { id: "all",         label: "All" },
+  ];
+
+  const TASK_PRIORITY_META = {
+    low:    { label: "Low",  chip: "task-pri-low" },
+    medium: { label: "Med",  chip: "task-pri-med" },
+    high:   { label: "High", chip: "task-pri-high" },
+  };
+
+  function profileNameById(id) {
+    if (!id) return "";
+    const p = (state.profiles || []).find((x) => x.id === id);
+    if (!p) return "";
+    return p.full_name || p.email || "";
+  }
+
+  function tasksMatchingFilters() {
+    const filter = state.taskState.filter || "open";
+    const project = state.taskState.project || "";
+    const q = (state.taskState.query || "").toLowerCase();
+    return (state.tasks || []).filter((t) => {
+      if (filter !== "all" && t.status !== filter) return false;
+      if (project && (t.project_name || "") !== project) return false;
+      if (!q) return true;
+      const hay = [
+        t.title, t.description, t.assignee_label, t.project_name,
+        profileNameById(t.owner_profile_id),
+      ].filter(Boolean).join(" ").toLowerCase();
+      return hay.includes(q);
+    });
+  }
+
+  function tasksGroupedByProject(rows) {
+    const groups = new Map();
+    for (const t of rows) {
+      const key = t.project_name || "(no project)";
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(t);
+    }
+    return Array.from(groups.entries()).sort(([a], [b]) => a.localeCompare(b));
+  }
+
+  function renderTasksTab() {
+    const panel = document.querySelector('.tab-panel[data-tab="tasks"]');
+    if (!panel) return;
+    if (!canSeeTab("tasks")) return;
+
+    const filter = state.taskState.filter || "open";
+    const canManage = hasPerm("manage_tasks");
+
+    const counts = {};
+    for (const f of TASK_FILTERS) counts[f.id] = 0;
+    counts.all = (state.tasks || []).length;
+    for (const t of (state.tasks || [])) {
+      if (counts[t.status] != null) counts[t.status] += 1;
+    }
+
+    const filterChips = TASK_FILTERS.map((f) => {
+      const active = f.id === filter;
+      const cls = active ? "btn small primary" : "btn small";
+      const n = counts[f.id] != null ? ` (${counts[f.id]})` : "";
+      return `<button class="${cls}" data-task-filter="${f.id}">${escapeHtml(f.label)}${n}</button>`;
+    }).join("");
+
+    // Project select (free-form list of distinct project_names + "All").
+    const projects = Array.from(new Set((state.tasks || [])
+      .map((t) => t.project_name).filter(Boolean))).sort();
+    const projectOptions = [
+      `<option value="">All projects</option>`,
+      ...projects.map((p) =>
+        `<option value="${escapeHtml(p)}"${p === state.taskState.project ? " selected" : ""}>${escapeHtml(p)}</option>`),
+    ].join("");
+
+    const rows = tasksMatchingFilters();
+    const grouped = tasksGroupedByProject(rows);
+
+    const body = rows.length === 0
+      ? `<div class="sr-empty">${(state.tasks || []).length === 0
+          ? "No tasks yet. Create one or import an engagement doc."
+          : "No tasks match this filter."}</div>`
+      : grouped.map(([project, items]) => `
+          <div class="task-group">
+            <div class="task-group-head">${escapeHtml(project)} <span class="task-group-count">${items.length}</span></div>
+            <div class="task-cards">
+              ${items.map((t) => taskCardHtml(t, canManage)).join("")}
+            </div>
+          </div>
+        `).join("");
+
+    panel.innerHTML = `
+      <div class="tab-head">
+        <div class="results-meta">${rows.length} of ${(state.tasks || []).length} task${(state.tasks || []).length === 1 ? "" : "s"}</div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <input class="search" id="task_search" type="search" placeholder="Search title, owner, project…" value="${escapeHtml(state.taskState.query || "")}" style="width:220px" />
+          <select id="task_project_filter" class="select-inline" title="Filter by project">${projectOptions}</select>
+          ${canManage ? `<button class="btn small" id="task_import_btn">📥 Import engagement doc</button>` : ""}
+          ${canManage ? `<button class="btn small primary" id="task_new_btn">＋ New task</button>` : ""}
+        </div>
+      </div>
+      <div class="task-filter-row">${filterChips}</div>
+      ${body}
+    `;
+
+    panel.querySelectorAll("[data-task-filter]").forEach((b) => {
+      b.onclick = () => { state.taskState.filter = b.dataset.taskFilter; renderTasksTab(); };
+    });
+    const search = panel.querySelector("#task_search");
+    if (search) search.oninput = (e) => { state.taskState.query = e.target.value; renderTasksTab(); };
+    const projectSel = panel.querySelector("#task_project_filter");
+    if (projectSel) projectSel.onchange = (e) => { state.taskState.project = e.target.value; renderTasksTab(); };
+    const newBtn = panel.querySelector("#task_new_btn");
+    if (newBtn) newBtn.onclick = () => openTaskEditor(null);
+    const importBtn = panel.querySelector("#task_import_btn");
+    if (importBtn) importBtn.onclick = () => openTaskImporter();
+
+    panel.querySelectorAll("[data-task-action]").forEach((b) => {
+      const id = b.dataset.taskId;
+      const action = b.dataset.taskAction;
+      b.onclick = () => handleTaskAction(action, id);
+    });
+    panel.querySelectorAll("[data-task-status-set]").forEach((sel) => {
+      const id = sel.dataset.taskId;
+      sel.onchange = () => setTaskStatusViaRpc(id, sel.value);
+    });
+  }
+
+  function taskCardHtml(t, canManage) {
+    const sMeta = TASK_STATUS_META[t.status] || TASK_STATUS_META.open;
+    const pMeta = TASK_PRIORITY_META[t.priority] || TASK_PRIORITY_META.medium;
+    const ownerName = profileNameById(t.owner_profile_id) || t.assignee_label || "";
+    const due = t.due_at ? new Date(t.due_at) : null;
+    const dueLabel = due ? `📅 ${escapeHtml(isoDate(due))}` : "";
+    const sending = state.taskState.sending && state.taskState.sending.has(t.id);
+
+    const sendBtn = t.par_task_id
+      ? `<span class="task-par-badge" title="Pushed to PAR (id ${escapeHtml(String(t.par_task_id).slice(0,8))}…)">→ PAR ✓</span>`
+      : `<button class="btn small" data-task-action="send" data-task-id="${t.id}" ${sending ? "disabled" : ""}>${sending ? "Sending…" : "Send to PAR"}</button>`;
+
+    const actions = canManage
+      ? `
+          <button class="btn small" data-task-action="edit" data-task-id="${t.id}">Edit</button>
+          ${sendBtn}
+          <button class="btn small" data-task-action="delete" data-task-id="${t.id}">Delete</button>
+        `
+      : sendBtn;
+
+    const statusSelect = canManage || (state.profile && t.owner_profile_id === state.profile.id)
+      ? `<select class="select-inline task-status-select" data-task-status-set data-task-id="${t.id}">
+           ${Object.entries(TASK_STATUS_META).map(([k, m]) =>
+             `<option value="${k}"${t.status === k ? " selected" : ""}>${escapeHtml(m.label)}</option>`).join("")}
+         </select>`
+      : `<span class="task-status-chip ${sMeta.chip}">${escapeHtml(sMeta.label)}</span>`;
+
+    return `
+      <div class="task-card" data-task-id="${t.id}">
+        <div class="task-card-head">
+          <div class="task-card-title">${escapeHtml(t.title)}</div>
+          ${statusSelect}
+        </div>
+        ${t.description ? `<div class="task-card-desc">${escapeHtml(t.description)}</div>` : ""}
+        <div class="task-card-meta">
+          <span class="task-pri-chip ${pMeta.chip}" title="Priority">${escapeHtml(pMeta.label)}</span>
+          ${ownerName ? `<span class="task-owner">👤 ${escapeHtml(ownerName)}</span>` : ""}
+          ${dueLabel ? `<span class="task-due">${dueLabel}</span>` : ""}
+        </div>
+        <div class="task-card-actions">${actions}</div>
+      </div>
+    `;
+  }
+
+  async function handleTaskAction(action, taskId) {
+    if (action === "edit")   return openTaskEditor(taskId);
+    if (action === "send")   return sendTaskToPar(taskId);
+    if (action === "delete") return deleteTask(taskId);
+  }
+
+  async function setTaskStatusViaRpc(taskId, status) {
+    const { error } = await sb.rpc("set_task_status", { p_id: taskId, p_status: status });
+    if (error) { showToast(error.message, "error"); return; }
+    await reloadAll();
+    renderAll();
+  }
+
+  async function deleteTask(taskId) {
+    if (!confirm("Delete this task? (PAR copy is unaffected.)")) return;
+    const { error } = await sb.from("tasks").delete().eq("id", taskId);
+    if (error) { showToast(error.message, "error"); return; }
+    await reloadAll();
+    renderAll();
+    showToast("Task deleted", "success");
+  }
+
+  /* ── Task editor modal ── */
+
+  function openTaskEditor(taskId) {
+    state.taskState.editingId = taskId;
+    const t = taskId
+      ? (state.tasks || []).find((x) => x.id === taskId)
+      : { title: "", description: "", priority: "medium", status: "open", project_name: "DK: Charleston" };
+    if (!t) return;
+
+    $("#task_title").value         = t.title || "";
+    $("#task_description").value   = t.description || "";
+    $("#task_project_name").value  = t.project_name || "";
+    $("#task_priority").value      = t.priority || "medium";
+    $("#task_status").value        = t.status || "open";
+    $("#task_due_at").value        = t.due_at ? new Date(t.due_at).toISOString().slice(0,16) : "";
+    $("#task_assignee_label").value = t.assignee_label || "";
+
+    const ownerSel = $("#task_owner_profile_id");
+    ownerSel.innerHTML = `<option value="">— No DK profile —</option>` +
+      (state.profiles || []).map((p) => {
+        const label = p.full_name || p.email || p.id;
+        return `<option value="${escapeHtml(p.id)}"${t.owner_profile_id === p.id ? " selected" : ""}>${escapeHtml(label)}</option>`;
+      }).join("");
+
+    $("#task_editor_title").textContent = taskId ? "Edit task" : "New task";
+    document.getElementById("taskEditorOverlay").classList.add("open");
+  }
+
+  function closeTaskEditor() {
+    state.taskState.editingId = null;
+    document.getElementById("taskEditorOverlay").classList.remove("open");
+  }
+
+  async function saveTaskEditor() {
+    const id = state.taskState.editingId;
+    const title = $("#task_title").value.trim();
+    if (!title) { showToast("Title is required", "error"); return; }
+
+    const due = $("#task_due_at").value;
+    const payload = {
+      title,
+      description: $("#task_description").value.trim() || null,
+      project_name: $("#task_project_name").value.trim() || null,
+      priority: $("#task_priority").value,
+      status: $("#task_status").value,
+      due_at: due ? new Date(due).toISOString() : null,
+      assignee_label: $("#task_assignee_label").value.trim() || null,
+      owner_profile_id: $("#task_owner_profile_id").value || null,
+    };
+
+    showLoader(true);
+    let error;
+    if (id) {
+      ({ error } = await sb.from("tasks").update(payload).eq("id", id));
+    } else {
+      ({ error } = await sb.from("tasks").insert(payload));
+    }
+    showLoader(false);
+    if (error) { showToast(error.message, "error"); return; }
+    closeTaskEditor();
+    await reloadAll();
+    renderAll();
+    showToast(id ? "Task updated" : "Task created", "success");
+  }
+
+  /* ── Send to PAR ── */
+
+  async function sendTaskToPar(taskId) {
+    const t = (state.tasks || []).find((x) => x.id === taskId);
+    if (!t) return;
+    if (t.par_task_id) { showToast("Already pushed to PAR", "info"); return; }
+
+    state.taskState.sending = state.taskState.sending || new Set();
+    state.taskState.sending.add(taskId);
+    renderTasksTab();
+
+    const body = {
+      task_id: t.id,
+      title: t.title,
+      description: t.description,
+      assignee_label: t.assignee_label || profileNameById(t.owner_profile_id),
+      due_at: t.due_at,
+      priority: t.priority,
+      project_name: t.project_name,
+    };
+
+    const resp = await sb.functions.invoke("dk-create-par-task", { body });
+    state.taskState.sending.delete(taskId);
+
+    // Walk both shapes — supabase-js v2.50+ exposes .response top-level,
+    // older versions only put it on error.context. Same pattern as the
+    // curriculum-fetch viewer (CLAUDE.md §5).
+    const respObj = resp.response || (resp.error && resp.error.context) || null;
+    let detail = null;
+    if (respObj && typeof respObj.clone === "function") {
+      try { detail = await respObj.clone().json(); } catch { /* swallow */ }
+    }
+
+    if (resp.error) {
+      const status = respObj ? respObj.status : null;
+      if (status === 501 && detail && detail.error === "par_not_wired") {
+        const missing = [
+          ...(detail.missing_env || []).map((s) => `env: ${s}`),
+          ...(detail.missing_config || []).map((s) => `config: ${s}`),
+        ].join(", ");
+        showToast(`PAR not wired — missing ${missing}. Set DK_SPOKE_API_KEY and run admin_install_spoke('dk', <franchise-org>) on PAR.`, "error");
+      } else if (detail && detail.error === "upstream_error" && detail.detail) {
+        showToast(`PAR upstream error: ${detail.detail.error || JSON.stringify(detail.detail)}`, "error");
+      } else {
+        showToast(`Send to PAR failed: ${resp.error.message || "unknown"}`, "error");
+      }
+      renderTasksTab();
+      return;
+    }
+
+    showToast("Sent to PAR", "success");
+    await reloadAll();
+    renderAll();
+  }
+
+  /* ── YAML importer ── */
+
+  let _yamlLib = null;
+  async function loadYamlLib() {
+    if (_yamlLib) return _yamlLib;
+    _yamlLib = await import("https://cdn.jsdelivr.net/npm/js-yaml@4.1.0/+esm");
+    return _yamlLib;
+  }
+
+  function openTaskImporter() {
+    document.getElementById("taskImporterOverlay").classList.add("open");
+    $("#task_importer_status").textContent = "";
+    $("#task_importer_text").value = "";
+  }
+  function closeTaskImporter() {
+    document.getElementById("taskImporterOverlay").classList.remove("open");
+  }
+
+  async function runTaskImport() {
+    const text = $("#task_importer_text").value;
+    if (!text.trim()) { showToast("Paste a YAML doc first", "error"); return; }
+
+    const status = $("#task_importer_status");
+    status.textContent = "Parsing…";
+
+    let parsed;
+    try {
+      const yaml = await loadYamlLib();
+      parsed = yaml.loadAll(text);
+    } catch (e) {
+      status.textContent = "";
+      showToast("YAML parse error: " + e.message, "error");
+      return;
+    }
+    // The doc is two YAML documents: header (engagement, review_date,
+    // weight_pain) and body (workstreams, decisions, weight_ledger,
+    // patterns). Tolerate either single-doc or two-doc forms.
+    const header = parsed.length > 1 ? parsed[0] : {};
+    const body   = parsed.length > 1 ? parsed[1] : parsed[0];
+    const engagement = (header && header.engagement) || (body && body.engagement) || "engagement";
+    const projectPrefix = `DK Engagement: ${engagement}`;
+
+    const workstreams = (body && body.workstreams) || [];
+    let toInsert = [];
+    for (const w of workstreams) {
+      const wsTitle = w.title || w.id || "(workstream)";
+      for (const ti of (w.tasks || [])) {
+        toInsert.push({
+          title: ti.title || ti.id || "(task)",
+          description: w.rationale ? `[${wsTitle}]\n${w.rationale}` : `[${wsTitle}]`,
+          project_name: projectPrefix,
+          status: "open",
+          priority: ti.priority || "medium",
+          due_at: ti.due ? new Date(ti.due).toISOString() : null,
+          assignee_label: w.owner || null,
+          external_ref: ti.id || null,
+        });
+      }
+    }
+
+    if (toInsert.length === 0) {
+      status.textContent = "";
+      showToast("No tasks found in the doc (expected workstreams[].tasks[])", "error");
+      return;
+    }
+
+    status.textContent = `Importing ${toInsert.length} task${toInsert.length === 1 ? "" : "s"}…`;
+    // Upsert by external_ref (within this project) so re-imports are
+    // idempotent. We can't use a true upsert via supabase-js without a
+    // unique index; instead, fetch existing rows for this project +
+    // external_ref set, diff, and insert / update accordingly.
+    const refs = toInsert.map((r) => r.external_ref).filter(Boolean);
+    let existing = [];
+    if (refs.length) {
+      const { data } = await sb.from("tasks")
+        .select("id, external_ref")
+        .eq("project_name", projectPrefix)
+        .in("external_ref", refs);
+      existing = data || [];
+    }
+    const byRef = new Map(existing.map((r) => [r.external_ref, r.id]));
+
+    let inserted = 0, updated = 0, failed = 0;
+    for (const row of toInsert) {
+      const existingId = row.external_ref && byRef.get(row.external_ref);
+      const { error } = existingId
+        ? await sb.from("tasks").update(row).eq("id", existingId)
+        : await sb.from("tasks").insert(row);
+      if (error) failed++;
+      else if (existingId) updated++;
+      else inserted++;
+    }
+
+    status.textContent = `Imported: ${inserted} new, ${updated} updated${failed ? `, ${failed} failed` : ""}.`;
+    await reloadAll();
+    renderAll();
+  }
+
   /* ═════════════ Reports tab ═════════════
    * Admin-only aggregation views that sit alongside the operational tabs.
    * Registered reports:
@@ -11139,6 +11573,26 @@
     if (leadPromoteCancel) leadPromoteCancel.onclick = closeLeadPromote;
     if (leadPromoteOver)   leadPromoteOver.onclick   = (e) => { if (e.target.id === "leadPromoteOverlay") closeLeadPromote(); };
     if (leadPromoteSave)   leadPromoteSave.onclick   = saveLeadPromote;
+
+    // Task editor modal (Phase T17)
+    const teClose  = $("#taskEditorClose");
+    const teCancel = $("#taskEditorCancel");
+    const teOver   = $("#taskEditorOverlay");
+    const teSave   = $("#taskEditorSave");
+    if (teClose)  teClose.onclick  = closeTaskEditor;
+    if (teCancel) teCancel.onclick = closeTaskEditor;
+    if (teOver)   teOver.onclick   = (e) => { if (e.target.id === "taskEditorOverlay") closeTaskEditor(); };
+    if (teSave)   teSave.onclick   = saveTaskEditor;
+
+    // Task importer modal (Phase T17)
+    const tiClose  = $("#taskImporterClose");
+    const tiCancel = $("#taskImporterCancel");
+    const tiOver   = $("#taskImporterOverlay");
+    const tiRun    = $("#taskImporterRun");
+    if (tiClose)  tiClose.onclick  = closeTaskImporter;
+    if (tiCancel) tiCancel.onclick = closeTaskImporter;
+    if (tiOver)   tiOver.onclick   = (e) => { if (e.target.id === "taskImporterOverlay") closeTaskImporter(); };
+    if (tiRun)    tiRun.onclick    = runTaskImport;
 
     // Class-cancellation modal (Phase T8)
     const ccCancel = $("#classCancelClose");

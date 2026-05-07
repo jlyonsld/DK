@@ -1584,6 +1584,103 @@
     </div>
   </div>
 
+  <!-- T17: task editor modal -->
+  <div class="modal-overlay" id="taskEditorOverlay">
+    <div class="modal" style="max-width:640px">
+      <div class="modal-head">
+        <h3 id="task_editor_title">New task</h3>
+        <button class="btn ghost small" id="taskEditorClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="field">
+          <label>Title</label>
+          <input type="text" id="task_title" />
+        </div>
+        <div class="field">
+          <label>Description</label>
+          <textarea id="task_description" rows="3"></textarea>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>Project name</label>
+            <input type="text" id="task_project_name" placeholder="DK: Charleston / DK Engagement: …" />
+          </div>
+          <div class="field">
+            <label>Priority</label>
+            <select id="task_priority">
+              <option value="low">Low</option>
+              <option value="medium" selected>Medium</option>
+              <option value="high">High</option>
+            </select>
+          </div>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>Status</label>
+            <select id="task_status">
+              <option value="open">Open</option>
+              <option value="in_progress">In progress</option>
+              <option value="done">Done</option>
+              <option value="archived">Archived</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Due (optional)</label>
+            <input type="datetime-local" id="task_due_at" />
+          </div>
+        </div>
+        <div class="field">
+          <label>Owner — DK profile <span class="field-sub">(preferred)</span></label>
+          <select id="task_owner_profile_id"></select>
+        </div>
+        <div class="field">
+          <label>Assignee label <span class="field-sub">(free-form fallback when no DK profile matches)</span></label>
+          <input type="text" id="task_assignee_label" placeholder="e.g. the new admin once hired" />
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" id="taskEditorCancel">Cancel</button>
+        <button class="btn primary" id="taskEditorSave">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- T17: task YAML importer modal -->
+  <div class="modal-overlay" id="taskImporterOverlay">
+    <div class="modal" style="max-width:720px">
+      <div class="modal-head">
+        <h3>Import engagement doc</h3>
+        <button class="btn ghost small" id="taskImporterClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="task-import-hint">
+          Paste a YAML engagement doc (workstreams + tasks). Each task lands as a
+          row under the project <code>DK Engagement: &lt;engagement-slug&gt;</code>.
+          Re-imports are idempotent — tasks with the same <code>id</code> are updated, not duplicated.
+        </div>
+        <textarea id="task_importer_text" rows="16" placeholder="---
+engagement: sharon-drama-kids
+review_date: 2026-05-07
+weight_pain: 5
+---
+workstreams:
+  - id: hire-admin
+    title: Hire first part-time admin
+    rationale: Spine of the engagement
+    owner: sharon
+    tasks:
+      - { id: jd-draft, title: 'Draft JD', due: 2026-05-14 }
+      - { id: jd-post, title: 'Post role', due: 2026-05-21 }
+"></textarea>
+        <div id="task_importer_status" class="task-import-status"></div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" id="taskImporterCancel">Close</button>
+        <button class="btn primary" id="taskImporterRun">Import</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Class-cancel modal (Phase T8). Open from class detail panel
        "Cancel class" button. -->
   <div class="modal-overlay" id="classCancelOverlay">
