@@ -8195,6 +8195,28 @@
       previewEl.onclick = () => bodyEl.focus();
     }
 
+    // Bidirectional scroll sync — keeps the preview vertically aligned
+    // with the textarea (and vice-versa). The guard flag prevents an
+    // infinite ping-pong when one scroll handler programmatically sets
+    // the other pane's scrollTop and triggers its scroll event in turn.
+    if (bodyEl && previewEl) {
+      let syncing = false;
+      const syncFromTo = (src, dst) => {
+        if (syncing) return;
+        syncing = true;
+        const maxSrc = src.scrollHeight - src.clientHeight;
+        const maxDst = dst.scrollHeight - dst.clientHeight;
+        if (maxSrc <= 0 || maxDst <= 0) { syncing = false; return; }
+        const ratio = src.scrollTop / maxSrc;
+        dst.scrollTop = ratio * maxDst;
+        // Use rAF instead of a setTimeout — clears the guard right after
+        // the browser dispatches the echoed scroll event.
+        requestAnimationFrame(() => { syncing = false; });
+      };
+      bodyEl.onscroll    = () => syncFromTo(bodyEl, previewEl);
+      previewEl.onscroll = () => syncFromTo(previewEl, bodyEl);
+    }
+
     overlay.classList.add("open");
   }
 

@@ -4022,31 +4022,63 @@ footer code {
   line-height: 1.4;
 }
 
-/* Live preview of the reply body — placeholders bold/colored, filled
-   text renders normally so admin can see at a glance where unfilled
-   {vars} remain. Updates on every keystroke. */
-.lead-reply-preview-label {
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--ink-dim);
-  margin: 12px 0 4px 0;
-  font-weight: 600;
+/* Reply editor: textarea + read-only preview side-by-side. Both panes
+   match in width / padding / font / line-height so wrapped lines align,
+   and JS keeps scrollTop in sync so the user can edit a paragraph and
+   immediately see the corresponding paragraph in the preview at the
+   same vertical position. */
+.lead-reply-editor-row {
+  display: flex;
+  gap: 12px;
+  align-items: stretch;
 }
+.lead-reply-editor-col {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.lead-reply-pane-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-dim);
+  margin-bottom: 4px;
+}
+.lead-reply-pane-label .field-sub {
+  font-weight: 400;
+  font-size: 11px;
+  margin-left: 4px;
+}
+
+/* Shared box-model — keeps wrapped lines aligned between panes. */
+.lead-reply-textarea,
+.lead-reply-preview {
+  height: 280px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1.5;
+  font-family: inherit;
+  box-sizing: border-box;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-y: auto;
+  width: 100%;
+}
+
+.lead-reply-textarea {
+  background: var(--panel-raised);
+  border: 1px solid var(--border);
+  color: var(--ink);
+  resize: vertical;
+}
+
 .lead-reply-preview {
   background: rgba(15, 23, 42, 0.4);
   border: 1px dashed var(--border);
-  border-radius: 6px;
-  padding: 10px 12px;
-  font-size: 13px;
-  line-height: 1.5;
   color: var(--ink-dim);
-  white-space: pre-wrap;
-  word-break: break-word;
-  max-height: 200px;
-  overflow-y: auto;
   cursor: pointer;
-  opacity: 0.92;
+  opacity: 0.95;
   transition: opacity 120ms ease, border-color 120ms ease;
 }
 .lead-reply-preview:hover {
@@ -4064,6 +4096,13 @@ footer code {
   padding: 1px 6px;
   border-radius: 4px;
   margin: 0 1px;
+}
+
+@media (max-width: 720px) {
+  /* Stack the panes on phones; preview shrinks since it's secondary. */
+  .lead-reply-editor-row { flex-direction: column; }
+  .lead-reply-textarea { height: 240px; }
+  .lead-reply-preview  { height: 160px; }
 }
 
 @media (max-width: 720px) {

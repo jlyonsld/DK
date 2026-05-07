@@ -1507,13 +1507,16 @@
           <input type="text" id="lead_reply_subject" placeholder="Subject line for the email" />
         </div>
 
-        <div class="field">
-          <label>✏️ Body <span class="field-sub">— EDIT HERE. Variables in {braces} auto-fill from the lead; remaining ones show as yellow chips below.</span></label>
-          <textarea id="lead_reply_body" rows="10"></textarea>
+        <div class="lead-reply-editor-row">
+          <div class="lead-reply-editor-col">
+            <label class="lead-reply-pane-label">✏️ Body <span class="field-sub">(edit here — variables auto-fill from the lead)</span></label>
+            <textarea id="lead_reply_body" class="lead-reply-textarea"></textarea>
+          </div>
+          <div class="lead-reply-editor-col">
+            <label class="lead-reply-pane-label">👁 Preview <span class="field-sub">(read-only — yellow chips = unfilled)</span></label>
+            <div id="lead_reply_preview" class="lead-reply-preview" title="Click to edit in the textarea on the left"></div>
+          </div>
         </div>
-
-        <div class="lead-reply-preview-label">👁 Read-only preview — yellow chips = unfilled placeholders. Click to jump back to the editor above.</div>
-        <div id="lead_reply_preview" class="lead-reply-preview" title="Click to edit in the textarea above"></div>
 
         <div id="lead_reply_unfilled" class="lead-reply-unfilled" style="display:none"></div>
       </div>
