@@ -8028,12 +8028,12 @@
       : "";
 
     body.innerHTML = `<div class="lead-detail-rows">${rowsHtml}</div>${rawHtml}`;
-    overlay.classList.add("show");
+    overlay.classList.add("open");
   }
 
   function closeLeadDetail() {
     const overlay = $("#leadDetailOverlay");
-    if (overlay) overlay.classList.remove("show");
+    if (overlay) overlay.classList.remove("open");
     state.lState.editingId = null;
   }
 
@@ -8117,12 +8117,12 @@
       $("#lead_reply_unfilled").style.display = "none";
     }
 
-    overlay.classList.add("show");
+    overlay.classList.add("open");
   }
 
   function closeLeadReply() {
     const overlay = $("#leadReplyOverlay");
-    if (overlay) overlay.classList.remove("show");
+    if (overlay) overlay.classList.remove("open");
     state.lState.editingId = null;
     state.lState.replyTemplateId = "";
   }
@@ -8190,12 +8190,12 @@
     $("#lead_promote_last").value  = lastGuess;
     $("#lead_promote_dob").value   = lead.child_dob || "";
 
-    overlay.classList.add("show");
+    overlay.classList.add("open");
   }
 
   function closeLeadPromote() {
     const overlay = $("#leadPromoteOverlay");
-    if (overlay) overlay.classList.remove("show");
+    if (overlay) overlay.classList.remove("open");
     state.lState.editingId = null;
   }
 
