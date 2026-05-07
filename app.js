@@ -95,6 +95,14 @@
     // query is free-text search over parent name / email / child name.
     // editingId tracks which lead is being replied to / promoted.
     lState: { filter: "new", query: "", editingId: null, replyTemplateId: "", igQuery: "", igTag: "all" },
+    // T17: Task federation. Tasks land in DK and push to PAR's canonical
+    // tasks table via dk-create-par-task. SELECT is open to any signed-in
+    // user; writes gated on manage_tasks.
+    tasks: [],
+    // Tasks tab state — status filter ∈ {open, in_progress, done, archived, all},
+    // project filter is project_name string ("" = all), query is free-text.
+    // editingId tracks which task the editor modal is on.
+    taskState: { filter: "open", project: "", query: "", editingId: null, sending: new Set() },
     dkConfig: null,
     latestSyncLog: null,
     tState: { query: "", category: "all", filled: {} },
@@ -164,7 +172,8 @@
       "view_pay_rates","view_billing_status","view_parent_contact",
       "run_jackrabbit_sync","respond_to_leads",
       "reconcile_students",
-      "request_sub","claim_sub_requests","manage_all_sub_requests"
+      "request_sub","claim_sub_requests","manage_all_sub_requests",
+      "manage_tasks"
     ],
     admin: [
       "manage_users",
@@ -177,7 +186,8 @@
       "view_pay_rates","view_billing_status","view_parent_contact",
       "run_jackrabbit_sync","respond_to_leads",
       "reconcile_students",
-      "request_sub","claim_sub_requests","manage_all_sub_requests"
+      "request_sub","claim_sub_requests","manage_all_sub_requests",
+      "manage_tasks"
     ],
     manager: [
       "edit_templates","edit_categories","edit_infographics",
@@ -187,7 +197,8 @@
       "respond_to_leads",
       "view_classes_readonly","view_teachers_readonly",
       "view_students_readonly","view_enrollments_readonly",
-      "claim_sub_requests","manage_all_sub_requests"
+      "claim_sub_requests","manage_all_sub_requests",
+      "manage_tasks"
     ],
     teacher: [
       "view_own_schedule","take_own_attendance","clock_in_out",
@@ -224,9 +235,9 @@
   // Which tabs each role is allowed to see. (Role Management tab doesn't
   // exist in T1 — it lands in T6.)
   const ROLE_TAB_VISIBILITY = {
-    super_admin: new Set(["home","schedule","templates","classes","schools","teachers","subrequests","events","inventory","leads","curriculum","reports","users"]),
-    admin:       new Set(["home","schedule","templates","classes","schools","teachers","subrequests","events","inventory","leads","curriculum","reports","users"]),
-    manager:     new Set(["home","schedule","templates","classes","schools","teachers","subrequests","events","inventory","leads","curriculum"]),
+    super_admin: new Set(["home","schedule","templates","classes","schools","teachers","subrequests","events","inventory","leads","tasks","curriculum","reports","users"]),
+    admin:       new Set(["home","schedule","templates","classes","schools","teachers","subrequests","events","inventory","leads","tasks","curriculum","reports","users"]),
+    manager:     new Set(["home","schedule","templates","classes","schools","teachers","subrequests","events","inventory","leads","tasks","curriculum"]),
     teacher:     new Set(["home","schedule","subrequests","events","inventory"]),
     viewer:      new Set(["home","schedule","templates","classes","schools","teachers","subrequests","events","inventory"])
   };
@@ -472,7 +483,8 @@
       "student_intake_requests",
       "par_promotion_events",
       "mailchimp_sync_outbox", "mailchimp_sync_log",
-      "leads"
+      "leads",
+      "tasks"
     ];
     realtimeChannel = sb.channel("dk-realtime");
     tablesToWatch.forEach((table) => {
@@ -661,7 +673,7 @@
   async function reloadAll() {
     showLoader(true);
     try {
-      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches, att, clk, subs, subClm, schs, canc, cur, curA, tpd, tdocs, waivers, wSigs, pms, prof, evs, evStaff, invItems, invAssigns, intakes, parPromo, leadsRes] = await Promise.all([
+      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches, att, clk, subs, subClm, schs, canc, cur, curA, tpd, tdocs, waivers, wSigs, pms, prof, evs, evStaff, invItems, invAssigns, intakes, parPromo, leadsRes, tasksRes] = await Promise.all([
         sb.from("categories").select("*").order("sort_order", { ascending: true }),
         sb.from("templates").select("*").order("created_at", { ascending: true }),
         sb.from("classes").select("*").order("name", { ascending: true }),
@@ -696,7 +708,8 @@
         sb.from("inventory_assignments").select("*").order("usage_starts_at", { ascending: true }),
         sb.from("student_intake_requests").select("*").order("sent_at", { ascending: false }),
         sb.from("par_promotion_events").select("*").order("created_at", { ascending: false }),
-        sb.from("leads").select("*").order("received_at", { ascending: false })
+        sb.from("leads").select("*").order("received_at", { ascending: false }),
+        sb.from("tasks").select("*").order("created_at", { ascending: false })
       ]);
       for (const r of [cats, tpls, cls, igs, tch, ct, ci, stu, enr]) if (r.error) throw r.error;
       // Non-admin roles may not have SELECT access to teacher_invitations /
@@ -778,6 +791,10 @@
       // T15: Meta Lead Ads inbox. RLS gates SELECT on respond_to_leads,
       // so teacher / viewer roles fall back to empty.
       state.leads = (leadsRes && !leadsRes.error) ? leadsRes.data : [];
+      // T17: Tasks federate to PAR via dk-create-par-task. SELECT is open
+      // to any signed-in user (teachers see tasks delegated to them via
+      // the home bento "Tasks for you" card).
+      state.tasks = (tasksRes && !tasksRes.error) ? tasksRes.data : [];
     } catch (e) {
       console.error(e);
       showToast("Failed to load: " + e.message, "error");

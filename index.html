@@ -117,6 +117,7 @@
         <button class="tab" data-tab="events">Events</button>
         <button class="tab" data-tab="inventory">Inventory</button>
         <button class="tab" data-tab="leads">Leads</button>
+        <button class="tab" data-tab="tasks">Tasks</button>
         <button class="tab" data-tab="curriculum">Curriculum</button>
         <button class="tab" data-tab="reports">Reports</button>
         <button class="tab" data-tab="users">Users</button>
@@ -234,6 +235,11 @@
         <div class="tab-panel" data-tab="leads" style="display:none">
           <!-- Phase T15: Meta Lead Ads inbox. Body rendered by
                renderLeadsTab() in app.js. -->
+        </div>
+
+        <div class="tab-panel" data-tab="tasks" style="display:none">
+          <!-- Phase T17: Tasks tab. Body rendered by renderTasksTab()
+               in app.js. Federates to PAR via dk-create-par-task. -->
         </div>
 
         <div class="tab-panel" data-tab="curriculum" style="display:none">
@@ -1701,6 +1707,10 @@
         <button class="mobile-tools-item" data-tab="leads" type="button">
           <span class="mobile-tools-ico" aria-hidden="true">📥</span>
           <span>Leads</span>
+        </button>
+        <button class="mobile-tools-item" data-tab="tasks" type="button">
+          <span class="mobile-tools-ico" aria-hidden="true">✓</span>
+          <span>Tasks</span>
         </button>
         <button class="mobile-tools-item" data-tab="curriculum" type="button">
           <span class="mobile-tools-ico" aria-hidden="true">📚</span>
