@@ -94,7 +94,7 @@
     // Leads tab state — filter ∈ {new, contacted, promoted, junk, archived, all},
     // query is free-text search over parent name / email / child name.
     // editingId tracks which lead is being replied to / promoted.
-    lState: { filter: "new", query: "", editingId: null, replyTemplateId: "" },
+    lState: { filter: "new", query: "", editingId: null, replyTemplateId: "", igQuery: "", igTag: "all" },
     dkConfig: null,
     latestSyncLog: null,
     tState: { query: "", category: "all", filled: {} },
@@ -8110,6 +8110,96 @@
     });
   }
 
+  /* ─── Lead-reply infographic strip ────────────────────────────────
+   * Renders a horizontal strip of infographic thumbnails inside the
+   * reply modal. Click a thumbnail → insert its public URL at the
+   * textarea's cursor position (or append if no caret) on its own
+   * line so any modern email client renders it inline on paste.
+   * Reuses the existing `infographics` table + `publicUrlFor` helper.
+   */
+
+  function leadReplyInfographicUrl(ig) {
+    if (ig.storage_path) return publicUrlFor(ig.storage_path);
+    return ig.external_url || "";
+  }
+
+  function renderLeadReplyInfographics() {
+    const strip = $("#lead_reply_ig_strip");
+    const tagRow = $("#lead_reply_ig_tags");
+    if (!strip || !tagRow) return;
+
+    // Tag chips — reuses the same idea as renderInfographicsSidebar()
+    const allTags = new Set();
+    state.infographics.forEach((i) => (i.tags || []).forEach((t) => allTags.add(t)));
+    tagRow.innerHTML = "";
+    [{ k: "all", label: "All" }].concat([...allTags].sort().map((t) => ({ k: t, label: "#" + t })))
+      .forEach((t) => {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "chip" + (state.lState.igTag === t.k ? " active" : "");
+        chip.textContent = t.label;
+        chip.onclick = () => { state.lState.igTag = t.k; renderLeadReplyInfographics(); };
+        tagRow.appendChild(chip);
+      });
+
+    const q = (state.lState.igQuery || "").toLowerCase();
+    const filtered = state.infographics.filter((i) => {
+      if (state.lState.igTag !== "all" && !(i.tags || []).includes(state.lState.igTag)) return false;
+      if (!q) return true;
+      return (i.name || "").toLowerCase().includes(q)
+          || (i.tags || []).some((t) => t.toLowerCase().includes(q));
+    });
+
+    if (filtered.length === 0) {
+      strip.innerHTML = `<div class="lead-reply-ig-empty">${
+        state.infographics.length === 0
+          ? "No infographics yet. Templates → 🖼 Manage infographics."
+          : "No matches — clear the search/tag filter."
+      }</div>`;
+      return;
+    }
+
+    strip.innerHTML = "";
+    filtered.forEach((ig) => {
+      const url = leadReplyInfographicUrl(ig);
+      const tile = document.createElement("button");
+      tile.type = "button";
+      tile.className = "lead-reply-ig-tile";
+      tile.title = `${ig.name}\n${url}\n— click to insert link at cursor`;
+      tile.innerHTML = `
+        <div class="lead-reply-ig-thumb">${url ? `<img src="${escapeHtml(url)}" alt="" onerror="this.remove()" />` : "🖼"}</div>
+        <div class="lead-reply-ig-name">${escapeHtml(ig.name || "")}</div>
+      `;
+      tile.onclick = () => insertInfographicIntoLeadReply(ig);
+      strip.appendChild(tile);
+    });
+  }
+
+  function insertInfographicIntoLeadReply(ig) {
+    const ta = $("#lead_reply_body");
+    if (!ta) return;
+    const url = leadReplyInfographicUrl(ig);
+    if (!url) {
+      showToast("This infographic has no URL to attach", "error");
+      return;
+    }
+    // Insert as: blank line + image name + blank line + url + blank line.
+    // Most email clients (Gmail / Outlook / Apple Mail) auto-render a bare
+    // image URL on its own line as an inline image preview on paste.
+    const snippet = `\n\n${ig.name ? `${ig.name}: ` : ""}${url}\n\n`;
+
+    const start = ta.selectionStart;
+    const end   = ta.selectionEnd;
+    const before = ta.value.slice(0, start);
+    const after  = ta.value.slice(end);
+    ta.value = before + snippet + after;
+    const cursor = start + snippet.length;
+    ta.setSelectionRange(cursor, cursor);
+    ta.focus();
+    updateLeadReplyPreview();
+    showToast(`Attached: ${ig.name}`, "ok");
+  }
+
   // Click on a yellow chip in the preview → select the matching {var}
   // in the textarea so the admin can immediately type a replacement.
   // Uses occurrence index so the Nth chip in the preview maps to the
@@ -8241,6 +8331,17 @@
           return;
         }
         bodyEl.focus();
+      };
+    }
+
+    // Infographic strip — render and wire search.
+    renderLeadReplyInfographics();
+    const igSearch = $("#lead_reply_ig_search");
+    if (igSearch) {
+      igSearch.value = state.lState.igQuery || "";
+      igSearch.oninput = (e) => {
+        state.lState.igQuery = e.target.value.trim();
+        renderLeadReplyInfographics();
       };
     }
 
