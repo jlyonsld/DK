@@ -1487,9 +1487,11 @@
   </div>
 
   <!-- Phase T15: Reply modal — pick a template, fill lead-shaped variables,
-       copy or open in mailto. On confirm, calls mark_lead_contacted. -->
+       copy or open in mailto. On confirm, calls mark_lead_contacted.
+       Wider max-width so the side-by-side editor + preview each get
+       meaningful reading width on desktop. -->
   <div class="modal-overlay" id="leadReplyOverlay">
-    <div class="modal" style="max-width:760px">
+    <div class="modal" style="max-width:1100px;width:min(1100px, 96vw)">
       <div class="modal-head">
         <h3>Reply to lead</h3>
         <button class="btn ghost small" id="leadReplyClose">✕</button>
