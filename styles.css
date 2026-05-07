@@ -4199,6 +4199,60 @@ footer code {
   line-height: 1.5;
 }
 
+/* T17 bento "Tasks for you" card */
+.bento-task-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+.bento-task-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+}
+.bento-task-row.task-status-row-done {
+  opacity: .55;
+}
+.bento-task-row.task-status-row-done .bento-task-title {
+  text-decoration: line-through;
+}
+.bento-task-main {
+  flex: 1;
+  min-width: 0;
+}
+.bento-task-title {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bento-task-sub {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--ink-dim);
+  margin-top: 2px;
+}
+.bento-task-project {
+  font-family: ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace;
+}
+.bento-task-overflow {
+  font-size: 11px;
+  color: var(--ink-dim);
+  font-style: italic;
+  margin-top: 6px;
+  text-align: center;
+}
+
 /* Reply editor: textarea + read-only preview side-by-side. Both panes
    match in width / padding / font / line-height so wrapped lines align,
    and JS keeps scrollTop in sync so the user can edit a paragraph and

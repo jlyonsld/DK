@@ -920,6 +920,11 @@
     const activeTeachers = state.teachers.filter((t) => t.status === "active").length;
     const activeEnrollments = state.enrollments.filter((e) => e.status === "active").length;
 
+    // T17: admin "Tasks for you" surfaces only when there are tasks owned
+    // by the signed-in profile. Empty → renders an empty string and
+    // span-12 collapses, so no visual noise on day one.
+    const adminTasksHtml = renderTeacherTasksCard(null);
+
     grid.innerHTML = `
       <div class="bento-card bento-span-8">${renderTodayCard(nextClass, todayClasses.length, now)}</div>
       <div class="bento-card bento-span-4">${renderStatsCard(activeClasses, activeTeachers, activeEnrollments)}</div>
@@ -929,9 +934,16 @@
       <div class="bento-card bento-span-5">${renderActivityCard()}</div>
       <div class="bento-card bento-span-4" id="bentoQuickActions">${renderQuickActionsCard()}</div>
       <div class="bento-card bento-span-3">${renderParBridgeCard()}</div>
+      ${adminTasksHtml ? `<div class="bento-card bento-span-12">${adminTasksHtml}</div>` : ""}
     `;
 
     wireHomeCardEvents();
+
+    // T17: wire status-flip selects on the admin bento Tasks card
+    document.querySelectorAll("[data-bento-task-status-set]").forEach((sel) => {
+      const id = sel.dataset.taskId;
+      sel.onchange = () => setTaskStatusViaRpc(id, sel.value);
+    });
   }
 
   /* ═════════════ TEACHER HOME (bento) ═════════════
@@ -1008,6 +1020,7 @@
       <div class="bento-card bento-span-4">${renderTeacherAttendanceCard(todayClasses, now)}</div>
       <div class="bento-card bento-span-12">${renderTeacherShiftsCard(me, todayClasses, now)}</div>
       <div class="bento-card bento-span-12">${renderTeacherCurriculumCard(me, myClasses, now)}</div>
+      <div class="bento-card bento-span-12">${renderTeacherTasksCard(me)}</div>
       <div class="bento-card bento-span-8">${renderTeacherWelcomeCard(me)}</div>
       <div class="bento-card bento-span-4">${renderParBridgeCard()}</div>
     `;
@@ -1015,6 +1028,75 @@
     wireHomeCardEvents();
     const selfSignBtn = $("#teacherSelfSignWaiverBtn");
     if (selfSignBtn) selfSignBtn.onclick = () => openSignWaiverModal({ mode: "self", teacher: me });
+
+    // T17: wire status-flip selects + open-task-detail clicks
+    document.querySelectorAll("[data-bento-task-status-set]").forEach((sel) => {
+      const id = sel.dataset.taskId;
+      sel.onchange = () => setTaskStatusViaRpc(id, sel.value);
+    });
+  }
+
+  /* T17 — "Tasks for you" bento card. Used by both teacher home and
+   * admin home — the `me` parameter is unused; the filter is on
+   * state.profile.id matching tasks.owner_profile_id. RLS already
+   * SELECTs all tasks for any signed-in user; the client-side filter
+   * is purely UX. The set_task_status RPC permits owner-self status
+   * flips even without manage_tasks. Empty state returns "" so the
+   * caller can choose whether to render the wrapper at all. */
+  function renderTeacherTasksCard(me) {
+    const profileId = state.profile && state.profile.id;
+    if (!profileId) return "";
+    const mine = (state.tasks || []).filter(
+      (t) => t.owner_profile_id === profileId && t.status !== "archived",
+    );
+    if (mine.length === 0) return "";
+
+    // Open + in_progress first, then done; due-soon first within each.
+    const sortKey = (t) => {
+      const statusRank = ({ open: 0, in_progress: 1, done: 2, archived: 3 })[t.status] ?? 4;
+      const dueMs = t.due_at ? new Date(t.due_at).getTime() : Number.MAX_SAFE_INTEGER;
+      return statusRank * 1e15 + dueMs;
+    };
+    const sorted = mine.slice().sort((a, b) => sortKey(a) - sortKey(b));
+    const visible = sorted.slice(0, 8);
+    const overflow = sorted.length - visible.length;
+
+    const rows = visible.map((t) => {
+      const sMeta = TASK_STATUS_META[t.status] || TASK_STATUS_META.open;
+      const due = t.due_at ? new Date(t.due_at) : null;
+      const dueLabel = due ? `📅 ${escapeHtml(isoDate(due))}` : "";
+      const project = t.project_name ? escapeHtml(t.project_name) : "";
+      const statusOpts = Object.entries(TASK_STATUS_META).map(([k, m]) =>
+        `<option value="${k}"${t.status === k ? " selected" : ""}>${escapeHtml(m.label)}</option>`).join("");
+      return `
+        <div class="bento-task-row task-status-row-${t.status}">
+          <div class="bento-task-main">
+            <div class="bento-task-title">${escapeHtml(t.title)}</div>
+            <div class="bento-task-sub">
+              ${project ? `<span class="bento-task-project">${project}</span>` : ""}
+              ${dueLabel ? `<span class="bento-task-due">${dueLabel}</span>` : ""}
+            </div>
+          </div>
+          <select class="select-inline task-status-select"
+                  data-bento-task-status-set
+                  data-task-id="${t.id}"
+                  title="Update status"
+                  aria-label="${escapeHtml(sMeta.label)}">
+            ${statusOpts}
+          </select>
+        </div>
+      `;
+    }).join("");
+
+    const overflowNote = overflow > 0
+      ? `<div class="bento-task-overflow">+${overflow} more — open the Tasks tab to see all</div>`
+      : "";
+
+    return `
+      <div class="bento-label"><span>Tasks for you</span></div>
+      <div class="bento-task-list">${rows}</div>
+      ${overflowNote}
+    `;
   }
 
   function renderTeacherTodayCard(nextClass, todayCount, now) {
