@@ -7837,20 +7837,67 @@
 
   // Build the substitution context for a lead. Mirrors the per-template
   // {variable} syntax used everywhere else (see substitute / highlighted).
-  // Keys here are also surfaced in the reply-modal helper text.
+  //
+  // Two layers of keys:
+  //   - Common names ({parent_name}, {first_name}, {email}, {phone},
+  //     {child_name}, {school}, {location}, {name}, ...) so any existing
+  //     template the franchise has written for parent-context responses
+  //     auto-fills from the lead.
+  //   - lead-prefixed names ({lead_parent_name}, etc.) for templates
+  //     authored specifically against the lead surface.
+  // Empty values are dropped so substitute() leaves the placeholder
+  // visible (its semantic is: keep the placeholder if no value).
   function leadVariableContext(lead) {
     if (!lead) return {};
-    const fullName = lead.parent_name || "";
-    const firstName = fullName.split(/\s+/)[0] || "";
-    return {
+    const fullName = (lead.parent_name || "").trim();
+    const parts = fullName.split(/\s+/).filter(Boolean);
+    const firstName = parts[0] || "";
+    const lastName = parts.slice(1).join(" ");
+    const childName = (lead.child_name || "").trim();
+    const childParts = childName.split(/\s+/).filter(Boolean);
+    const childFirst = childParts[0] || "";
+    const childLast = childParts.slice(1).join(" ");
+
+    const ctx = {
+      // lead-prefixed (explicit; collision-free)
       lead_parent_name:  fullName,
       lead_parent_first: firstName,
+      lead_parent_last:  lastName,
       lead_email:        lead.parent_email || "",
       lead_phone:        lead.parent_phone || "",
-      lead_child_name:   lead.child_name || "",
+      lead_child_name:   childName,
+      lead_child_first:  childFirst,
       lead_child_dob:    lead.child_dob || "",
       lead_school:       lead.school_of_interest || "",
+
+      // common names that existing class/parent templates likely use
+      parent_name:       fullName,
+      parent_first_name: firstName,
+      parent_last_name:  lastName,
+      first_name:        firstName,
+      last_name:         lastName,
+      name:              fullName,
+      full_name:         fullName,
+      email:             lead.parent_email || "",
+      phone:             lead.parent_phone || "",
+      parent_email:      lead.parent_email || "",
+      parent_phone:      lead.parent_phone || "",
+      child_name:        childName,
+      child_first_name:  childFirst,
+      child_last_name:   childLast,
+      student_name:      childName,
+      student_first_name:childFirst,
+      child_dob:         lead.child_dob || "",
+      dob:               lead.child_dob || "",
+      school:            lead.school_of_interest || "",
+      school_name:       lead.school_of_interest || "",
+      location:          lead.school_of_interest || "",
     };
+
+    for (const k in ctx) {
+      if (!ctx[k] || !String(ctx[k]).trim()) delete ctx[k];
+    }
+    return ctx;
   }
 
   function leadSummaryName(lead) {
@@ -8140,6 +8187,13 @@
     // Wire textarea live preview — re-bind every open so we don't double-fire.
     const bodyEl = $("#lead_reply_body");
     if (bodyEl) bodyEl.oninput = updateLeadReplyPreview;
+
+    // Click anywhere in the read-only preview → focus the editable textarea.
+    // Helps users who instinctively click the preview to type into it.
+    const previewEl = $("#lead_reply_preview");
+    if (previewEl && bodyEl) {
+      previewEl.onclick = () => bodyEl.focus();
+    }
 
     overlay.classList.add("open");
   }

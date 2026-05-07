@@ -4034,17 +4034,24 @@ footer code {
   font-weight: 600;
 }
 .lead-reply-preview {
-  background: var(--panel-raised);
-  border: 1px solid var(--border);
+  background: rgba(15, 23, 42, 0.4);
+  border: 1px dashed var(--border);
   border-radius: 6px;
   padding: 10px 12px;
   font-size: 13px;
   line-height: 1.5;
-  color: var(--ink);
+  color: var(--ink-dim);
   white-space: pre-wrap;
   word-break: break-word;
   max-height: 200px;
   overflow-y: auto;
+  cursor: pointer;
+  opacity: 0.92;
+  transition: opacity 120ms ease, border-color 120ms ease;
+}
+.lead-reply-preview:hover {
+  opacity: 1;
+  border-color: var(--border-strong);
 }
 .lead-reply-preview .lead-var-unfilled {
   display: inline-block;
