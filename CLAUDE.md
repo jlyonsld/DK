@@ -1003,6 +1003,125 @@ This document is DK's CLAUDE.md so the skeleton description here is necessarily 
 
 Splitting this way means T16a can ship in days once PAR's dispatcher + OAuth flow is in place; T16b waits on `pages_messaging` App Review (which only needs to clear once for the entire skeleton across all spokes × all franchises); T16c is independent. The skeleton scaffolding work in T16a is the bigger-than-it-sounds piece — but it's also the deliverable that pays back across every future Meta-touching spoke, so the cost is amortized fast.
 
+### 4.33 Task federation — DK→PAR via spoke-create-task (T17)
+
+T17 mirrors Margin's PAR task federation pattern (built 2026-05-06 to 2026-05-07) so DK tasks land in PAR's canonical `tasks` table where PAR's existing delegation, approvals, and notification surfaces take over. **Same shape as Margin, with one DK-specific simplification:** DK reads the franchise's PAR org id from `dk_config.par_franchise_org_id` (singleton row, populated at install per §4.7) instead of carrying a `DK_PAR_ORG_ID` env var. Single source of truth, one less operator step at deploy time, and the install flow already populates it.
+
+**Architecture (one-way push, spoke → PAR):**
+
+```
+[ DK Tasks tab — "Send to PAR" button on a task card ]
+        │  POST {SUPABASE_URL}/functions/v1/dk-create-par-task
+        │  Authorization: Bearer <user JWT>
+        │  body: { task_id, title, description, assignee_label,
+        │           due_at, priority, project_name }
+        ▼
+[ DK Edge Function `dk-create-par-task` ]
+        │  Verifies caller has `manage_tasks` (user-bound RPC, §5)
+        │  Reads dk_config.par_franchise_org_id at request time
+        │  Reads DK_SPOKE_API_KEY from Edge Function env
+        │  Returns 501 with structured `missing_*` if either unset
+        │
+        │  POST {PAR_SUPABASE_URL}/functions/v1/spoke-create-task
+        │  Authorization: Bearer <DK_SPOKE_API_KEY>
+        │  body: { spoke_slug: 'dk', org_id, ..., external_ref: task_id }
+        ▼
+[ PAR's spoke-create-task ]
+        │  Validates bearer key + spoke install row for org
+        │  Inserts into PAR's public.tasks
+        │  Returns { task_id }
+        ▼
+[ DK stamps par_task_id on the local tasks row ]
+```
+
+**PAR side — already built by Margin's work, DK reuses:**
+
+- `spoke-create-task` Edge Function lives at PAR (deployed 2026-05-06)
+- Spoke registration via PAR's `/admin/spokes` UI: slug `dk`, raw API key minted once (PAR stores SHA-256 hash; raw key only displayed at creation)
+- Install row via `admin_install_spoke('dk', <franchise-org-uuid>)` — runs **once per DK deployment**
+
+DK is single-tenant per deployment (one `dk_config` singleton row → one PAR org per Supabase project per Vercel project), structurally identical to Margin's "one operator → one PAR org" model. Multi-franchise auto-install is not part of T17 — if/when DK runs multiple franchises in one deployment, that's a separate phase, but the current architecture (one Supabase + one Vercel per franchise per §3) doesn't require it. Cross-franchise concerns (curriculum push from DK Corporate, etc.) live at a different federation layer and are explicitly out of scope here.
+
+**DK side — three pieces in one phase (T17a):**
+
+1. **Schema** (migration `phase_t17_tasks.sql`):
+   - `tasks` table — `id` (uuid, default gen_random_uuid), `title` (text not null), `description` (text), `status` (enum: `open` / `in_progress` / `done` / `archived`, default `open`), `owner_profile_id` (uuid FK profiles, nullable), `assignee_label` (text — free-form fallback when no profile match), `priority` (enum: `low` / `medium` / `high`, default `medium`), `due_at` (timestamptz), `project_name` (text — workstream grouping convention), `external_ref` (text — for round-trip identity, T17c), `par_task_id` (uuid — populated after successful PAR push), `created_by` (uuid not null default auth.uid), `created_at` (timestamptz default now), `updated_at` (timestamptz)
+   - One new permission: `manage_tasks` — added to super_admin/admin/manager bundles in BOTH SQL `has_permission()` AND JS `PERM_BUNDLES` (byte-identical per §4.4)
+   - RLS: SELECT open to any signed-in user (visibility is universal — teachers can see what's been delegated to them); writes gated on `manage_tasks`; a thin `set_task_status(p_id uuid, p_status task_status)` RPC (`security invoker`) lets owners flip status on their own tasks without holding `manage_tasks`
+   - Realtime publication: yes
+   - Idempotency: unique partial index on `par_task_id` where not null (don't relax to non-partial — NULLs would collide)
+
+2. **Edge Function `dk-create-par-task`** (`verify_jwt: true`):
+   - Auth: gateway verifies caller's JWT; handler then calls `userClient.rpc('has_permission', { perm: 'manage_tasks' })` — the user-bound RPC pattern from §5 (service-role makes `auth.uid()` null and the check fails)
+   - Reads `dk_config.par_franchise_org_id` at request time, NOT at function init — singleton can theoretically change post-deploy if the install flow re-runs
+   - Reads `DK_SPOKE_API_KEY` from Edge Function env
+   - **Returns 501 with structured `missing_env` / `missing_config` payload** if either is unset (the Margin "ship behind a fallback" pattern — lets the feature land in DK without coupling the deploy to PAR availability; also lets the UI tell the operator exactly what's missing instead of failing opaquely)
+   - Forwards to PAR's `spoke-create-task` with the Margin payload contract verbatim — same field names, same types, same priority enum
+   - On 200, stamps `par_task_id` on the local `tasks` row (under user JWT, RLS allows because the caller has `manage_tasks`) before returning to the browser
+   - On 502 from PAR, surfaces `payload.detail.error` so PAR-side misconfiguration (`spoke_not_installed_for_org`, `invalid_spoke_key`, `owner_unresolvable`) is debuggable from the DK UI
+
+3. **Tasks tab in `app.js` + YAML importer:**
+   - Tab visible to super_admin/admin/manager via `ROLE_TAB_VISIBILITY` (not teachers/viewers — they read tasks they own via the home bento, see below)
+   - Mobile: Tools-sheet overflow item with ✓ icon (same pattern as §4.17)
+   - Card grid grouped by `project_name` (header per group, sticky), status filter chips, search input
+   - Each card: title, description, priority pill, due chip, assignee chip, "Send to PAR" button (or "→ PAR ✓" badge if `par_task_id` is set)
+   - On send: optimistic disable, success stamps `par_task_id` and shows the badge, 501 surfaces `missing_*` inline so the operator knows what's missing on the deploy, 502 surfaces the upstream `detail.error`
+   - Teacher home bento: "Tasks for you" card lists `tasks where owner_profile_id = state.profile.id`, read-only check-off via the `set_task_status` RPC
+   - **YAML importer:** paste/upload from a textarea in the Tasks tab head, parses workstreams + tasks + decisions + weight_ledger_entries, calls `dk-create-par-task` once per task in sequence (no separate `spoke-import-tasks` Edge Function on PAR — the loop IS the importer). Decisions render as a separate "Decisions" section in the tab; weight_ledger_entries render in the Reports tab as an "Off your plate" entry (same plug-in pattern as §4.15)
+
+**Engagement-doc YAML format:**
+
+```yaml
+---
+engagement: <slug>
+review_date: YYYY-MM-DD
+weight_pain: 1-5
+---
+
+workstreams:
+  - id: <unique-slug>
+    title: ...
+    rationale: ...
+    owner: <profile-email-or-name>
+    starts: YYYY-MM-DD
+    target: YYYY-MM-DD
+    tasks:
+      - { id: <slug>, title: "...", due: YYYY-MM-DD, depends_on: [...] }
+
+decisions:
+  - id: <slug>
+    title: ...
+    not_before: YYYY-MM-DD
+    inputs: [<workstream-or-task-id>, ...]
+
+weight_ledger:
+  - { date: YYYY-MM-DD, item: "...", moved_to: "..." }
+
+patterns:
+  - { id: <slug>, archetype: "..." }
+```
+
+Importer parses → upserts by `id` (so re-imports are idempotent and edits land cleanly) → calls `dk-create-par-task` for each new task. Patterns and decisions don't push to PAR — they're local-only context for the Tasks tab. Weight ledger entries are local-only too (PAR has no canonical "weight ledger" surface yet — that's Margin-side if/when it lands).
+
+**Project_name convention:**
+
+- Day-to-day DK tasks: `"DK: <franchise-name>"`
+- Imported engagement-doc workstreams: `"DK Engagement: <client-name>"` — keeps Margin engagements and DK day-to-day distinct projects in PAR's task view
+
+**Sequencing:**
+
+- **T17a (build now)** — schema + Edge Function (with 501 fallback) + Tasks tab + YAML importer. Ships independent of PAR readiness; the 501 path lets DK run with the feature dark on Charleston until env vars + PAR install are set.
+- **T17b (turn on)** — PAR `/admin/spokes` registration of `dk`, set `DK_SPOKE_API_KEY` in DK Edge Function secrets, run `admin_install_spoke('dk', <Charleston-org>)` once. Federation lights up.
+- **T17c (deferred — open question Margin punted on)** — status round-trip via PAR webhook → DK endpoint keyed on `external_ref`. When PAR closes a task, DK's row auto-marks done. Requires a new PAR-side webhook configuration + a new `dk-task-status-webhook` Edge Function on DK. Not blocking T17a/b.
+
+**Out of scope for v1 (deliberate):**
+
+- Status round-trip (deferred to T17c)
+- Bidirectional sync where PAR-side edits propagate to DK
+- Cross-spoke task aggregation at PAR (PAR's job — DK just pushes its tasks; PAR's UI shows them merged across spokes)
+- Margin as the writer-side surface (Margin already writes to PAR directly; DK is its own writer for DK-shaped tasks)
+- Cross-franchise federation (e.g., DK Corporate → all franchises curriculum push) — distinct federation layer, see note above
+
 ---
 
 ## 5. Gotchas, quirks, and "don't touch this"
@@ -1270,3 +1389,4 @@ META_PAGE_ACCESS_TOKEN           # T15 — long-lived Page token to fetch lead f
 | T14 — Nightly housekeeping (`nightly_housekeeping()` + pg_cron job purging install_nonces > 30d, closures > 90d, terminal intake_requests > 90d) | ✅ Shipped |
 | T15 — Meta Lead Ads inbox (DK side: leads staging table + dk-meta-lead-webhook Edge Function + Leads tab with reply / promote / junk / archive) | ✅ DK side shipped, awaiting Sharon's Meta App + env vars + Mailchimp's native FB Lead Ads connector |
 | T16 — Messenger / Instagram inbox, **as a feature of the PAR Spoke Skeleton** (not a per-spoke feature) | 📋 Designed (CLAUDE.md §4.32). Architecture decision: **ONE Meta App at the SKELETON level, App-Reviewed once, serves every spoke (DK, Margin, future) × every franchise across all time.** PAR hosts a `spoke-meta-webhook-router` Edge Function that verifies Meta's HMAC and forwards events to each spoke's webhook signed with `SPOKE_INSTALL_SIGNING_SECRET`. Franchises connect Pages via OAuth in PAR's Connected Apps panel. Phase split: T16a = skeleton scaffolding (PAR dispatcher + OAuth flow + spoke schema templates) + DK receive-only inbox + T15.5 lead-webhook migration to PAR-forward verification. T16b = send path + composer (needs `pages_messaging` App Review — clears once for entire skeleton). T16c = Instagram parity. Retroactive: T15 (DK leads) and Margin's future Meta integration both adopt the skeleton pattern. |
+| T17 — Task federation: DK→PAR push via Margin's `spoke-create-task` pattern (DK side: `tasks` table + `dk-create-par-task` Edge Function with 501 fallback + Tasks tab + YAML engagement-doc importer) | 📋 Designed (CLAUDE.md §4.33). Mirrors Margin's federation built 2026-05-06 with one DK simplification: reads `dk_config.par_franchise_org_id` instead of carrying a `DK_PAR_ORG_ID` env var (single source of truth, install flow already populates it). Phase split: T17a = build DK side independent of PAR readiness via 501 fallback. T17b = register `dk` spoke at PAR + set `DK_SPOKE_API_KEY` + run `admin_install_spoke('dk', <Charleston-org>)`. T17c (deferred, same open question Margin punted on) = status round-trip via PAR webhook keyed on `external_ref`. |
