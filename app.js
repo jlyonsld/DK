@@ -88,6 +88,13 @@
     invAssignState: { target: null, selectedItemIds: new Set(), query: "" },
     // T11: student intake requests (parent self-fill enrollment forms).
     studentIntakeRequests: [],
+    // T15: Meta Lead Ads inbox. RLS gates SELECT on respond_to_leads
+    // (admin/manager+). Empty for teachers/viewers.
+    leads: [],
+    // Leads tab state — filter ∈ {new, contacted, promoted, junk, archived, all},
+    // query is free-text search over parent name / email / child name.
+    // editingId tracks which lead is being replied to / promoted.
+    lState: { filter: "new", query: "", editingId: null, replyTemplateId: "" },
     dkConfig: null,
     latestSyncLog: null,
     tState: { query: "", category: "all", filled: {} },
@@ -217,9 +224,9 @@
   // Which tabs each role is allowed to see. (Role Management tab doesn't
   // exist in T1 — it lands in T6.)
   const ROLE_TAB_VISIBILITY = {
-    super_admin: new Set(["home","schedule","templates","classes","schools","teachers","subrequests","events","inventory","curriculum","reports","users"]),
-    admin:       new Set(["home","schedule","templates","classes","schools","teachers","subrequests","events","inventory","curriculum","reports","users"]),
-    manager:     new Set(["home","schedule","templates","classes","schools","teachers","subrequests","events","inventory","curriculum"]),
+    super_admin: new Set(["home","schedule","templates","classes","schools","teachers","subrequests","events","inventory","leads","curriculum","reports","users"]),
+    admin:       new Set(["home","schedule","templates","classes","schools","teachers","subrequests","events","inventory","leads","curriculum","reports","users"]),
+    manager:     new Set(["home","schedule","templates","classes","schools","teachers","subrequests","events","inventory","leads","curriculum"]),
     teacher:     new Set(["home","schedule","subrequests","events","inventory"]),
     viewer:      new Set(["home","schedule","templates","classes","schools","teachers","subrequests","events","inventory"])
   };
@@ -464,7 +471,8 @@
       "inventory_items", "inventory_assignments",
       "student_intake_requests",
       "par_promotion_events",
-      "mailchimp_sync_outbox", "mailchimp_sync_log"
+      "mailchimp_sync_outbox", "mailchimp_sync_log",
+      "leads"
     ];
     realtimeChannel = sb.channel("dk-realtime");
     tablesToWatch.forEach((table) => {
@@ -653,7 +661,7 @@
   async function reloadAll() {
     showLoader(true);
     try {
-      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches, att, clk, subs, subClm, schs, canc, cur, curA, tpd, tdocs, waivers, wSigs, pms, prof, evs, evStaff, invItems, invAssigns, intakes, parPromo] = await Promise.all([
+      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches, att, clk, subs, subClm, schs, canc, cur, curA, tpd, tdocs, waivers, wSigs, pms, prof, evs, evStaff, invItems, invAssigns, intakes, parPromo, leadsRes] = await Promise.all([
         sb.from("categories").select("*").order("sort_order", { ascending: true }),
         sb.from("templates").select("*").order("created_at", { ascending: true }),
         sb.from("classes").select("*").order("name", { ascending: true }),
@@ -687,7 +695,8 @@
         sb.from("inventory_items").select("*").order("name", { ascending: true }),
         sb.from("inventory_assignments").select("*").order("usage_starts_at", { ascending: true }),
         sb.from("student_intake_requests").select("*").order("sent_at", { ascending: false }),
-        sb.from("par_promotion_events").select("*").order("created_at", { ascending: false })
+        sb.from("par_promotion_events").select("*").order("created_at", { ascending: false }),
+        sb.from("leads").select("*").order("received_at", { ascending: false })
       ]);
       for (const r of [cats, tpls, cls, igs, tch, ct, ci, stu, enr]) if (r.error) throw r.error;
       // Non-admin roles may not have SELECT access to teacher_invitations /
@@ -766,6 +775,9 @@
       // (par_promo_events_self_read); admins see everything. Used for
       // dismiss gating (isVariantDismissed) and the PAR funnel report.
       state.parPromoEvents = (parPromo && !parPromo.error) ? parPromo.data : [];
+      // T15: Meta Lead Ads inbox. RLS gates SELECT on respond_to_leads,
+      // so teacher / viewer roles fall back to empty.
+      state.leads = (leadsRes && !leadsRes.error) ? leadsRes.data : [];
     } catch (e) {
       console.error(e);
       showToast("Failed to load: " + e.message, "error");
@@ -787,6 +799,7 @@
     renderSubRequestsTab();
     renderEventsTab();
     renderInventoryTab();
+    renderLeadsTab();
     renderCurriculumTab();
     renderReportsTab();
     renderUsersTab();
@@ -2241,7 +2254,7 @@
     // visible mtabs will center themselves naturally.
     const toolsBtn = $("#mobileToolsBtn");
     if (toolsBtn) {
-      const anyTool = ["templates","schools","subrequests","events","inventory","curriculum","reports","users"].some(canSeeTab);
+      const anyTool = ["templates","schools","subrequests","events","inventory","leads","curriculum","reports","users"].some(canSeeTab);
       toolsBtn.style.display = anyTool ? "" : "none";
     }
 
@@ -7791,6 +7804,423 @@
     showToast("Invitation redeemed", "success");
   }
 
+  /* ═════════════ Leads tab (T15) ═════════════
+   *
+   * Inbox of leads received from Meta Lead Ads (via the
+   * dk-meta-lead-webhook Edge Function). Admin reviews and either:
+   *   - Replies via the existing template machinery (lead-shaped vars
+   *     get substituted: {lead_parent_name}, {lead_email}, etc.)
+   *   - Promotes to a `students` row (calls promote_lead_to_student RPC)
+   *   - Marks junk / archives
+   *
+   * RLS gates SELECT on respond_to_leads, so teachers/viewers see
+   * an empty list — the tab is also hidden for them via
+   * ROLE_TAB_VISIBILITY.
+   */
+
+  const LEAD_STATUS_META = {
+    new:       { label: "New",       chip: "lead-status-new" },
+    contacted: { label: "Contacted", chip: "lead-status-contacted" },
+    promoted:  { label: "Promoted",  chip: "lead-status-promoted" },
+    junk:      { label: "Junk",      chip: "lead-status-junk" },
+    archived:  { label: "Archived",  chip: "lead-status-archived" },
+  };
+
+  const LEAD_FILTERS = [
+    { id: "new",       label: "New" },
+    { id: "contacted", label: "Contacted" },
+    { id: "promoted",  label: "Promoted" },
+    { id: "junk",      label: "Junk" },
+    { id: "archived",  label: "Archived" },
+    { id: "all",       label: "All" },
+  ];
+
+  // Build the substitution context for a lead. Mirrors the per-template
+  // {variable} syntax used everywhere else (see substitute / highlighted).
+  // Keys here are also surfaced in the reply-modal helper text.
+  function leadVariableContext(lead) {
+    if (!lead) return {};
+    const fullName = lead.parent_name || "";
+    const firstName = fullName.split(/\s+/)[0] || "";
+    return {
+      lead_parent_name:  fullName,
+      lead_parent_first: firstName,
+      lead_email:        lead.parent_email || "",
+      lead_phone:        lead.parent_phone || "",
+      lead_child_name:   lead.child_name || "",
+      lead_child_dob:    lead.child_dob || "",
+      lead_school:       lead.school_of_interest || "",
+    };
+  }
+
+  function leadSummaryName(lead) {
+    return lead.parent_name || lead.parent_email || lead.child_name || "(no name on lead)";
+  }
+
+  function renderLeadsTab() {
+    const panel = document.querySelector('.tab-panel[data-tab="leads"]');
+    if (!panel) return;
+    if (!canSeeTab("leads")) return;
+
+    const filter = state.lState.filter || "new";
+    const q = (state.lState.query || "").toLowerCase();
+
+    const counts = {};
+    for (const f of LEAD_FILTERS) counts[f.id] = 0;
+    counts.all = state.leads.length;
+    for (const l of state.leads) {
+      if (counts[l.status] != null) counts[l.status] += 1;
+    }
+
+    const rows = state.leads.filter((l) => {
+      if (filter !== "all" && l.status !== filter) return false;
+      if (!q) return true;
+      const hay = [
+        l.parent_name, l.parent_email, l.parent_phone,
+        l.child_name, l.school_of_interest, l.notes,
+      ].filter(Boolean).join(" ").toLowerCase();
+      return hay.includes(q);
+    });
+
+    const filterChips = LEAD_FILTERS.map((f) => {
+      const active = f.id === filter;
+      const cls = active ? "btn small primary" : "btn small";
+      const n = counts[f.id] != null ? ` (${counts[f.id]})` : "";
+      return `<button class="${cls}" data-lead-filter="${f.id}">${escapeHtml(f.label)}${n}</button>`;
+    }).join("");
+
+    const canManage = hasPerm("respond_to_leads");
+
+    const cards = rows.length === 0
+      ? `<div class="sr-empty">${state.leads.length === 0
+          ? "No leads yet. Once Meta is wired up, parent submissions will appear here."
+          : "No leads match this filter."}</div>`
+      : rows.map((l) => leadCardHtml(l, canManage)).join("");
+
+    panel.innerHTML = `
+      <div class="tab-head">
+        <div class="results-meta">${rows.length} of ${state.leads.length} lead${state.leads.length === 1 ? "" : "s"}</div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <input class="search" id="lead_search" type="search" placeholder="Search by name, email, child…" value="${escapeHtml(state.lState.query || "")}" style="width:240px" />
+        </div>
+      </div>
+      <div class="lead-filter-row">${filterChips}</div>
+      <div class="lead-cards">${cards}</div>
+    `;
+
+    // Filter chips
+    panel.querySelectorAll("[data-lead-filter]").forEach((b) => {
+      b.onclick = () => { state.lState.filter = b.dataset.leadFilter; renderLeadsTab(); };
+    });
+
+    const searchInput = panel.querySelector("#lead_search");
+    if (searchInput) {
+      searchInput.addEventListener("input", (e) => {
+        state.lState.query = e.target.value.trim();
+        renderLeadsTab();
+      });
+    }
+
+    // Per-card action wiring
+    panel.querySelectorAll("[data-lead-action]").forEach((b) => {
+      const id = b.dataset.leadId;
+      const action = b.dataset.leadAction;
+      b.onclick = () => handleLeadAction(action, id);
+    });
+  }
+
+  function leadCardHtml(l, canManage) {
+    const meta = LEAD_STATUS_META[l.status] || LEAD_STATUS_META.new;
+    const received = l.received_at ? formatRelativePast(new Date(l.received_at)) : "";
+    const fetchErr = l.last_fetch_error
+      ? `<div class="lead-fetch-error">⚠ ${escapeHtml(l.last_fetch_error)}</div>`
+      : "";
+
+    const detailLines = [
+      l.parent_email ? `📧 <a href="mailto:${escapeHtml(l.parent_email)}">${escapeHtml(l.parent_email)}</a>` : "",
+      l.parent_phone ? `📞 <a href="tel:${escapeHtml(l.parent_phone)}">${escapeHtml(l.parent_phone)}</a>` : "",
+      l.child_name   ? `👶 ${escapeHtml(l.child_name)}${l.child_dob ? ` · ${escapeHtml(l.child_dob)}` : ""}` : "",
+      l.school_of_interest ? `🏫 ${escapeHtml(l.school_of_interest)}` : "",
+    ].filter(Boolean).map((line) => `<div class="lead-detail-line">${line}</div>`).join("");
+
+    let actions = "";
+    if (canManage) {
+      const isTerminal = l.status === "promoted" || l.status === "archived";
+      actions = `
+        <button class="btn small" data-lead-action="view" data-lead-id="${l.id}">View</button>
+        ${l.status !== "promoted" ? `<button class="btn small primary" data-lead-action="reply" data-lead-id="${l.id}">✉ Reply</button>` : ""}
+        ${l.status !== "promoted" && l.status !== "junk" ? `<button class="btn small" data-lead-action="promote" data-lead-id="${l.id}">→ Promote</button>` : ""}
+        ${l.status !== "junk" && !isTerminal ? `<button class="btn small" data-lead-action="junk" data-lead-id="${l.id}">Junk</button>` : ""}
+        ${!isTerminal ? `<button class="btn small" data-lead-action="archive" data-lead-id="${l.id}">Archive</button>` : ""}
+        ${l.status === "junk" || l.status === "archived" ? `<button class="btn small" data-lead-action="reopen" data-lead-id="${l.id}">Reopen</button>` : ""}
+      `;
+    }
+
+    return `
+      <div class="lead-card">
+        <div class="lead-card-head">
+          <div class="lead-card-name">${escapeHtml(leadSummaryName(l))}</div>
+          <span class="lead-status-chip ${meta.chip}">${meta.label}</span>
+        </div>
+        <div class="lead-card-meta">${escapeHtml(received)} · ${escapeHtml(l.source || "meta_lead_ad")}</div>
+        ${detailLines ? `<div class="lead-card-details">${detailLines}</div>` : ""}
+        ${l.notes ? `<div class="lead-card-notes">📝 ${escapeHtml(l.notes)}</div>` : ""}
+        ${fetchErr}
+        <div class="lead-card-actions">${actions}</div>
+      </div>
+    `;
+  }
+
+  async function handleLeadAction(action, leadId) {
+    const lead = state.leads.find((x) => x.id === leadId);
+    if (!lead) return;
+
+    if (action === "view")     return openLeadDetail(lead);
+    if (action === "reply")    return openLeadReply(lead);
+    if (action === "promote")  return openLeadPromote(lead);
+    if (action === "junk")     return setLeadStatus(leadId, "junk", "Mark this lead as junk?");
+    if (action === "archive")  return setLeadStatus(leadId, "archived", "Archive this lead?");
+    if (action === "reopen")   return setLeadStatus(leadId, "new", null);
+  }
+
+  async function setLeadStatus(leadId, newStatus, confirmMsg) {
+    if (confirmMsg && !confirm(confirmMsg)) return;
+    showLoader(true);
+    const { error } = await sb.from("leads").update({ status: newStatus }).eq("id", leadId);
+    showLoader(false);
+    if (error) { showToast(error.message, "error"); return; }
+    await reloadAll();
+    renderAll();
+  }
+
+  /* ─── Lead detail modal ──────────────────────────────────────────── */
+
+  function openLeadDetail(lead) {
+    const overlay = $("#leadDetailOverlay");
+    const body = $("#leadDetailBody");
+    if (!overlay || !body) return;
+    state.lState.editingId = lead.id;
+
+    const meta = LEAD_STATUS_META[lead.status] || LEAD_STATUS_META.new;
+    const lines = [
+      ["Status", `<span class="lead-status-chip ${meta.chip}">${meta.label}</span>`],
+      ["Received", lead.received_at || ""],
+      ["Parent name", lead.parent_name || "—"],
+      ["Parent email", lead.parent_email || "—"],
+      ["Parent phone", lead.parent_phone || "—"],
+      ["Child name", lead.child_name || "—"],
+      ["Child DOB", lead.child_dob || "—"],
+      ["School of interest", lead.school_of_interest || "—"],
+      ["Source", lead.source || "—"],
+      ["Meta lead id", lead.meta_lead_id || "—"],
+      ["Meta form id", lead.meta_form_id || "—"],
+      ["Meta ad id", lead.meta_ad_id || "—"],
+      ["Notes", lead.notes || "—"],
+      ["Last fetch error", lead.last_fetch_error || "—"],
+    ];
+
+    const rowsHtml = lines.map(([k, v]) => `
+      <div class="lead-detail-row"><span class="lead-detail-key">${escapeHtml(k)}</span><span class="lead-detail-val">${typeof v === "string" ? escapeHtml(v) : v}</span></div>
+    `).join("");
+
+    const rawHtml = lead.raw_meta_payload
+      ? `<details class="lead-detail-raw"><summary>Raw payload</summary><pre>${escapeHtml(JSON.stringify(lead.raw_meta_payload, null, 2))}</pre></details>`
+      : "";
+
+    body.innerHTML = `<div class="lead-detail-rows">${rowsHtml}</div>${rawHtml}`;
+    overlay.classList.add("show");
+  }
+
+  function closeLeadDetail() {
+    const overlay = $("#leadDetailOverlay");
+    if (overlay) overlay.classList.remove("show");
+    state.lState.editingId = null;
+  }
+
+  /* ─── Reply modal — template picker + lead-var substitution ──────── */
+
+  function buildLeadReplySubject(tpl, lead) {
+    if (tpl && tpl.title) {
+      return substitute(`Drama Kids — ${tpl.title}`, leadVariableContext(lead));
+    }
+    return "Drama Kids — following up on your inquiry";
+  }
+
+  function applyLeadReplyTemplate() {
+    const lead = state.leads.find((x) => x.id === state.lState.editingId);
+    if (!lead) return;
+    const tplId = $("#lead_reply_template_select").value;
+    const tpl = state.templates.find((t) => t.id === tplId);
+    state.lState.replyTemplateId = tplId;
+
+    const ctx = leadVariableContext(lead);
+    const body = tpl ? substitute(tpl.body || "", ctx) : "";
+    $("#lead_reply_body").value = body;
+    $("#lead_reply_subject").value = buildLeadReplySubject(tpl, lead);
+
+    // Surface any {variable} that didn't get replaced (template uses
+    // a non-lead variable like {class_name}). Admin can edit those by
+    // hand in the body — this is a hint, not a blocker.
+    const unfilled = [];
+    const re = /\{([a-zA-Z0-9_]+)\}/g;
+    let m;
+    while ((m = re.exec(body)) !== null) {
+      if (!unfilled.includes(m[1])) unfilled.push(m[1]);
+    }
+    const unfilledEl = $("#lead_reply_unfilled");
+    if (unfilled.length > 0) {
+      unfilledEl.innerHTML = `⚠ Unfilled placeholders: ${unfilled.map((v) => `<code>{${escapeHtml(v)}}</code>`).join(", ")}`;
+      unfilledEl.style.display = "";
+    } else {
+      unfilledEl.style.display = "none";
+    }
+  }
+
+  function openLeadReply(lead) {
+    const overlay = $("#leadReplyOverlay");
+    if (!overlay) return;
+    state.lState.editingId = lead.id;
+
+    // Target banner
+    const banner = $("#lead_reply_target");
+    banner.innerHTML = `
+      <div class="lead-reply-target-name">${escapeHtml(leadSummaryName(lead))}</div>
+      <div class="lead-reply-target-meta">${[
+        lead.parent_email ? `📧 ${escapeHtml(lead.parent_email)}` : "",
+        lead.parent_phone ? `📞 ${escapeHtml(lead.parent_phone)}` : "",
+        lead.child_name ? `👶 ${escapeHtml(lead.child_name)}` : "",
+        lead.school_of_interest ? `🏫 ${escapeHtml(lead.school_of_interest)}` : "",
+      ].filter(Boolean).join(" · ")}</div>
+    `;
+
+    // Template picker — group by category for readability
+    const sel = $("#lead_reply_template_select");
+    const byCat = {};
+    for (const t of state.templates) {
+      const c = state.categories.find((x) => x.id === t.category_id);
+      const key = c ? c.name : "Uncategorized";
+      (byCat[key] = byCat[key] || []).push(t);
+    }
+    sel.innerHTML = `<option value="">— Pick a template —</option>` + Object.keys(byCat).sort().map((cat) => {
+      const opts = byCat[cat].map((t) => `<option value="${t.id}">${escapeHtml(t.title)}</option>`).join("");
+      return `<optgroup label="${escapeHtml(cat)}">${opts}</optgroup>`;
+    }).join("");
+    sel.value = state.lState.replyTemplateId || "";
+    sel.onchange = applyLeadReplyTemplate;
+
+    // Initialize body + subject
+    if (sel.value) {
+      applyLeadReplyTemplate();
+    } else {
+      $("#lead_reply_body").value = "";
+      $("#lead_reply_subject").value = buildLeadReplySubject(null, lead);
+      $("#lead_reply_unfilled").style.display = "none";
+    }
+
+    overlay.classList.add("show");
+  }
+
+  function closeLeadReply() {
+    const overlay = $("#leadReplyOverlay");
+    if (overlay) overlay.classList.remove("show");
+    state.lState.editingId = null;
+    state.lState.replyTemplateId = "";
+  }
+
+  async function copyLeadReply() {
+    const subject = $("#lead_reply_subject").value;
+    const body = $("#lead_reply_body").value;
+    const text = `Subject: ${subject}\n\n${body}`;
+    try {
+      await navigator.clipboard.writeText(text);
+      await markLeadContactedAndClose();
+      showToast("Copied — paste into your email", "success");
+    } catch {
+      showToast("Copy failed — select + copy from the textarea", "error");
+    }
+  }
+
+  async function mailtoLeadReply() {
+    const lead = state.leads.find((x) => x.id === state.lState.editingId);
+    if (!lead) return;
+    const to = lead.parent_email || "";
+    const subject = $("#lead_reply_subject").value;
+    const body = $("#lead_reply_body").value;
+    const url = `mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+    window.location.href = url;
+    await markLeadContactedAndClose();
+  }
+
+  async function markLeadContactedAndClose() {
+    const id = state.lState.editingId;
+    if (id) {
+      const { error } = await sb.rpc("mark_lead_contacted", { p_lead_id: id });
+      if (error) console.warn("mark_lead_contacted:", error.message);
+    }
+    closeLeadReply();
+    await reloadAll();
+    renderAll();
+  }
+
+  /* ─── Promote-to-student modal ───────────────────────────────────── */
+
+  function openLeadPromote(lead) {
+    const overlay = $("#leadPromoteOverlay");
+    if (!overlay) return;
+    state.lState.editingId = lead.id;
+
+    $("#lead_promote_banner").innerHTML = `
+      <div class="lead-reply-target-name">${escapeHtml(leadSummaryName(lead))}</div>
+      <div class="lead-reply-target-meta">${[
+        lead.parent_email ? `📧 ${escapeHtml(lead.parent_email)}` : "",
+        lead.parent_phone ? `📞 ${escapeHtml(lead.parent_phone)}` : "",
+        lead.school_of_interest ? `🏫 ${escapeHtml(lead.school_of_interest)}` : "",
+      ].filter(Boolean).join(" · ")}</div>
+    `;
+
+    // Pre-fill from lead.child_name if present
+    let firstGuess = "";
+    let lastGuess = "";
+    if (lead.child_name) {
+      const parts = lead.child_name.trim().split(/\s+/);
+      firstGuess = parts[0] || "";
+      lastGuess  = parts.slice(1).join(" ");
+    }
+    $("#lead_promote_first").value = firstGuess;
+    $("#lead_promote_last").value  = lastGuess;
+    $("#lead_promote_dob").value   = lead.child_dob || "";
+
+    overlay.classList.add("show");
+  }
+
+  function closeLeadPromote() {
+    const overlay = $("#leadPromoteOverlay");
+    if (overlay) overlay.classList.remove("show");
+    state.lState.editingId = null;
+  }
+
+  async function saveLeadPromote() {
+    const id = state.lState.editingId;
+    if (!id) return;
+    const first = $("#lead_promote_first").value.trim();
+    const last  = $("#lead_promote_last").value.trim();
+    const dob   = $("#lead_promote_dob").value || null;
+    if (!first || !last) {
+      showToast("First and last name required", "error");
+      return;
+    }
+    showLoader(true);
+    const { data, error } = await sb.rpc("promote_lead_to_student", {
+      p_lead_id: id, p_first: first, p_last: last, p_dob: dob,
+    });
+    showLoader(false);
+    if (error) { showToast(error.message, "error"); return; }
+    closeLeadPromote();
+    await reloadAll();
+    renderAll();
+    showToast(`Promoted — new student id ${String(data).slice(0, 8)}…`, "success");
+  }
+
   /* ═════════════ Reports tab ═════════════
    * Admin-only aggregation views that sit alongside the operational tabs.
    * Registered reports:
@@ -10403,6 +10833,34 @@
 
     // Inventory modals (Phase T10) — both editor + assign-picker.
     wireInventoryModals();
+
+    // Leads modals (Phase T15) — detail / reply / promote.
+    const leadDetailClose = $("#leadDetailClose");
+    const leadDetailDone  = $("#leadDetailDone");
+    const leadDetailOver  = $("#leadDetailOverlay");
+    if (leadDetailClose) leadDetailClose.onclick = closeLeadDetail;
+    if (leadDetailDone)  leadDetailDone.onclick  = closeLeadDetail;
+    if (leadDetailOver)  leadDetailOver.onclick  = (e) => { if (e.target.id === "leadDetailOverlay") closeLeadDetail(); };
+
+    const leadReplyClose  = $("#leadReplyClose");
+    const leadReplyCancel = $("#leadReplyCancel");
+    const leadReplyOver   = $("#leadReplyOverlay");
+    const leadReplyCopy   = $("#leadReplyCopy");
+    const leadReplyMail   = $("#leadReplyMailto");
+    if (leadReplyClose)  leadReplyClose.onclick  = closeLeadReply;
+    if (leadReplyCancel) leadReplyCancel.onclick = closeLeadReply;
+    if (leadReplyOver)   leadReplyOver.onclick   = (e) => { if (e.target.id === "leadReplyOverlay") closeLeadReply(); };
+    if (leadReplyCopy)   leadReplyCopy.onclick   = copyLeadReply;
+    if (leadReplyMail)   leadReplyMail.onclick   = mailtoLeadReply;
+
+    const leadPromoteClose  = $("#leadPromoteClose");
+    const leadPromoteCancel = $("#leadPromoteCancel");
+    const leadPromoteOver   = $("#leadPromoteOverlay");
+    const leadPromoteSave   = $("#leadPromoteSave");
+    if (leadPromoteClose)  leadPromoteClose.onclick  = closeLeadPromote;
+    if (leadPromoteCancel) leadPromoteCancel.onclick = closeLeadPromote;
+    if (leadPromoteOver)   leadPromoteOver.onclick   = (e) => { if (e.target.id === "leadPromoteOverlay") closeLeadPromote(); };
+    if (leadPromoteSave)   leadPromoteSave.onclick   = saveLeadPromote;
 
     // Class-cancellation modal (Phase T8)
     const ccCancel = $("#classCancelClose");

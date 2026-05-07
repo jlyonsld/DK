@@ -116,6 +116,7 @@
         <button class="tab" data-tab="subrequests">Sub requests</button>
         <button class="tab" data-tab="events">Events</button>
         <button class="tab" data-tab="inventory">Inventory</button>
+        <button class="tab" data-tab="leads">Leads</button>
         <button class="tab" data-tab="curriculum">Curriculum</button>
         <button class="tab" data-tab="reports">Reports</button>
         <button class="tab" data-tab="users">Users</button>
@@ -228,6 +229,11 @@
         <div class="tab-panel" data-tab="inventory" style="display:none">
           <!-- Phase T10: inventory items + assignments to classes/events.
                Body rendered by renderInventoryTab() in app.js. -->
+        </div>
+
+        <div class="tab-panel" data-tab="leads" style="display:none">
+          <!-- Phase T15: Meta Lead Ads inbox. Body rendered by
+               renderLeadsTab() in app.js. -->
         </div>
 
         <div class="tab-panel" data-tab="curriculum" style="display:none">
@@ -1465,6 +1471,96 @@
     </div>
   </div>
 
+  <!-- Phase T15: Lead detail modal — read-only view of a Meta lead row,
+       including raw_meta_payload. -->
+  <div class="modal-overlay" id="leadDetailOverlay">
+    <div class="modal" style="max-width:620px">
+      <div class="modal-head">
+        <h3>Lead detail</h3>
+        <button class="btn ghost small" id="leadDetailClose">✕</button>
+      </div>
+      <div class="modal-body" id="leadDetailBody"></div>
+      <div class="modal-foot">
+        <button class="btn" id="leadDetailDone">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Phase T15: Reply modal — pick a template, fill lead-shaped variables,
+       copy or open in mailto. On confirm, calls mark_lead_contacted. -->
+  <div class="modal-overlay" id="leadReplyOverlay">
+    <div class="modal" style="max-width:760px">
+      <div class="modal-head">
+        <h3>Reply to lead</h3>
+        <button class="btn ghost small" id="leadReplyClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="lead_reply_target" class="lead-reply-target"></div>
+
+        <div class="field">
+          <label>Pick a template</label>
+          <select id="lead_reply_template_select"></select>
+        </div>
+
+        <div class="field">
+          <label>Subject</label>
+          <input type="text" id="lead_reply_subject" placeholder="Subject line for the email" />
+        </div>
+
+        <div class="field">
+          <label>Body <span class="field-sub">(edit before sending — variables in {braces} are pre-filled from the lead)</span></label>
+          <textarea id="lead_reply_body" rows="10"></textarea>
+        </div>
+
+        <div id="lead_reply_unfilled" class="lead-reply-unfilled" style="display:none"></div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" id="leadReplyCancel">Cancel</button>
+        <button class="btn" id="leadReplyCopy">📋 Copy &amp; mark contacted</button>
+        <button class="btn primary" id="leadReplyMailto">✉ Open in email app</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Phase T15: Promote-to-student modal — confirm first/last/dob then
+       call promote_lead_to_student RPC. Class assignment happens after
+       via the existing enrollment flow. -->
+  <div class="modal-overlay" id="leadPromoteOverlay">
+    <div class="modal" style="max-width:520px">
+      <div class="modal-head">
+        <h3>Promote lead to student</h3>
+        <button class="btn ghost small" id="leadPromoteClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="lead_promote_banner" class="lead-promote-banner"></div>
+        <div class="field-row">
+          <div class="field">
+            <label>First name</label>
+            <input type="text" id="lead_promote_first" />
+          </div>
+          <div class="field">
+            <label>Last name</label>
+            <input type="text" id="lead_promote_last" />
+          </div>
+        </div>
+        <div class="field">
+          <label>Date of birth <span class="field-sub">(optional)</span></label>
+          <input type="date" id="lead_promote_dob" />
+        </div>
+        <div class="lead-promote-hint">
+          After promote, the new student will appear under Classes — open the
+          class detail panel and add this student to an enrollment to finish
+          onboarding. Parent contact (email / phone) is carried over from the
+          lead automatically.
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" id="leadPromoteCancel">Cancel</button>
+        <button class="btn primary" id="leadPromoteSave">Promote</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Class-cancel modal (Phase T8). Open from class detail panel
        "Cancel class" button. -->
   <div class="modal-overlay" id="classCancelOverlay">
@@ -1584,6 +1680,10 @@
         <button class="mobile-tools-item" data-tab="inventory" type="button">
           <span class="mobile-tools-ico" aria-hidden="true">📦</span>
           <span>Inventory</span>
+        </button>
+        <button class="mobile-tools-item" data-tab="leads" type="button">
+          <span class="mobile-tools-ico" aria-hidden="true">📥</span>
+          <span>Leads</span>
         </button>
         <button class="mobile-tools-item" data-tab="curriculum" type="button">
           <span class="mobile-tools-ico" aria-hidden="true">📚</span>

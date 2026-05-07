@@ -3804,6 +3804,229 @@ footer code {
 }
 
 /* ──────────────────────────────────────────────────────────────────────
+   T15 — Leads tab (Meta Lead Ads inbox)
+   ────────────────────────────────────────────────────────────────────── */
+
+.lead-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 0 14px 0;
+  border-bottom: 1px solid var(--hairline, hsla(210, 20%, 70%, .25));
+  margin-bottom: 14px;
+}
+
+.lead-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 14px;
+}
+
+.lead-card {
+  background: var(--surface, #fff);
+  border: 1px solid var(--hairline, hsla(210, 20%, 70%, .25));
+  border-radius: 10px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.lead-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.lead-card-name {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--ink, #222);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lead-card-meta {
+  font-size: 12px;
+  color: var(--ink-dim, #555);
+}
+
+.lead-card-details {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 13px;
+}
+
+.lead-detail-line {
+  color: var(--ink-dim, #555);
+}
+.lead-detail-line a {
+  color: var(--accent, #1f7ad8);
+  text-decoration: none;
+}
+.lead-detail-line a:hover { text-decoration: underline; }
+
+.lead-card-notes {
+  font-size: 12px;
+  color: var(--ink-dim, #555);
+  background: var(--surface-alt, #fafafa);
+  padding: 6px 8px;
+  border-radius: 6px;
+}
+
+.lead-fetch-error {
+  font-size: 12px;
+  color: hsl(0, 65%, 42%);
+  background: hsla(0, 70%, 55%, .08);
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid hsla(0, 70%, 55%, .25);
+}
+
+.lead-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-top: 4px;
+}
+
+.lead-status-chip {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.lead-status-new {
+  background: hsla(210, 80%, 55%, .14);
+  color: hsl(210, 75%, 42%);
+  border: 1px solid hsla(210, 80%, 55%, .35);
+}
+.lead-status-contacted {
+  background: hsla(38, 90%, 50%, .14);
+  color: hsl(38, 85%, 38%);
+  border: 1px solid hsla(38, 90%, 50%, .35);
+}
+.lead-status-promoted {
+  background: hsla(150, 60%, 45%, .14);
+  color: hsl(150, 55%, 35%);
+  border: 1px solid hsla(150, 60%, 45%, .35);
+}
+.lead-status-junk {
+  background: hsla(0, 70%, 55%, .14);
+  color: hsl(0, 65%, 42%);
+  border: 1px solid hsla(0, 70%, 55%, .35);
+}
+.lead-status-archived {
+  background: hsla(210, 20%, 60%, .14);
+  color: var(--ink-dim, #555);
+  border: 1px solid hsla(210, 20%, 60%, .35);
+}
+
+/* Lead detail modal */
+.lead-detail-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+}
+.lead-detail-row {
+  display: flex;
+  gap: 12px;
+  padding: 4px 0;
+  border-bottom: 1px dashed hsla(210, 20%, 70%, .25);
+}
+.lead-detail-row:last-child { border-bottom: none; }
+.lead-detail-key {
+  flex: 0 0 140px;
+  font-weight: 600;
+  color: var(--ink-dim, #555);
+}
+.lead-detail-val {
+  flex: 1;
+  color: var(--ink, #222);
+  word-break: break-word;
+}
+.lead-detail-raw {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--hairline, hsla(210, 20%, 70%, .25));
+}
+.lead-detail-raw summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--ink-dim, #555);
+}
+.lead-detail-raw pre {
+  margin-top: 8px;
+  padding: 10px;
+  background: var(--surface-alt, #fafafa);
+  border-radius: 6px;
+  font-size: 11px;
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Reply + promote target banners share styling */
+.lead-reply-target,
+.lead-promote-banner {
+  background: var(--surface-alt, #fafafa);
+  border: 1px solid var(--hairline, hsla(210, 20%, 70%, .25));
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 14px;
+}
+.lead-reply-target-name {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--ink, #222);
+}
+.lead-reply-target-meta {
+  font-size: 12px;
+  color: var(--ink-dim, #555);
+  margin-top: 3px;
+}
+
+.lead-reply-unfilled {
+  margin-top: 8px;
+  padding: 6px 10px;
+  background: hsla(38, 90%, 50%, .12);
+  border: 1px solid hsla(38, 90%, 50%, .35);
+  color: hsl(38, 85%, 38%);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.lead-reply-unfilled code {
+  font-family: monospace;
+  background: hsla(38, 90%, 50%, .18);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+.lead-promote-hint {
+  margin-top: 10px;
+  padding: 8px 10px;
+  background: var(--surface-alt, #fafafa);
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--ink-dim, #555);
+  line-height: 1.4;
+}
+
+@media (max-width: 720px) {
+  .lead-cards { grid-template-columns: 1fr; }
+  .lead-detail-key { flex-basis: 110px; }
+}
+
+/* ──────────────────────────────────────────────────────────────────────
    T12 — Mailchimp settings modal
    ────────────────────────────────────────────────────────────────────── */
 

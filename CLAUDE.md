@@ -260,6 +260,16 @@ response-console-v3/
     │                                       the "Resync all students" button
     │                                       in the Mailchimp settings modal.
     │                                       See §4.29.
+    ├── phase_t15_leads.sql               ← T15. Meta Lead Ads inbox.
+    │                                       Adds `leads` staging table +
+    │                                       `lead_status` enum + two RPCs:
+    │                                       `promote_lead_to_student` (atomic
+    │                                       insert into students + mark lead
+    │                                       promoted) and `mark_lead_contacted`
+    │                                       (audit stamp from the reply modal).
+    │                                       Reuses existing `respond_to_leads`
+    │                                       permission (no new perm name).
+    │                                       See §4.31.
     └── phase_t14_nightly_housekeeping.sql ← T14. `nightly_housekeeping()` +
                                             pg_cron job `nightly-housekeeping`
                                             (03:30 UTC daily). Marks pending-
@@ -306,6 +316,7 @@ DK Optimization/                ← parent folder, NOT a git repo
 | `curriculum-fetch` | false | T5c. The ONLY path that mints signed URLs against the private `curriculum-assets` bucket. Verifies caller is the assigned teacher (or an admin/manager preview), re-runs the lead-window check server-side, mints a 5-minute signed URL via service-role, and inserts a row into `curriculum_access_log`. **Verifies the JWT manually inside the handler via `auth.getUser(jwt)`** — same pattern as `par-identity-proxy`. We tried `verify_jwt: true` first but the platform's gateway rejections weren't appearing in function logs, which made debugging impossible. Manual verification still requires a valid JWT but gives full log visibility + descriptive error messages. See §4.22. |
 | `dk-mailchimp-drain` | false | T12. Triggered every 60s by pg_cron (`dk-mailchimp-drain` job). Reads up to 50 rows from `mailchimp_sync_outbox`, resolves student → most-recent enrollment → class → school, and PUTs each parent into the configured Mailchimp audience with allow-listed merge fields (FNAME, LNAME, STUDENT, CLASS, SCHOOL, STATUS) + dk-/class:/school: tags. Authenticated via `X-Cron-Secret` header compared against the `mailchimp_drain_cron_secret` vault entry (read via the `get_mailchimp_drain_cron_secret()` RPC at request time — NOT via an Edge Function env var, so the secret never has to be set out-of-band). Returns `{ skipped: 'not_configured' }` if `dk_config.mailchimp_api_key` is null. See §4.29. |
 | `mailchimp-webhook` | false | T12. Public endpoint that receives Mailchimp's audience webhooks. Authenticated by the `?secret=<token>` query param compared constant-time against `dk_config.mailchimp_webhook_secret`. Updates `students.marketing_status` on subscribe / unsubscribe / cleaned and rewrites the email in `parent_emails` arrays on `upemail`. Always returns 200 (even on lookup miss) so MC doesn't retry-storm against parents not yet in DK. See §4.29. |
+| `dk-meta-lead-webhook` | false | T15. Receives Meta Lead Ads webhooks. Handles two request shapes: GET ?hub.mode=subscribe (echoes `hub.challenge` if `META_VERIFY_TOKEN` matches) and POST signed with `X-Hub-Signature-256` (HMAC-SHA256 over `META_APP_SECRET`). On a verified POST, GETs `/{leadgen_id}?access_token={META_PAGE_ACCESS_TOKEN}` to fetch the actual `field_data` (the webhook only carries pointers), normalizes parent/child fields with case-insensitive name matching across common Meta field names, and INSERTs a `leads` row. **Always returns 200** on POST (mirrors `mailchimp-webhook` — Meta retries non-2xx for hours). Idempotent via `meta_lead_id` unique index + ON CONFLICT DO NOTHING — Meta retries are silent. If `META_PAGE_ACCESS_TOKEN` is unset, the row still lands with the leadgen pointer + `last_fetch_error = 'META_PAGE_ACCESS_TOKEN not configured'` so the admin can see something arrived. See §4.31. |
 | `dk-mailchimp-ping` | true | T12. Helper called from the admin Mailchimp settings modal. Verifies a pasted API key reaches MC (`/3.0/ping`), lists audiences, lists merge fields for a chosen audience, and (optionally) creates missing required merge fields. Super_admin gate via `is_super_admin()` RPC under the user JWT. See §4.29. |
 
 **Tables in DK's public schema** (roughly in order of importance):
@@ -402,6 +413,16 @@ mailchimp_sync_outbox    — T12. Per-row queue of upsert/archive ops for the
 mailchimp_sync_log       — T12. Append-only audit of every MC sync interaction
                            (outbound upserts/tags/skips/failures + inbound
                            webhook events). RLS: admin-read only. See §4.29.
+leads                    — T15. Staging inbox for Meta Lead Ads submissions.
+                           One row per Meta leadgen_id (unique → idempotent
+                           webhook retries). status ∈ {new, contacted,
+                           promoted, junk, archived}. Carries normalized
+                           parent/child fields + raw_meta_payload jsonb +
+                           audit fields for promote/contacted transitions.
+                           RLS: SELECT/INSERT/UPDATE/DELETE all gated on
+                           respond_to_leads (admin/manager+). The Edge
+                           Function uses service-role and bypasses RLS.
+                           See §4.31.
 ```
 
 ---
@@ -858,6 +879,40 @@ The pg_cron job name is `nightly-housekeeping` (consistent with the existing `dk
 
 **Why NOT a per-row TTL or partitioning.** Volume is low enough that a daily DELETE is sub-millisecond per table. Partitioning by month would add operational ceremony with no measurable benefit until volume crosses six figures, which won't happen at franchise scale.
 
+### 4.31 Meta Lead Ads inbox — staging table + webhook + reply/promote (T15)
+
+T15 turns Meta-sourced leads into a first-class DK surface. Mailchimp continues to receive the same leads independently via its native FB Lead Ads connector (configured Sharon-side), so the franchise gets MC's marketing-email side AND DK's enrollable-student side from the same Meta submission. **Direction decided 2026-05-07** (per §6 entry): keep MC for campaign authoring + deliverability; build a thin DK-side intake for the enrollable-student path. T15 is that thin DK side.
+
+**Schema is one staging table, no rewrites elsewhere.** `leads` carries normalized parent/child fields (parent_name/email/phone, child_name/dob, school_of_interest), Meta provenance (`meta_lead_id` UNIQUE for idempotency, plus form/page/ad ids), `raw_meta_payload` jsonb for audit, a `lead_status` enum (`new` / `contacted` / `promoted` / `junk` / `archived`), audit fields for promote (`promoted_student_id`, `promoted_at`, `promoted_by`) and contacted (`contacted_at`, `contacted_by`), and `last_fetch_error` for surfacing webhook-time failures. **Why a staging table instead of `students.source = 'meta_lead'`:** Meta payloads are messy (test submissions, fat-fingered phones, no class selection). Promoting to a real student should be an explicit admin action, not automatic — same rationale as T11's `student_intake_requests` (§4.28).
+
+**Permission: REUSED, not new.** `respond_to_leads` was already in super_admin/admin/manager bundles from earlier phases (visible in T10's `has_permission()`). T15 gates SELECT/INSERT/UPDATE/DELETE on it directly. **Why not split into `manage_leads` + `respond_to_leads`:** v1 doesn't need the granular split. Same §4.5 pattern of consolidate-first-split-later. If a franchise ever wants a delegated bookkeeper-style role that archives but doesn't reply, that's a one-line gate change, not a schema change.
+
+**Two RPCs handle the state transitions worth being atomic:**
+- **`promote_lead_to_student(lead_id, first, last, dob?)`** — `security definer`, gates on both `respond_to_leads` AND `edit_students`. Inserts a `students` row with `source='dk_local'`, parent contact arrays carried from the lead, then marks the lead `promoted` + stamps `promoted_student_id` / `promoted_at` / `promoted_by`. Atomic — if the student INSERT fails, the lead doesn't move. **Class assignment is deliberately NOT in this RPC** — Meta forms don't pick a class, and the admin already needs to open the class detail panel to add an enrollment row anyway. Splitting the responsibilities keeps the RPC tight and lets the admin pick the class with full context (terms, capacity, school).
+- **`mark_lead_contacted(lead_id)`** — `security definer`, gates on `respond_to_leads`. Stamps `contacted_at` / `contacted_by` and flips status from `new` to `contacted` (preserves any other status — re-replying to an already-promoted lead doesn't demote it). Called from the reply modal's Copy and mailto buttons.
+
+**Edge Function `dk-meta-lead-webhook` (verify_jwt: false).** Auth IS the HMAC signature on POST + the verify token on GET — same pattern as `dk-install-callback` and `mailchimp-webhook`. Three env vars: `META_APP_SECRET` (HMAC verification), `META_VERIFY_TOKEN` (subscription handshake), `META_PAGE_ACCESS_TOKEN` (to fetch field_data — Meta's webhook only carries pointers, the actual lead values come from `GET /{leadgen_id}`). If `META_PAGE_ACCESS_TOKEN` is unset, the row still lands with `last_fetch_error` populated so the admin sees something arrived — same "skip if not configured" pattern as the Mailchimp drain (§4.29).
+
+**Always returns 200 on POST.** Meta retries non-2xx for hours and we don't want stuck queues. Failures land in `leads.last_fetch_error`, not the HTTP status. The function tracks per-request counts (`inserted`, `skipped`, `errors`) and includes them in the 200 body for log-time inspection.
+
+**Idempotency via `meta_lead_id` UNIQUE + `INSERT … ON CONFLICT DO NOTHING`.** Meta retries the same leadgen webhook on non-2xx (or its own internal hiccups), and we always 200 — so retries shouldn't happen often, but when they do they're silent. **Don't change to `ON CONFLICT (meta_lead_id) DO UPDATE`** unless you also gate the UPDATE on `status = 'new'` — otherwise a Meta retry could clobber an admin's notes / status changes.
+
+**UI surface — new "Leads" top-level tab.** Visible to super_admin/admin/manager via `ROLE_TAB_VISIBILITY` (teachers + viewers don't see it). Inbox card grid with filter chips (`new` / `contacted` / `promoted` / `junk` / `archived` / `all`) showing per-status counts, free-text search across parent name/email/child/notes, and per-row action buttons: View / Reply / Promote / Junk / Archive / Reopen (last for junked/archived). Click View → read-only modal showing every column + `raw_meta_payload` collapsible. Click Reply → reuses the existing template machinery: a template picker that substitutes `{lead_parent_name}`, `{lead_parent_first}`, `{lead_email}`, `{lead_phone}`, `{lead_child_name}`, `{lead_child_dob}`, `{lead_school}` via `leadVariableContext()` against the same `substitute()` helper templates use everywhere else. Editable subject + body, Copy-to-clipboard or mailto, and either action calls `mark_lead_contacted` to flip the row to `contacted`. Click Promote → small form (first/last/dob, pre-filled by splitting `child_name`) → calls `promote_lead_to_student` → admin then opens the new student in Classes to add an enrollment.
+
+**Mobile registers the tab as a Tools-sheet overflow item with the 📥 icon** — same pattern as Sub requests / Curriculum (§4.17). Auto-hidden alongside the rest of the overflow tools when no role-visible tools remain.
+
+**Realtime publication: `leads` is in `supabase_realtime`.** A new lead landing via the webhook lights up the inbox live within the 300ms debounce — admins watching the tab on a phone don't need to manually refresh. Cross-device coordination (one admin marks junk, another sees it disappear from `new`) flows through the same channel.
+
+**Sharon-side setup checklist (from earlier conversation, captured here so it survives):**
+1. In Meta App Dashboard, add Webhooks + Lead Ads products to a Meta App.
+2. Subscribe the webhook on the Page object: callback URL `https://ybolygqdbjqowfoqvnsz.supabase.co/functions/v1/dk-meta-lead-webhook`, verify token = whatever string Sharon picks (paste into both Meta and DK env). Subscribe to the `leadgen` field.
+3. Generate a long-lived Page Access Token for the FB Page running the ads (Meta Graph Explorer → Get Page Access Token → extend to long-lived).
+4. Set Edge Function env vars on the DK Supabase project: `META_APP_SECRET`, `META_VERIFY_TOKEN`, `META_PAGE_ACCESS_TOKEN`.
+5. Subscribe the Page to the app: `POST /{page-id}/subscribed_apps?subscribed_fields=leadgen` with the page token.
+6. Test with Meta's Lead Ads Testing Tool — submit a fake lead and watch the row land in `leads`.
+
+**Out of scope for v1 (deliberate, do not bolt on):** auto-sending a T11 student-intake form to the parent on promote (could chain in v2 — admin would still want to pick a class first); attachment of infographics inside the reply modal (the Templates tab's existing infographics sidebar is the discovery surface for now — admin copies a template + the relevant image links manually); a "fetch full lead details" button to re-trigger the Edge Function's Meta GET against an existing row that's stuck on `last_fetch_error` (today's path is to fix the env var and resubmit the lead in Meta's testing tool); per-row `notes` editing in the inbox UI (the column exists in the schema and is surfaced read-only in the card; an inline editor is a v2 affordance).
+
 ---
 
 ## 5. Gotchas, quirks, and "don't touch this"
@@ -994,6 +1049,14 @@ The pg_cron job name is `nightly-housekeeping` (consistent with the existing `dk
 
 **Mailchimp webhook secret rotation invalidates the URL pasted into Mailchimp (T12).** Saving a different secret value to `dk_config.mailchimp_webhook_secret` (e.g. via raw SQL or a future "regenerate secret" button) breaks the URL Sharon pasted into Mailchimp. The webhook will start returning 401 until she re-pastes the new URL. The modal's "first save" only mints a new secret if one isn't already there — subsequent saves preserve the existing secret to avoid this trap. **If you ever add a "regenerate" button, surface a clear "you must update Mailchimp's webhook URL after this" warning** and bring the new URL up in a copy-modal flow before the old one stops working. Don't silently rotate.
 
+**`leads.meta_lead_id` is UNIQUE and the webhook uses `ON CONFLICT DO NOTHING` (T15).** Meta retries the same leadgen webhook on non-2xx responses (or its own hiccups) and we always return 200, so duplicates *shouldn't* arrive — but if they do, the second insert is silently skipped and counted in `skipped`. **Don't change to `ON CONFLICT (meta_lead_id) DO UPDATE`** unless you also gate the UPDATE on `status = 'new'` — otherwise a Meta retry can clobber an admin's notes, status flips, or contacted/promoted audit stamps. The current shape is correct for the "first write wins" semantic the inbox depends on.
+
+**`dk-meta-lead-webhook` always returns 200 on POST, even on validation/insert failure (T15).** Meta retries non-2xx for hours, and we don't want a stuck queue for one bad lead. Per-request `inserted`/`skipped`/`errors` counts go into the 200 body for log-time inspection; per-row failures land in `leads.last_fetch_error`. **Don't return 4xx/5xx for "couldn't fetch field_data"** — that's exactly the case where we want the row to land with `last_fetch_error` populated so the admin sees something arrived. The only 4xx paths are `403` on a verify-token mismatch (GET handshake) and `401` on an HMAC signature mismatch (POST) — both of those are real auth failures, not transient errors.
+
+**Promotion is two steps by design: `promote_lead_to_student` THEN class assignment via the existing enrollments flow (T15).** The RPC inserts the student row + carries parent contact + marks the lead promoted, but does NOT add an enrollment. Meta forms don't pick a class, and the admin needs class context (term dates, school, capacity) that's already in the Classes tab. **Don't try to extend `promote_lead_to_student` to take a `class_id` parameter** — you'd either have to surface the entire class picker UI inside the promote modal (heavy, redundant with Classes tab) OR force the admin to pick blind (wrong UX). The two-step shape mirrors §4.28's T11 intake-then-enroll pattern.
+
+**The reply modal's `{lead_*}` substitution piggybacks on `substitute()` from §4.5's template machinery (T15).** `leadVariableContext(lead)` returns `{lead_parent_name, lead_parent_first, lead_email, lead_phone, lead_child_name, lead_child_dob, lead_school}` — those keys feed directly into the same `substitute(body, filled)` helper that powers the Templates tab. Templates designed for class-context (with `{class_name}` / `{day_time}` / etc.) won't have those vars filled when used against a lead — the modal surfaces remaining `{placeholders}` in a yellow hint banner so admin can edit them by hand before send. **Don't add a "lead vs class" template-type discriminator** — let admins pick whichever template fits, and surface unfilled vars as a hint, not a blocker. A franchise that wants lead-specific templates can just create them in the Templates tab with `{lead_*}` placeholders.
+
 **Vercel deploys from `github.com/jlyonsld/DK` `main`, but Edge Functions deploy via Supabase MCP independently (T12 + general).** A new Edge Function (drain / webhook / ping) goes live the moment `mcp__973b87c9...__deploy_edge_function` succeeds — there's no Vercel involvement, no `main` push, no ~30-second propagation. **The repo's `edge-functions/*.ts` files are the SOURCE that's reviewed in PRs**, but the live behavior depends on the deployed function version (visible in the Supabase dashboard). If you edit the .ts file without redeploying, the live function keeps the old behavior; if you redeploy without committing the .ts edit, the next contributor has no PR review trail. Always do BOTH: edit the file, deploy via MCP, then commit. T12 follows this convention — its three .ts files are colocated with the migrations in `response-console-v3/edge-functions/`.
 
 ---
@@ -1039,7 +1102,7 @@ The pg_cron job name is `nightly-housekeeping` (consistent with the existing `dk
 
 - **FAQ page on the DK website.** Not started.
 - **Jackrabbit email template rewrite.** Not started.
-- **Meta → Mailchimp lead-intake automation.** Not started — but T12's Mailchimp sync is the substrate it'll plug into. Once Meta's webhook lands a lead in MC, our `mailchimp-webhook` already updates `marketing_status`; the missing piece is reverse direction (MC member → DK student row), out of scope for T12.
+- **Meta → Mailchimp lead-intake automation.** ✅ **DK side shipped (T15) — awaiting Sharon's Meta App + env vars + the Mailchimp-side FB Lead Ads connector setup.** The DK side: `leads` staging table, `dk-meta-lead-webhook` Edge Function (HMAC-verified, idempotent via `meta_lead_id`), Leads inbox tab with reply (template machinery + lead-shaped vars) / promote (atomic RPC into `students`) / junk / archive. The MC side runs in parallel via Mailchimp's native FB Lead Ads connector (Sharon-side: Mailchimp → Integrations → Facebook → connect Page → map fields to merge tags → tag with `meta-lead`). The two paths are decoupled — a Meta submission lands as both a DK `leads` row AND an MC audience entry independently, with no DK ↔ MC handoff for that direction. This closes the "MC → DK student row" gap T12 left open without taking on email infrastructure. **Direction decided 2026-05-07.** See §4.31.
 
 ### Known rough edges
 
@@ -1079,6 +1142,10 @@ RESEND_API_KEY                   # optional — unset = invitation-email path sk
 X_CRON_SECRET                    # for jackrabbit-sync pg_cron authentication
 ZAPIER_SECRET                    # for zapier-enrollment-webhook X-Zap-Secret header
 JACKRABBIT_ORG_ID                # "551000" for the Charleston franchise
+META_APP_SECRET                  # T15 — Meta App secret for HMAC verification
+META_VERIFY_TOKEN                # T15 — shared token for Meta's GET handshake
+META_PAGE_ACCESS_TOKEN           # T15 — long-lived Page token to fetch lead field_data
+                                 #       (optional — if unset, leads land with last_fetch_error)
 ```
 
 ### Spoke-side status across the PAR DK deployment
@@ -1111,3 +1178,4 @@ JACKRABBIT_ORG_ID                # "551000" for the Charleston franchise
 | T12 — Mailchimp sync (per-franchise audience, outbox queue, drain + webhook + ping Edge Functions, settings modal) | ✅ Code-complete, awaiting Sharon's API key + audience selection |
 | T12b — Mailchimp roster backfill button (`enqueue_mailchimp_backfill()` RPC + super_admin "Resync all students" button) | ✅ Shipped |
 | T14 — Nightly housekeeping (`nightly_housekeeping()` + pg_cron job purging install_nonces > 30d, closures > 90d, terminal intake_requests > 90d) | ✅ Shipped |
+| T15 — Meta Lead Ads inbox (DK side: leads staging table + dk-meta-lead-webhook Edge Function + Leads tab with reply / promote / junk / archive) | ✅ DK side shipped, awaiting Sharon's Meta App + env vars + Mailchimp's native FB Lead Ads connector |
