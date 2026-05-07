@@ -8094,20 +8094,31 @@
   }
 
   // Render the body for the live preview pane: any remaining {placeholder}
-  // wraps in a bold yellow chip; everything else (filled values + plain
-  // text) renders normally. Lets the admin scan the body and instantly
-  // see where unfilled vars still live.
+  // wraps in a bold yellow chip; image URLs render as inline <img>
+  // previews so the admin can see how an attached infographic will
+  // appear once Gmail / Outlook / etc. auto-render the URL on paste.
+  // Everything else (filled values, plain text) renders normally.
   //
   // Each chip carries data-name + data-occ (occurrence index) so a click
   // can locate the matching {var} in the textarea by ordinal — supports
   // templates that reference the same variable multiple times.
   function leadHighlightedBody(body) {
     const counts = {};
-    return escapeHtml(body || "").replace(/\{([a-zA-Z0-9_]+)\}/g, (_m, name) => {
+    let html = escapeHtml(body || "").replace(/\{([a-zA-Z0-9_]+)\}/g, (_m, name) => {
       const occ = counts[name] || 0;
       counts[name] = occ + 1;
       return `<span class="lead-var-unfilled" data-name="${escapeHtml(name)}" data-occ="${occ}">{${escapeHtml(name)}}</span>`;
     });
+    // Image-URL detection — runs after placeholder wrap so chips inside
+    // a sentence don't get clobbered. We match http(s) URLs ending in a
+    // common image extension (with optional querystring). Supabase
+    // storage URLs include the filename + extension so this catches
+    // every infographic the strip can attach.
+    html = html.replace(
+      /(https?:\/\/[^\s<>"']+?\.(?:jpg|jpeg|png|gif|webp|svg)(?:\?[^\s<>"']*)?)/gi,
+      (url) => `<a href="${url}" target="_blank" rel="noopener" class="lead-reply-preview-img-link"><img class="lead-reply-preview-img" src="${url}" alt="" loading="lazy" onerror="this.parentElement.classList.add('img-failed')" /></a>`
+    );
+    return html;
   }
 
   /* ─── Lead-reply infographic strip ────────────────────────────────

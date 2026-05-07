@@ -4105,6 +4105,32 @@ footer code {
   color: rgb(254, 240, 138);
 }
 
+/* Inline image preview inside the read-only pane — shows how an
+   attached infographic will render once the email client auto-previews
+   the URL on paste. The link wrapper still carries the URL, so a
+   click opens the image full-size. */
+.lead-reply-preview .lead-reply-preview-img-link {
+  display: block;
+  margin: 6px 0;
+  text-decoration: none;
+}
+.lead-reply-preview .lead-reply-preview-img {
+  display: block;
+  max-width: 100%;
+  max-height: 220px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: rgba(15, 23, 42, 0.6);
+  object-fit: contain;
+}
+.lead-reply-preview .lead-reply-preview-img-link.img-failed::after {
+  content: "(image failed to load)";
+  display: inline-block;
+  font-size: 11px;
+  color: var(--ink-dim);
+  font-style: italic;
+}
+
 @media (max-width: 720px) {
   /* Stack the panes on phones; preview shrinks since it's secondary. */
   .lead-reply-editor-row { flex-direction: column; }
