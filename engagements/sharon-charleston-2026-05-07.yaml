@@ -1,0 +1,215 @@
+# Engagement doc — Sharon Lyons / Drama Kids Charleston
+#
+# Translates the strategic review into the YAML format the Tasks tab
+# importer expects (CLAUDE.md §4.33). Import via Tasks tab →
+# "📥 Import engagement doc" — re-imports update tasks by external_ref,
+# so editing this file + re-importing is idempotent.
+#
+# After import, every task lands under project "DK Engagement: sharon-charleston-2026-05-07".
+# The "Off your plate" Reports entry surfaces tasks here (and elsewhere)
+# as they close, framed as Weight lifted from the owner.
+
+---
+engagement: sharon-charleston-2026-05-07
+review_date: 2026-05-07
+weight_pain: 5
+---
+
+workstreams:
+
+  # ────────────────────────────────────────────────────────────────────
+  # The spine: hire the first part-time admin. Every other workstream
+  # lands on a desk that doesn't exist yet — sequencing this first means
+  # threads 1-3 actually shed, not just relabel.
+  # ────────────────────────────────────────────────────────────────────
+  - id: hire-admin
+    title: Hire first part-time admin
+    rationale: |
+      Spine of the engagement. Until the admin is in motion, every "fix"
+      to the lead inbox / billing / cadence stays Sharon's plate just
+      with better tools. JD lives in Sharon's head; Hire-ology already
+      set up. Realistic 4-8 week hiring cycle — start week 1.
+    owner: Sharon
+    starts: 2026-05-07
+    target: 2026-06-18
+    tasks:
+      - { id: jd-draft, title: "Draft JD via Hire-ology — lead inbox + billing + Mailchimp focus", due: 2026-05-14 }
+      - { id: jd-post, title: "Post role on Hire-ology", due: 2026-05-21, depends_on: [jd-draft] }
+      - { id: screening-criteria, title: "Define screening criteria (3 bullet must-haves)", due: 2026-05-21, depends_on: [jd-draft] }
+      - { id: first-interviews, title: "First-round interviews (target 4-6 candidates)", due: 2026-05-28, depends_on: [jd-post] }
+      - { id: short-list, title: "Short-list to 2 candidates", due: 2026-06-04, depends_on: [first-interviews] }
+      - { id: offer, title: "Make offer + close", due: 2026-06-11, depends_on: [short-list] }
+      - { id: start-date, title: "Admin starts (60-day delegation runway begins)", due: 2026-06-18, depends_on: [offer] }
+
+  # ────────────────────────────────────────────────────────────────────
+  # The week-1 felt-win: turn on the tools that are already shipped
+  # but waiting on Sharon-side config. Plus author the 3 card-failure
+  # templates so the next billing cycle doesn't require thinking.
+  # Week-1 deliverable in the refined 30-day plan.
+  # ────────────────────────────────────────────────────────────────────
+  - id: turn-on-shipped-tools
+    title: Connect Meta + Mailchimp + author billing templates (already-built tools, config-only)
+    rationale: |
+      T15 (Meta Lead Ads inbox) and T12 (Mailchimp sync) are code-complete
+      in DK, waiting only on Sharon's API key + audience pick + Meta App
+      env vars. These are config sessions, not builds. Card-failure
+      templates are 20 minutes inside the Templates tab — not an
+      afternoon. Felt-win that proves the engagement is moving.
+    owner: Sharon (config) + Jason (sit-with)
+    starts: 2026-05-07
+    target: 2026-05-14
+    tasks:
+      - { id: meta-app, title: "Create Meta App + set 3 env vars (META_APP_SECRET, META_VERIFY_TOKEN, META_PAGE_ACCESS_TOKEN)", due: 2026-05-14 }
+      - { id: meta-page-subscribe, title: "Subscribe Page to leadgen webhook + verify with Meta's testing tool", due: 2026-05-14, depends_on: [meta-app] }
+      - { id: mc-connect, title: "Paste Mailchimp API key + pick audience in DK Mailchimp settings modal", due: 2026-05-14 }
+      - { id: mc-merge-fields, title: "Confirm/create required Mailchimp merge fields (FNAME, LNAME, STUDENT, CLASS, SCHOOL, STATUS)", due: 2026-05-14, depends_on: [mc-connect] }
+      - { id: mc-webhook, title: "Save Mailchimp webhook URL to MC dashboard", due: 2026-05-14, depends_on: [mc-connect] }
+      - { id: mc-backfill, title: "Run 'Resync all students' to seed audience from existing roster", due: 2026-05-14, depends_on: [mc-merge-fields, mc-webhook] }
+      - { id: billing-template-card-fail-1, title: "Author template: 'First failed attempt' email (friendly nudge)", due: 2026-05-14 }
+      - { id: billing-template-card-fail-2, title: "Author template: 'Second failed attempt' email (firmer + offer alternatives)", due: 2026-05-14 }
+      - { id: billing-template-card-fail-3, title: "Author template: 'Final notice' email (with deadline)", due: 2026-05-14 }
+      - { id: billing-category, title: "Add 'Billing' category to Templates tab so the three above are findable", due: 2026-05-14 }
+
+  # ────────────────────────────────────────────────────────────────────
+  # Thread 1: Lead inbox consolidation. The DK side is mostly built
+  # (T15 inbox + reply + promote, T12 Mailchimp sync). Real work here is
+  # operationalizing it once admin is on board.
+  # ────────────────────────────────────────────────────────────────────
+  - id: lead-inbox
+    title: Lead inbox consolidation (Thread 1)
+    rationale: |
+      The Sheet sandwich — Meta → Sheet → Mailchimp → Messenger — was
+      Sharon's worst monthly task. T15 + T12 land most of this in DK
+      already. Once turn-on-shipped-tools lands, the remaining work is
+      handing the inbox over to the new admin and watching for a 4-week
+      stable run before declaring it dead-as-Sharon's-plate.
+    owner: Admin (after hire) + Sharon (oversight)
+    starts: 2026-06-18
+    target: 2026-07-30
+    tasks:
+      - { id: admin-shadow-2-weeks, title: "Admin shadows Sharon on lead inbox for 2 weeks (read-access only first)", due: 2026-07-02, depends_on: [start-date] }
+      - { id: admin-takes-over, title: "Admin takes over lead inbox — Sharon stays on as escalation only", due: 2026-07-09, depends_on: [admin-shadow-2-weeks] }
+      - { id: 4-week-stable-run, title: "4 consecutive weeks where Sharon doesn't touch the inbox = success", due: 2026-08-06, depends_on: [admin-takes-over] }
+      - { id: weight-ledger-lead-inbox, title: "Weight ledger entry: lead inbox moved to admin", due: 2026-07-09, depends_on: [admin-takes-over] }
+
+  # ────────────────────────────────────────────────────────────────────
+  # Thread 2: Billing / contracted-classes (Jackrabbit). Decision-deferred
+  # until admin owns daily billing ops + threads 1 + 3 are settled. Don't
+  # force the JR lean-in/accept call early — it'll pick whichever is
+  # least work, not what's right.
+  # ────────────────────────────────────────────────────────────────────
+  - id: billing-jr-decision
+    title: Jackrabbit lean-in or accept (Thread 2)
+    rationale: |
+      Royalty fake-student workaround + monthly tuition posting + card
+      failure chase = Sharon's billing pain. JR is the source of truth
+      and the workarounds are JR-shape. Decide whether to lean in
+      (configure JR harder, formalize the workarounds) or accept (let
+      DK + admin absorb the friction). Not a v1 deliverable — gates on
+      admin owning billing ops without drama for a month.
+    owner: Sharon + Jason (advisory)
+    starts: 2026-07-15
+    target: 2026-08-13
+    tasks:
+      - { id: assess-jr-pain, title: "Document the 4 monthly JR friction points with admin's eyes-on observations", due: 2026-07-22, depends_on: [admin-takes-over] }
+      - { id: cost-out-lean-in, title: "Estimate effort to formalize the royalty/tuition/cancel workarounds in JR", due: 2026-07-29, depends_on: [assess-jr-pain] }
+      - { id: cost-out-accept, title: "Estimate cost of admin absorbing friction long-term + DK template support", due: 2026-07-29, depends_on: [assess-jr-pain] }
+
+  # ────────────────────────────────────────────────────────────────────
+  # Thread 3: Retention cadence. Mailchimp is trustworthy (per Sharon)
+  # — that's the foundation, not a side note. Build a 30/60/90 cadence
+  # for active families. Starts after Thread 1 lands so admin has
+  # capacity to run it.
+  # ────────────────────────────────────────────────────────────────────
+  - id: retention-cadence
+    title: 30/60/90 retention cadence on Mailchimp (Thread 3)
+    rationale: |
+      MC data is trustworthy + DK now feeds it correctly via T12. Active
+      families get a touch at 30 / 60 / 90 days. Authored as MC
+      automations (no DK build needed beyond the data sync that's
+      already live). Sharon designs the messages, admin operates.
+    owner: Sharon (design) + Admin (operate)
+    starts: 2026-07-02
+    target: 2026-07-30
+    tasks:
+      - { id: design-30d-touch, title: "Design 30-day touch (welcome / first-class follow-up)", due: 2026-07-09, depends_on: [start-date] }
+      - { id: design-60d-touch, title: "Design 60-day touch (mid-term check-in)", due: 2026-07-16, depends_on: [design-30d-touch] }
+      - { id: design-90d-touch, title: "Design 90-day touch (term-end + renewal cue)", due: 2026-07-23, depends_on: [design-60d-touch] }
+      - { id: build-mc-automation, title: "Build the 3 MC automations triggered on enrollment date", due: 2026-07-30, depends_on: [design-90d-touch, mc-merge-fields] }
+
+  # ────────────────────────────────────────────────────────────────────
+  # Thread 4 (the one not in the diagnosis but can't disappear): owner
+  # is in the dark on profitability. Smallest scope possible — bookkeeper
+  # produces a one-pager monthly, lives in Drive, DK adds a glance-able
+  # Reports entry that mirrors the same number.
+  # ────────────────────────────────────────────────────────────────────
+  - id: profitability-visibility
+    title: Monthly P&L glance (Thread 4 — not in diagnosis but can't disappear)
+    rationale: |
+      Owner-in-the-dark is a Weight item dressed as a finance item. The
+      cheapest move: bookkeeper produces a one-page monthly view in a
+      shared Drive folder. DK can add a thin Reports entry that mirrors
+      the headline number. Don't externalize the surface (that's how
+      owner-in-the-dark stays in-the-dark).
+    owner: Sharon + Bookkeeper + Jason (DK side)
+    starts: 2026-07-30
+    target: 2026-08-13
+    tasks:
+      - { id: ask-bookkeeper, title: "Ask bookkeeper for a monthly P&L one-pager in shared Drive", due: 2026-07-30 }
+      - { id: drive-link-in-dk, title: "Add 'Monthly P&L' link to DK home bento (super_admin-only quick action)", due: 2026-08-06, depends_on: [ask-bookkeeper] }
+      - { id: pnl-report-entry, title: "Build 'Profitability snapshot' Reports tab entry pulling enrollment count + bookkeeper's headline number", due: 2026-08-13, depends_on: [ask-bookkeeper] }
+
+  # ────────────────────────────────────────────────────────────────────
+  # The Weight: not a build workstream — a frame. The "Off your plate"
+  # Reports entry surfaces this as work closes. No tasks here on
+  # purpose. The other workstreams emit weight_ledger entries as their
+  # own tasks complete (see weight-ledger-* task ids above).
+  # ────────────────────────────────────────────────────────────────────
+  - id: the-weight
+    title: The Weight — running ledger of what's no longer Sharon's
+    rationale: |
+      Captured as 5/5 pain in the diagnosis but not a workstream in the
+      original draft. It's the only outcome Sharon will feel. The
+      "Off your plate" Reports entry (T17a-2 follow-up) renders this
+      list as work closes, framed as "moved to admin / automation /
+      deferred / accepted." Not a list of build tasks — a surface that
+      shows what's lifted.
+    owner: Sharon (consumer)
+    starts: 2026-05-07
+    target: 2026-09-30
+    tasks: []
+
+decisions:
+
+  - id: jr-lean-in-or-accept
+    title: Jackrabbit — lean in (formalize the workarounds) or accept (let admin + DK absorb the friction)?
+    not_before: 2026-07-22
+    inputs: [assess-jr-pain, cost-out-lean-in, cost-out-accept, admin-takes-over]
+
+  - id: meta-vs-replace
+    title: Mailchimp grows up (kept as primary email + segmentation), or replace with two-way tool (HubSpot, etc.)?
+    not_before: 2026-06-25
+    inputs: [4-week-stable-run, mc-backfill]
+
+  - id: pnl-cadence
+    title: P&L cadence — monthly (bookkeeper one-pager) sufficient, or do we want weekly run-rate?
+    not_before: 2026-08-13
+    inputs: [pnl-report-entry]
+
+# Initial weight_ledger is empty by design — entries land as work
+# closes. Pre-seeding would just be lying about what's actually moved.
+weight_ledger: []
+
+patterns:
+
+  - id: sheet-sandwich
+    archetype: "Sheet → System of Record — when a Sheet glues two tools, the Sheet is where an admin role lives AND where the next product gets built. DK is literally that pattern realized for Sharon."
+
+  - id: workaround-records-as-diagnostic-signal
+    archetype: "Fake records to make the tool work — when an owner describes creating fake entities (fake students for royalty in JR's case), the tool is being asked to do a job it wasn't built for. Probably surfaces in restaurants, trades, salons."
+
+  - id: pre-hire-workflow-design
+    archetype: "Build for the role, then fill it — when an owner is the only admin, the first workstream is hiring, not optimizing their workflow alone. Optimizing tools they'll still operate alone is the wrong tier of intervention."
+
+  - id: diagnosis-not-1-to-1-with-plan
+    archetype: "Three threads in diagnosis ≠ three workstreams in plan — the plan needs at least the threads + admin hire + profitability visibility + a Weight ledger to be complete."

@@ -4253,6 +4253,90 @@ footer code {
   text-align: center;
 }
 
+/* T17a-2 follow-up: "Off your plate" report */
+.off-plate-summary {
+  padding: 18px 0 8px;
+}
+.off-plate-headline {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+.off-plate-big {
+  font-size: 36px;
+  font-weight: 700;
+  color: var(--ink);
+}
+.off-plate-sub {
+  font-size: 14px;
+  color: var(--ink-dim);
+}
+.off-plate-empty {
+  font-size: 13px;
+  color: var(--ink-dim);
+  font-style: italic;
+}
+.off-plate-section {
+  margin-top: 22px;
+}
+.off-plate-section h4 {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-dim);
+  margin: 0 0 8px;
+}
+.off-plate-month {
+  margin-bottom: 18px;
+}
+.off-plate-month-head {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  padding: 6px 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 8px;
+}
+.off-plate-month-count {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--panel-raised);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--ink-dim);
+}
+.off-plate-project {
+  font-family: ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace;
+  font-size: 11.5px;
+  color: var(--ink-dim);
+}
+
+/* Generic report table — minimal so the new "Off your plate" entry
+   doesn't have to inline-style every cell. Other reports keep their
+   existing inline styles. */
+.rpt-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+.rpt-table th,
+.rpt-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+.rpt-table th {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ink-dim);
+}
+
 /* Reply editor: textarea + read-only preview side-by-side. Both panes
    match in width / padding / font / line-height so wrapped lines align,
    and JS keeps scrollTop in sync so the user can edit a paragraph and

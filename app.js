@@ -9028,6 +9028,7 @@
     { id: "attendance", label: "Attendance", render: renderAttendanceReport },
     { id: "teacher_hours", label: "Teacher hours", render: renderTeacherHoursReport },
     { id: "par_funnel", label: "PAR funnel", render: renderParFunnelReport },
+    { id: "off_plate", label: "Off your plate", render: renderOffPlateReport },
   ];
 
   function ensureReportDateDefaults() {
@@ -9643,6 +9644,193 @@
     const a = document.createElement("a");
     a.href = url;
     a.download = `par-funnel-${start}-to-${end}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  /* ── "Off your plate" report (T17a-2 follow-up) ──
+   *
+   * Surfaces the Weight ledger from the consulting framing in §4.33:
+   * "the only outcome the owner will feel." Reads from state.tasks
+   * filtered to status='done' within the report's date range, framed
+   * as work that's no longer the owner's. "Moved to" resolves to the
+   * task's owner (profile name) or the free-form assignee_label —
+   * "automation", "admin", "deferred", whatever the closer wrote.
+   *
+   * No new schema. The eventual T17a-4 weight_ledger_entries table
+   * (CLAUDE.md §4.33) would feed in alongside; for v1, done-tasks
+   * are the surface.
+   */
+  function renderOffPlateReport(host) {
+    const s = state.rptState;
+
+    if (!isAdminOrAbove() && !hasPerm("manage_tasks")) {
+      host.innerHTML = '<div style="padding:24px;color:var(--ink-dim);font-size:13px">Off-your-plate report requires manage_tasks (admin/manager+).</div>';
+      return;
+    }
+
+    const startMs = new Date(s.start + "T00:00:00").getTime();
+    const endMs   = new Date(s.end   + "T23:59:59.999").getTime();
+
+    // Done tasks within range, sorted most-recently-closed first.
+    const closed = (state.tasks || [])
+      .filter((t) => t.status === "done")
+      .filter((t) => {
+        const ts = new Date(t.updated_at || t.created_at).getTime();
+        return ts >= startMs && ts <= endMs;
+      })
+      .sort((a, b) => new Date(b.updated_at || b.created_at) - new Date(a.updated_at || a.created_at));
+
+    // "Moved to" framing: prefer free-form assignee_label, fall back to
+    // owner profile name, then "—". This is what the consulting review
+    // called the surface that lifts the Weight: it tells the owner who
+    // / what is now carrying it.
+    const movedTo = (t) => {
+      const explicit = (t.assignee_label || "").trim();
+      if (explicit) return explicit;
+      const ownerName = profileNameById(t.owner_profile_id);
+      if (ownerName) return ownerName;
+      return "—";
+    };
+
+    // Group by month for the visual rhythm.
+    const groups = new Map();
+    for (const t of closed) {
+      const closedAt = new Date(t.updated_at || t.created_at);
+      const key = `${closedAt.getFullYear()}-${String(closedAt.getMonth() + 1).padStart(2, "0")}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(t);
+    }
+    const monthOrder = Array.from(groups.keys()).sort().reverse();
+    const monthLabel = (key) => {
+      const [y, m] = key.split("-");
+      return new Date(Number(y), Number(m) - 1, 1).toLocaleString(undefined, { month: "long", year: "numeric" });
+    };
+
+    // Roll-ups
+    const totalLifted = closed.length;
+    const byRecipient = new Map();
+    for (const t of closed) {
+      const r = movedTo(t);
+      byRecipient.set(r, (byRecipient.get(r) || 0) + 1);
+    }
+    const recipientRows = Array.from(byRecipient.entries()).sort((a, b) => b[1] - a[1]);
+
+    const presetBtn = (label, days) =>
+      `<button data-rpt-preset="${days}" class="btn small">${escapeHtml(label)}</button>`;
+
+    host.innerHTML = `
+      <div style="display:flex;gap:8px;align-items:end;flex-wrap:wrap;padding:12px 0 16px;border-bottom:1px solid var(--border)">
+        <div class="field" style="flex:0 0 160px">
+          <label>From</label>
+          <input type="date" id="rpt_start" value="${escapeHtml(s.start)}" />
+        </div>
+        <div class="field" style="flex:0 0 160px">
+          <label>To</label>
+          <input type="date" id="rpt_end" value="${escapeHtml(s.end)}" />
+        </div>
+        <div style="display:flex;gap:4px">
+          ${presetBtn("Last 30d", 30)}
+          ${presetBtn("Last 90d", 90)}
+          ${presetBtn("YTD", 365)}
+        </div>
+        <div style="flex:1"></div>
+        <button class="btn small" id="rpt_export_off_plate_csv">Export CSV</button>
+      </div>
+
+      <div class="off-plate-summary">
+        <div class="off-plate-headline">
+          ${totalLifted === 0
+            ? `<span class="off-plate-empty">No tasks closed in this range yet — the ledger fills as work moves off your plate.</span>`
+            : `<span class="off-plate-big">${totalLifted}</span><span class="off-plate-sub">task${totalLifted === 1 ? "" : "s"} no longer yours</span>`
+          }
+        </div>
+      </div>
+
+      ${totalLifted === 0 ? "" : `
+        <div class="off-plate-section">
+          <h4>Where it went</h4>
+          <table class="rpt-table">
+            <thead><tr><th>Moved to</th><th style="text-align:right">Tasks</th></tr></thead>
+            <tbody>
+              ${recipientRows.map(([r, n]) =>
+                `<tr><td>${escapeHtml(r)}</td><td style="text-align:right">${n}</td></tr>`).join("")}
+            </tbody>
+          </table>
+        </div>
+
+        <div class="off-plate-section">
+          <h4>By month</h4>
+          ${monthOrder.map((mk) => {
+            const items = groups.get(mk);
+            return `
+              <div class="off-plate-month">
+                <div class="off-plate-month-head">${escapeHtml(monthLabel(mk))} <span class="off-plate-month-count">${items.length}</span></div>
+                <table class="rpt-table">
+                  <thead><tr>
+                    <th>Closed</th><th>Task</th><th>Project</th><th>Moved to</th>
+                  </tr></thead>
+                  <tbody>
+                    ${items.map((t) => {
+                      const closedAt = new Date(t.updated_at || t.created_at);
+                      const dateLabel = isoDate(closedAt);
+                      return `
+                        <tr>
+                          <td>${escapeHtml(dateLabel)}</td>
+                          <td>${escapeHtml(t.title)}</td>
+                          <td class="off-plate-project">${escapeHtml(t.project_name || "—")}</td>
+                          <td>${escapeHtml(movedTo(t))}</td>
+                        </tr>
+                      `;
+                    }).join("")}
+                  </tbody>
+                </table>
+              </div>
+            `;
+          }).join("")}
+        </div>
+      `}
+    `;
+
+    // Wire date inputs + presets (matching the par-funnel report pattern).
+    $("#rpt_start").onchange = (e) => { state.rptState.start = e.target.value; renderReportsTab(); };
+    $("#rpt_end").onchange   = (e) => { state.rptState.end = e.target.value;   renderReportsTab(); };
+    host.querySelectorAll("[data-rpt-preset]").forEach((b) => {
+      b.onclick = () => {
+        const days = Number(b.dataset.rptPreset);
+        const end = new Date();
+        const start = new Date(); start.setDate(end.getDate() - days + 1);
+        state.rptState.start = isoDate(start);
+        state.rptState.end   = isoDate(end);
+        renderReportsTab();
+      };
+    });
+    const csvBtn = $("#rpt_export_off_plate_csv");
+    if (csvBtn) csvBtn.onclick = () => downloadOffPlateCsv(closed, movedTo, s.start, s.end);
+  }
+
+  function downloadOffPlateCsv(rows, movedToFn, start, end) {
+    const esc = (v) => {
+      const s = String(v == null ? "" : v);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const header = ["ClosedAt","Task","Project","MovedTo","Priority","ExternalRef"].join(",");
+    const body = rows.map((t) => [
+      (t.updated_at || t.created_at || "").slice(0, 10),
+      t.title,
+      t.project_name || "",
+      movedToFn(t),
+      t.priority || "",
+      t.external_ref || "",
+    ].map(esc).join(",")).join("\n");
+    const csv = header + "\n" + body + "\n";
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `off-plate-${start}-to-${end}.csv`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
