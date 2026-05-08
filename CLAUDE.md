@@ -114,6 +114,24 @@ response-console-v3/
 ├── SHARON_ONBOARDING_WALKTHROUGH.md ← The step-by-step for walking Sharon
 │                               through her first PAR + PAR DK setup,
 │                               including the personal/work email split.
+├── T17_VERIFICATION.md       ← End-to-end test plan for task federation:
+│                               schema spot-checks, role gating, local
+│                               CRUD round-trip, owner self-flip via
+│                               set_task_status, 501 fallback, end-to-end
+│                               PAR push, YAML import idempotency, known
+│                               follow-ups (T17c, T17a-4 boundary).
+│
+├── engagements/              ← Engagement-doc YAML files (CLAUDE.md §4.33).
+│   │                           Imported once via Tasks tab → "📥 Import
+│   │                           engagement doc". After import, the DB is
+│   │                           the source of truth; the YAML stays as the
+│   │                           reviewable artifact + a re-import target
+│   │                           if the workstreams need to be edited.
+│   └── sharon-charleston-2026-05-07.yaml ← First engagement, written from
+│                                            the strategic review at session
+│                                            start. Six workstreams + three
+│                                            decisions + (initially empty)
+│                                            weight_ledger.
 │
 └── migrations/               ← SQL migrations applied to Supabase in order.
     │                           **Lives inside the deployed repo as of
@@ -270,16 +288,38 @@ response-console-v3/
     │                                       Reuses existing `respond_to_leads`
     │                                       permission (no new perm name).
     │                                       See §4.31.
-    └── phase_t14_nightly_housekeeping.sql ← T14. `nightly_housekeeping()` +
-                                            pg_cron job `nightly-housekeeping`
-                                            (03:30 UTC daily). Marks pending-
-                                            but-expired student_intake_requests
-                                            as 'expired', then purges
-                                            install_nonces > 30d, closures
-                                            > 90d, and terminal intake_requests
-                                            > 90d. Returns a jsonb summary
-                                            visible in cron.job_run_details.
-                                            See §4.30.
+    ├── phase_t14_nightly_housekeeping.sql ← T14. `nightly_housekeeping()` +
+    │                                       pg_cron job `nightly-housekeeping`
+    │                                       (03:30 UTC daily). Marks pending-
+    │                                       but-expired student_intake_requests
+    │                                       as 'expired', then purges
+    │                                       install_nonces > 30d, closures
+    │                                       > 90d, and terminal intake_requests
+    │                                       > 90d. Returns a jsonb summary
+    │                                       visible in cron.job_run_details.
+    │                                       See §4.30.
+    ├── phase_t17_tasks.sql               ← T17a. `tasks` table + task_status /
+    │                                       task_priority enums + `manage_tasks`
+    │                                       permission (added to super_admin /
+    │                                       admin / manager bundles in
+    │                                       has_permission()). RLS: SELECT
+    │                                       open to authenticated, writes
+    │                                       gated on manage_tasks; thin
+    │                                       set_task_status RPC (security
+    │                                       invoker) lets owners flip
+    │                                       status without manage_tasks.
+    │                                       Realtime publication. Partial
+    │                                       unique index on par_task_id
+    │                                       (where not null). See §4.33.
+    └── phase_t17a4_engagement_extensions.sql ← T17a-4. `decisions` and
+                                            `weight_ledger_entries` tables.
+                                            Both gated on existing
+                                            manage_tasks (no new perm name);
+                                            SELECT open to authenticated;
+                                            both in supabase_realtime.
+                                            weight_ledger_entries.source_task_id
+                                            is a nullable FK to tasks on
+                                            delete set null. See §4.33.
 ```
 
 **Pre-T4 migrations (not in repo) live at the parent folder:**
@@ -318,6 +358,7 @@ DK Optimization/                ← parent folder, NOT a git repo
 | `mailchimp-webhook` | false | T12. Public endpoint that receives Mailchimp's audience webhooks. Authenticated by the `?secret=<token>` query param compared constant-time against `dk_config.mailchimp_webhook_secret`. Updates `students.marketing_status` on subscribe / unsubscribe / cleaned and rewrites the email in `parent_emails` arrays on `upemail`. Always returns 200 (even on lookup miss) so MC doesn't retry-storm against parents not yet in DK. See §4.29. |
 | `dk-meta-lead-webhook` | false | T15. Receives Meta Lead Ads webhooks. Handles two request shapes: GET ?hub.mode=subscribe (echoes `hub.challenge` if `META_VERIFY_TOKEN` matches) and POST signed with `X-Hub-Signature-256` (HMAC-SHA256 over `META_APP_SECRET`). On a verified POST, GETs `/{leadgen_id}?access_token={META_PAGE_ACCESS_TOKEN}` to fetch the actual `field_data` (the webhook only carries pointers), normalizes parent/child fields with case-insensitive name matching across common Meta field names, and INSERTs a `leads` row. **Always returns 200** on POST (mirrors `mailchimp-webhook` — Meta retries non-2xx for hours). Idempotent via `meta_lead_id` unique index + ON CONFLICT DO NOTHING — Meta retries are silent. If `META_PAGE_ACCESS_TOKEN` is unset, the row still lands with the leadgen pointer + `last_fetch_error = 'META_PAGE_ACCESS_TOKEN not configured'` so the admin can see something arrived. See §4.31. |
 | `dk-mailchimp-ping` | true | T12. Helper called from the admin Mailchimp settings modal. Verifies a pasted API key reaches MC (`/3.0/ping`), lists audiences, lists merge fields for a chosen audience, and (optionally) creates missing required merge fields. Super_admin gate via `is_super_admin()` RPC under the user JWT. See §4.29. |
+| `dk-create-par-task` | true | T17. Forwards a DK task to PAR's `spoke-create-task` endpoint and stamps the returned uuid onto the local `tasks.par_task_id`. Mirrors Margin's federation pattern verbatim. Reads `dk_config.par_franchise_org_id` at request time (not init); `DK_SPOKE_API_KEY` from env. Returns **501 with structured `missing_env` / `missing_config` payload** if either is unset (the "ship behind a fallback" pattern — lets DK ship with the feature dark before PAR-side wiring). Idempotent: returns the existing `par_task_id` on re-send. See §4.33. |
 
 **Tables in DK's public schema** (roughly in order of importance):
 
@@ -423,6 +464,30 @@ leads                    — T15. Staging inbox for Meta Lead Ads submissions.
                            respond_to_leads (admin/manager+). The Edge
                            Function uses service-role and bypasses RLS.
                            See §4.31.
+tasks                    — T17. DK-side task table that federates to PAR
+                           via dk-create-par-task. Carries title /
+                           description / status (open/in_progress/done/
+                           archived) / priority / due_at / project_name /
+                           owner_profile_id / assignee_label /
+                           external_ref / par_task_id (partial unique
+                           index). SELECT open to authenticated; writes
+                           gated on manage_tasks; thin set_task_status
+                           RPC permits owner-self status flips. Realtime
+                           publication. See §4.33.
+decisions                — T17a-4. Engagement-doc decisions, local-only
+                           (no PAR push). title / description / not_before /
+                           inputs (text[]) / status (pending/decided/
+                           cancelled) / decided_at / decided_by /
+                           decided_outcome / project_name / external_ref.
+                           Gated on existing manage_tasks (no new perm
+                           name). Realtime publication. See §4.33.
+weight_ledger_entries    — T17a-4. "Off your plate" running ledger,
+                           local-only. dated_at / item / moved_to / notes /
+                           source_task_id (nullable FK to tasks on delete
+                           set null) / project_name / external_ref.
+                           Gated on existing manage_tasks. Realtime
+                           publication. Merges with done-tasks in the
+                           Reports → "Off your plate" entry. See §4.33.
 ```
 
 ---
@@ -536,12 +601,14 @@ One row per `(enrollment_id, session_date)` enforced by unique index. Re-takes u
 
 ### 4.15 Reports tab is a pluggable registry
 
-Admin-only top-level tab. `app.js` has a `REPORTS` array of `{ id, label, render }` entries; `renderReportsTab()` builds the sub-nav from it and calls the active entry's render function against a shared `#reportContent` node. Adding a report = one entry + one function. Ships with two entries:
+Admin-only top-level tab. `app.js` has a `REPORTS` array of `{ id, label, render }` entries; `renderReportsTab()` builds the sub-nav from it and calls the active entry's render function against a shared `#reportContent` node. Adding a report = one entry + one function. Ships with four entries:
 
 - **Attendance** — summary counts, per-class breakdown, late-pickup log, CSV export (billing source).
 - **Teacher hours** — shift summary, per-teacher payroll roll-up, per-class breakdown, itemized shift log, CSV export (payroll source).
+- **PAR funnel** (T7b) — impressions / clicks / dismisses across PAR-card variants in the date range, per-variant table, daily impressions sparkline, CSV export of raw events.
+- **Off your plate** (T17a-2 + T17a-4) — chronological surface of work that's no longer the owner's. Merges done-tasks (status='done') with `weight_ledger_entries` from §4.33 into one timeline grouped by month. "Moved to" framing prefers `assignee_label`, falls back to owner profile name. CSV export carries a `Source` column (task vs. ledger).
 
-Both aggregate entirely client-side from `state.attendance` / `state.clockIns` — no new queries.
+All four aggregate entirely client-side from `state.attendance` / `state.clockIns` / `state.parPromoEvents` / (`state.tasks` + `state.weightLedger`) — no new queries.
 
 ### 4.16 Clock-in / clock-out is class-scoped and RPC-driven
 
