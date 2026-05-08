@@ -103,6 +103,12 @@
     // project filter is project_name string ("" = all), query is free-text.
     // editingId tracks which task the editor modal is on.
     taskState: { filter: "open", project: "", query: "", editingId: null, sending: new Set() },
+    // T17a-4: engagement-doc decisions + weight_ledger entries. Both
+    // local-only (no PAR push). YAML importer writes them alongside
+    // tasks; Decisions render in the Tasks tab as their own card group;
+    // weight_ledger_entries merge into the "Off your plate" report.
+    decisions: [],
+    weightLedger: [],
     dkConfig: null,
     latestSyncLog: null,
     tState: { query: "", category: "all", filled: {} },
@@ -484,7 +490,9 @@
       "par_promotion_events",
       "mailchimp_sync_outbox", "mailchimp_sync_log",
       "leads",
-      "tasks"
+      "tasks",
+      "decisions",
+      "weight_ledger_entries"
     ];
     realtimeChannel = sb.channel("dk-realtime");
     tablesToWatch.forEach((table) => {
@@ -673,7 +681,7 @@
   async function reloadAll() {
     showLoader(true);
     try {
-      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches, att, clk, subs, subClm, schs, canc, cur, curA, tpd, tdocs, waivers, wSigs, pms, prof, evs, evStaff, invItems, invAssigns, intakes, parPromo, leadsRes, tasksRes] = await Promise.all([
+      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches, att, clk, subs, subClm, schs, canc, cur, curA, tpd, tdocs, waivers, wSigs, pms, prof, evs, evStaff, invItems, invAssigns, intakes, parPromo, leadsRes, tasksRes, decisionsRes, weightLedgerRes] = await Promise.all([
         sb.from("categories").select("*").order("sort_order", { ascending: true }),
         sb.from("templates").select("*").order("created_at", { ascending: true }),
         sb.from("classes").select("*").order("name", { ascending: true }),
@@ -709,7 +717,9 @@
         sb.from("student_intake_requests").select("*").order("sent_at", { ascending: false }),
         sb.from("par_promotion_events").select("*").order("created_at", { ascending: false }),
         sb.from("leads").select("*").order("received_at", { ascending: false }),
-        sb.from("tasks").select("*").order("created_at", { ascending: false })
+        sb.from("tasks").select("*").order("created_at", { ascending: false }),
+        sb.from("decisions").select("*").order("not_before", { ascending: true, nullsFirst: false }),
+        sb.from("weight_ledger_entries").select("*").order("dated_at", { ascending: false })
       ]);
       for (const r of [cats, tpls, cls, igs, tch, ct, ci, stu, enr]) if (r.error) throw r.error;
       // Non-admin roles may not have SELECT access to teacher_invitations /
@@ -795,6 +805,9 @@
       // to any signed-in user (teachers see tasks delegated to them via
       // the home bento "Tasks for you" card).
       state.tasks = (tasksRes && !tasksRes.error) ? tasksRes.data : [];
+      // T17a-4: decisions + weight_ledger entries (local-only).
+      state.decisions     = (decisionsRes && !decisionsRes.error) ? decisionsRes.data : [];
+      state.weightLedger  = (weightLedgerRes && !weightLedgerRes.error) ? weightLedgerRes.data : [];
     } catch (e) {
       console.error(e);
       showToast("Failed to load: " + e.message, "error");
@@ -8681,18 +8694,60 @@
     const rows = tasksMatchingFilters();
     const grouped = tasksGroupedByProject(rows);
 
-    const body = rows.length === 0
-      ? `<div class="sr-empty">${(state.tasks || []).length === 0
-          ? "No tasks yet. Create one or import an engagement doc."
+    // T17a-4: index decisions by project so they render alongside tasks.
+    const decisionsByProject = new Map();
+    for (const d of (state.decisions || [])) {
+      const k = d.project_name || "(no project)";
+      if (!decisionsByProject.has(k)) decisionsByProject.set(k, []);
+      decisionsByProject.get(k).push(d);
+    }
+    // Sort each project's decisions: pending first, then decided, then
+    // cancelled. Within status, by not_before ascending (soonest first).
+    const decRank = ({ pending: 0, decided: 1, cancelled: 2 });
+    for (const arr of decisionsByProject.values()) {
+      arr.sort((a, b) => {
+        const r = (decRank[a.status] ?? 3) - (decRank[b.status] ?? 3);
+        if (r !== 0) return r;
+        return (a.not_before || "9999").localeCompare(b.not_before || "9999");
+      });
+    }
+
+    const body = rows.length === 0 && decisionsByProject.size === 0
+      ? `<div class="sr-empty">${(state.tasks || []).length === 0 && (state.decisions || []).length === 0
+          ? "No tasks or decisions yet. Create a task or import an engagement doc."
           : "No tasks match this filter."}</div>`
-      : grouped.map(([project, items]) => `
-          <div class="task-group">
-            <div class="task-group-head">${escapeHtml(project)} <span class="task-group-count">${items.length}</span></div>
-            <div class="task-cards">
-              ${items.map((t) => taskCardHtml(t, canManage)).join("")}
-            </div>
-          </div>
-        `).join("");
+      : (() => {
+          // Group key set is union of task projects + decision projects.
+          const allProjects = new Set([
+            ...grouped.map(([p]) => p),
+            ...decisionsByProject.keys(),
+          ]);
+          const projectOrder = Array.from(allProjects).sort();
+          const taskMap = new Map(grouped);
+          return projectOrder.map((project) => {
+            const taskItems = taskMap.get(project) || [];
+            const decItems = decisionsByProject.get(project) || [];
+            if (taskItems.length === 0 && decItems.length === 0) return "";
+            return `
+              <div class="task-group">
+                <div class="task-group-head">${escapeHtml(project)}
+                  ${decItems.length ? `<span class="task-group-count">${decItems.length} decision${decItems.length === 1 ? "" : "s"}</span>` : ""}
+                  ${taskItems.length ? `<span class="task-group-count">${taskItems.length} task${taskItems.length === 1 ? "" : "s"}</span>` : ""}
+                </div>
+                ${decItems.length ? `
+                  <div class="decision-cards">
+                    ${decItems.map((d) => decisionCardHtml(d, canManage)).join("")}
+                  </div>
+                ` : ""}
+                ${taskItems.length ? `
+                  <div class="task-cards">
+                    ${taskItems.map((t) => taskCardHtml(t, canManage)).join("")}
+                  </div>
+                ` : ""}
+              </div>
+            `;
+          }).join("");
+        })();
 
     panel.innerHTML = `
       <div class="tab-head">
@@ -8728,6 +8783,20 @@
     panel.querySelectorAll("[data-task-status-set]").forEach((sel) => {
       const id = sel.dataset.taskId;
       sel.onchange = () => setTaskStatusViaRpc(id, sel.value);
+    });
+
+    // T17a-4: decision card wiring
+    panel.querySelectorAll("[data-decision-status-set]").forEach((sel) => {
+      const id = sel.dataset.decisionId;
+      sel.onchange = () => handleDecisionStatusChange(id, sel.value);
+    });
+    panel.querySelectorAll("[data-decision-outcome]").forEach((inp) => {
+      const id = inp.dataset.decisionId;
+      const original = inp.value;
+      inp.onblur = () => {
+        if (inp.value === original) return;
+        saveDecisionOutcome(id, inp.value);
+      };
     });
   }
 
@@ -8779,6 +8848,97 @@
     if (action === "edit")   return openTaskEditor(taskId);
     if (action === "send")   return sendTaskToPar(taskId);
     if (action === "delete") return deleteTask(taskId);
+  }
+
+  /* T17a-4: decision rendering + lifecycle. Cards render alongside
+   * tasks in the Tasks tab grouped by project. Status flow is
+   * pending → decided | cancelled; reopening flips back to pending.
+   * Outcome captured inline (text input that saves on blur). The
+   * full editor for descriptions / inputs / not-before lives in the
+   * YAML doc — re-import is the canonical edit path. */
+
+  const DECISION_STATUS_META = {
+    pending:   { label: "Pending",   chip: "decision-status-pending" },
+    decided:   { label: "Decided",   chip: "decision-status-decided" },
+    cancelled: { label: "Cancelled", chip: "decision-status-cancelled" },
+  };
+
+  function decisionCardHtml(d, canManage) {
+    const sMeta = DECISION_STATUS_META[d.status] || DECISION_STATUS_META.pending;
+    const inputs = (d.inputs || []).map((i) =>
+      `<span class="decision-input-chip">${escapeHtml(i)}</span>`).join("");
+    const notBefore = d.not_before
+      ? `<span class="decision-not-before">⏳ not before ${escapeHtml(d.not_before)}</span>`
+      : "";
+
+    const statusSelect = canManage
+      ? `<select class="select-inline decision-status-select"
+                data-decision-status-set
+                data-decision-id="${d.id}">
+           ${Object.entries(DECISION_STATUS_META).map(([k, m]) =>
+             `<option value="${k}"${d.status === k ? " selected" : ""}>${escapeHtml(m.label)}</option>`).join("")}
+         </select>`
+      : `<span class="decision-status-chip ${sMeta.chip}">${escapeHtml(sMeta.label)}</span>`;
+
+    const outcomeBlock = d.status === "decided"
+      ? `
+        <div class="decision-outcome-row">
+          <label class="decision-outcome-label">Outcome:</label>
+          ${canManage
+            ? `<input type="text" class="decision-outcome-input"
+                      data-decision-outcome data-decision-id="${d.id}"
+                      placeholder="Decision text — saves on blur"
+                      value="${escapeHtml(d.decided_outcome || "")}" />`
+            : `<span class="decision-outcome-text">${escapeHtml(d.decided_outcome || "—")}</span>`
+          }
+          ${d.decided_at ? `<span class="decision-decided-at">on ${escapeHtml(isoDate(new Date(d.decided_at)))}</span>` : ""}
+        </div>
+      `
+      : "";
+
+    return `
+      <div class="decision-card decision-status-${d.status}" data-decision-id="${d.id}">
+        <div class="decision-card-head">
+          <div class="decision-card-title">⚖ ${escapeHtml(d.title)}</div>
+          ${statusSelect}
+        </div>
+        ${d.description ? `<div class="decision-card-desc">${escapeHtml(d.description)}</div>` : ""}
+        <div class="decision-card-meta">
+          ${notBefore}
+          ${inputs ? `<div class="decision-inputs">${inputs}</div>` : ""}
+        </div>
+        ${outcomeBlock}
+      </div>
+    `;
+  }
+
+  async function handleDecisionStatusChange(id, newStatus) {
+    const patch = { status: newStatus };
+    if (newStatus === "decided") {
+      patch.decided_at = new Date().toISOString();
+      patch.decided_by = state.profile && state.profile.id;
+    } else if (newStatus === "pending" || newStatus === "cancelled") {
+      // Reopen / cancel — clear the decided stamp so re-decision is clean.
+      patch.decided_at = null;
+      patch.decided_by = null;
+      if (newStatus === "pending") patch.decided_outcome = null;
+    }
+    const { error } = await sb.from("decisions").update(patch).eq("id", id);
+    if (error) { showToast(error.message, "error"); return; }
+    await reloadAll();
+    renderAll();
+  }
+
+  async function saveDecisionOutcome(id, outcome) {
+    const trimmed = (outcome || "").trim();
+    const { error } = await sb.from("decisions")
+      .update({ decided_outcome: trimmed || null })
+      .eq("id", id);
+    if (error) { showToast(error.message, "error"); return; }
+    // No reloadAll — outcome edits are quiet, blur-saved, and the
+    // realtime debounce will refresh state.decisions for other tabs
+    // automatically. Skipping the full reload keeps focus stable on
+    // the next field if the user is tabbing through cards.
   }
 
   async function setTaskStatusViaRpc(taskId, status) {
@@ -8977,40 +9137,74 @@
       }
     }
 
-    if (toInsert.length === 0) {
+    // T17a-4: decisions and weight_ledger sections of the YAML are now
+    // first-class. Patterns stay informal (no DB rows) per §4.33.
+    const decisionsIn = ((body && body.decisions) || []).map((d) => ({
+      title: d.title || d.id || "(decision)",
+      description: d.description || null,
+      project_name: projectPrefix,
+      not_before: d.not_before || null,
+      inputs: Array.isArray(d.inputs) ? d.inputs.map(String) : [],
+      status: "pending",
+      external_ref: d.id || null,
+    }));
+    const ledgerIn = ((body && body.weight_ledger) || []).map((e, i) => ({
+      project_name: projectPrefix,
+      dated_at: e.date || e.dated_at || null,
+      item: e.item || "(item)",
+      moved_to: e.moved_to || "—",
+      notes: e.notes || null,
+      // Synthetic external_ref so re-imports stay idempotent on entries
+      // that don't carry their own id (the YAML's array is positional).
+      external_ref: e.id || `ledger-${i}-${(e.date || "")}-${String(e.item || "").slice(0, 24)}`,
+    }));
+
+    if (toInsert.length === 0 && decisionsIn.length === 0 && ledgerIn.length === 0) {
       status.textContent = "";
-      showToast("No tasks found in the doc (expected workstreams[].tasks[])", "error");
+      showToast("No tasks, decisions, or ledger entries found", "error");
       return;
     }
 
-    status.textContent = `Importing ${toInsert.length} task${toInsert.length === 1 ? "" : "s"}…`;
-    // Upsert by external_ref (within this project) so re-imports are
-    // idempotent. We can't use a true upsert via supabase-js without a
-    // unique index; instead, fetch existing rows for this project +
-    // external_ref set, diff, and insert / update accordingly.
-    const refs = toInsert.map((r) => r.external_ref).filter(Boolean);
-    let existing = [];
-    if (refs.length) {
-      const { data } = await sb.from("tasks")
-        .select("id, external_ref")
-        .eq("project_name", projectPrefix)
-        .in("external_ref", refs);
-      existing = data || [];
-    }
-    const byRef = new Map(existing.map((r) => [r.external_ref, r.id]));
+    status.textContent = "Importing…";
 
-    let inserted = 0, updated = 0, failed = 0;
-    for (const row of toInsert) {
-      const existingId = row.external_ref && byRef.get(row.external_ref);
-      const { error } = existingId
-        ? await sb.from("tasks").update(row).eq("id", existingId)
-        : await sb.from("tasks").insert(row);
-      if (error) failed++;
-      else if (existingId) updated++;
-      else inserted++;
+    // Upsert helper: fetch existing rows for (project, external_ref)
+    // tuple, diff, insert / update accordingly. Same pattern across
+    // all three tables.
+    async function upsertRows(table, rows) {
+      const refs = rows.map((r) => r.external_ref).filter(Boolean);
+      let existing = [];
+      if (refs.length) {
+        const { data } = await sb.from(table)
+          .select("id, external_ref")
+          .eq("project_name", projectPrefix)
+          .in("external_ref", refs);
+        existing = data || [];
+      }
+      const byRef = new Map(existing.map((r) => [r.external_ref, r.id]));
+      let inserted = 0, updated = 0, failed = 0;
+      for (const row of rows) {
+        const existingId = row.external_ref && byRef.get(row.external_ref);
+        const { error } = existingId
+          ? await sb.from(table).update(row).eq("id", existingId)
+          : await sb.from(table).insert(row);
+        if (error) failed++;
+        else if (existingId) updated++;
+        else inserted++;
+      }
+      return { inserted, updated, failed };
     }
 
-    status.textContent = `Imported: ${inserted} new, ${updated} updated${failed ? `, ${failed} failed` : ""}.`;
+    const tStats = await upsertRows("tasks", toInsert);
+    const dStats = await upsertRows("decisions", decisionsIn);
+    const lStats = await upsertRows("weight_ledger_entries", ledgerIn);
+
+    const summary = (label, s) => s.inserted + s.updated + s.failed === 0
+      ? null
+      : `${label}: ${s.inserted} new, ${s.updated} updated${s.failed ? `, ${s.failed} failed` : ""}`;
+    status.textContent = ["Imported — ",
+      [summary("tasks", tStats), summary("decisions", dStats), summary("ledger", lStats)]
+        .filter(Boolean).join(" · ")
+    ].join("");
     await reloadAll();
     renderAll();
   }
@@ -9674,20 +9868,19 @@
     const startMs = new Date(s.start + "T00:00:00").getTime();
     const endMs   = new Date(s.end   + "T23:59:59.999").getTime();
 
-    // Done tasks within range, sorted most-recently-closed first.
-    const closed = (state.tasks || [])
+    // Two sources merge into a unified "Off your plate" entry shape:
+    //   1. Tasks where status='done' (synthesized: dated_at = updated_at,
+    //      item = title, moved_to = assignee_label / owner / "—")
+    //   2. weight_ledger_entries (already in the right shape)
+    // Both feed one chronological surface.
+    const closedTasks = (state.tasks || [])
       .filter((t) => t.status === "done")
       .filter((t) => {
         const ts = new Date(t.updated_at || t.created_at).getTime();
         return ts >= startMs && ts <= endMs;
-      })
-      .sort((a, b) => new Date(b.updated_at || b.created_at) - new Date(a.updated_at || a.created_at));
+      });
 
-    // "Moved to" framing: prefer free-form assignee_label, fall back to
-    // owner profile name, then "—". This is what the consulting review
-    // called the surface that lifts the Weight: it tells the owner who
-    // / what is now carrying it.
-    const movedTo = (t) => {
+    const movedToFromTask = (t) => {
       const explicit = (t.assignee_label || "").trim();
       if (explicit) return explicit;
       const ownerName = profileNameById(t.owner_profile_id);
@@ -9695,10 +9888,45 @@
       return "—";
     };
 
+    const taskEntries = closedTasks.map((t) => ({
+      kind: "task",
+      datedMs: new Date(t.updated_at || t.created_at).getTime(),
+      datedAt: (t.updated_at || t.created_at).slice(0, 10),
+      item: t.title,
+      moved_to: movedToFromTask(t),
+      project_name: t.project_name || "",
+      priority: t.priority || "",
+      external_ref: t.external_ref || "",
+      raw: t,
+    }));
+
+    // T17a-4: weight_ledger_entries within range. Standalone rows from
+    // the YAML importer + any added directly via DB.
+    const ledgerEntries = (state.weightLedger || [])
+      .filter((e) => {
+        if (!e.dated_at) return false;
+        const ts = new Date(e.dated_at + "T12:00:00").getTime();
+        return ts >= startMs && ts <= endMs;
+      })
+      .map((e) => ({
+        kind: "ledger",
+        datedMs: new Date(e.dated_at + "T12:00:00").getTime(),
+        datedAt: e.dated_at,
+        item: e.item,
+        moved_to: e.moved_to,
+        project_name: e.project_name || "",
+        priority: "",
+        external_ref: e.external_ref || "",
+        raw: e,
+      }));
+
+    const closed = [...taskEntries, ...ledgerEntries]
+      .sort((a, b) => b.datedMs - a.datedMs);
+
     // Group by month for the visual rhythm.
     const groups = new Map();
     for (const t of closed) {
-      const closedAt = new Date(t.updated_at || t.created_at);
+      const closedAt = new Date(t.datedMs);
       const key = `${closedAt.getFullYear()}-${String(closedAt.getMonth() + 1).padStart(2, "0")}`;
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(t);
@@ -9713,8 +9941,7 @@
     const totalLifted = closed.length;
     const byRecipient = new Map();
     for (const t of closed) {
-      const r = movedTo(t);
-      byRecipient.set(r, (byRecipient.get(r) || 0) + 1);
+      byRecipient.set(t.moved_to, (byRecipient.get(t.moved_to) || 0) + 1);
     }
     const recipientRows = Array.from(byRecipient.entries()).sort((a, b) => b[1] - a[1]);
 
@@ -9753,7 +9980,7 @@
         <div class="off-plate-section">
           <h4>Where it went</h4>
           <table class="rpt-table">
-            <thead><tr><th>Moved to</th><th style="text-align:right">Tasks</th></tr></thead>
+            <thead><tr><th>Moved to</th><th style="text-align:right">Items</th></tr></thead>
             <tbody>
               ${recipientRows.map(([r, n]) =>
                 `<tr><td>${escapeHtml(r)}</td><td style="text-align:right">${n}</td></tr>`).join("")}
@@ -9770,21 +9997,18 @@
                 <div class="off-plate-month-head">${escapeHtml(monthLabel(mk))} <span class="off-plate-month-count">${items.length}</span></div>
                 <table class="rpt-table">
                   <thead><tr>
-                    <th>Closed</th><th>Task</th><th>Project</th><th>Moved to</th>
+                    <th>Date</th><th>Item</th><th>Project</th><th>Moved to</th><th>Source</th>
                   </tr></thead>
                   <tbody>
-                    ${items.map((t) => {
-                      const closedAt = new Date(t.updated_at || t.created_at);
-                      const dateLabel = isoDate(closedAt);
-                      return `
-                        <tr>
-                          <td>${escapeHtml(dateLabel)}</td>
-                          <td>${escapeHtml(t.title)}</td>
-                          <td class="off-plate-project">${escapeHtml(t.project_name || "—")}</td>
-                          <td>${escapeHtml(movedTo(t))}</td>
-                        </tr>
-                      `;
-                    }).join("")}
+                    ${items.map((t) => `
+                      <tr>
+                        <td>${escapeHtml(t.datedAt)}</td>
+                        <td>${escapeHtml(t.item)}</td>
+                        <td class="off-plate-project">${escapeHtml(t.project_name || "—")}</td>
+                        <td>${escapeHtml(t.moved_to)}</td>
+                        <td><span class="off-plate-source off-plate-source-${t.kind}">${t.kind === "task" ? "task" : "ledger"}</span></td>
+                      </tr>
+                    `).join("")}
                   </tbody>
                 </table>
               </div>
@@ -9808,22 +10032,23 @@
       };
     });
     const csvBtn = $("#rpt_export_off_plate_csv");
-    if (csvBtn) csvBtn.onclick = () => downloadOffPlateCsv(closed, movedTo, s.start, s.end);
+    if (csvBtn) csvBtn.onclick = () => downloadOffPlateCsv(closed, s.start, s.end);
   }
 
-  function downloadOffPlateCsv(rows, movedToFn, start, end) {
+  function downloadOffPlateCsv(rows, start, end) {
     const esc = (v) => {
       const s = String(v == null ? "" : v);
       return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
     };
-    const header = ["ClosedAt","Task","Project","MovedTo","Priority","ExternalRef"].join(",");
+    const header = ["Date","Item","Project","MovedTo","Source","Priority","ExternalRef"].join(",");
     const body = rows.map((t) => [
-      (t.updated_at || t.created_at || "").slice(0, 10),
-      t.title,
-      t.project_name || "",
-      movedToFn(t),
-      t.priority || "",
-      t.external_ref || "",
+      t.datedAt,
+      t.item,
+      t.project_name,
+      t.moved_to,
+      t.kind,
+      t.priority,
+      t.external_ref,
     ].map(esc).join(",")).join("\n");
     const csv = header + "\n" + body + "\n";
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });

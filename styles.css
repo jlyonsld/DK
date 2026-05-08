@@ -4337,6 +4337,154 @@ footer code {
   color: var(--ink-dim);
 }
 
+/* T17a-4: source pill in the Off Your Plate report */
+.off-plate-source {
+  display: inline-block;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ink-dim);
+  border: 1px solid var(--border);
+}
+.off-plate-source-task {
+  background: hsla(150, 60%, 45%, .10);
+  color: hsl(150, 55%, 40%);
+  border-color: hsla(150, 60%, 45%, .30);
+}
+.off-plate-source-ledger {
+  background: hsla(220, 75%, 55%, .10);
+  color: hsl(220, 70%, 50%);
+  border-color: hsla(220, 75%, 55%, .30);
+}
+
+/* T17a-4: decision cards (Tasks tab) */
+.decision-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.decision-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-left: 3px solid hsl(265, 70%, 60%); /* violet — distinct from task cards */
+  border-radius: 10px;
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.decision-card.decision-status-decided {
+  border-left-color: hsl(150, 60%, 45%);
+  opacity: .9;
+}
+.decision-card.decision-status-cancelled {
+  border-left-color: hsl(220, 10%, 60%);
+  opacity: .65;
+}
+.decision-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+.decision-card-title {
+  font-weight: 600;
+  font-size: 13.5px;
+  color: var(--ink);
+  flex: 1;
+}
+.decision-card-desc {
+  font-size: 12px;
+  color: var(--ink-dim);
+  line-height: 1.4;
+  white-space: pre-wrap;
+}
+.decision-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  align-items: center;
+  font-size: 11.5px;
+  color: var(--ink-dim);
+}
+.decision-not-before {
+  font-style: italic;
+}
+.decision-inputs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.decision-input-chip {
+  display: inline-block;
+  font-family: ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace;
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--panel-raised);
+  color: var(--ink-dim);
+  border: 1px solid var(--border);
+}
+.decision-status-select {
+  font-size: 11px;
+  padding: 2px 6px;
+}
+.decision-status-chip {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.decision-status-pending {
+  background: hsla(38, 90%, 50%, .14);
+  color: hsl(38, 85%, 38%);
+  border: 1px solid hsla(38, 90%, 50%, .35);
+}
+.decision-status-decided {
+  background: hsla(150, 60%, 45%, .14);
+  color: hsl(150, 55%, 35%);
+  border: 1px solid hsla(150, 60%, 45%, .35);
+}
+.decision-status-cancelled {
+  background: hsla(220, 10%, 60%, .14);
+  color: hsl(220, 8%, 42%);
+  border: 1px solid hsla(220, 10%, 60%, .35);
+}
+.decision-outcome-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  align-items: center;
+  padding-top: 4px;
+  font-size: 12px;
+}
+.decision-outcome-label {
+  font-weight: 600;
+  color: var(--ink-dim);
+}
+.decision-outcome-input {
+  flex: 1;
+  min-width: 200px;
+  font-size: 12px;
+  padding: 4px 8px;
+}
+.decision-outcome-text {
+  flex: 1;
+  font-style: italic;
+  color: var(--ink);
+}
+.decision-decided-at {
+  font-size: 11px;
+  color: var(--ink-dim);
+}
+
 /* Reply editor: textarea + read-only preview side-by-side. Both panes
    match in width / padding / font / line-height so wrapped lines align,
    and JS keeps scrollTop in sync so the user can edit a paragraph and
