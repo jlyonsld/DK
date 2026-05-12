@@ -1186,6 +1186,53 @@ section.content { min-width: 0; }
 .source-test       { background: var(--error-bg); color: var(--error-ink); border: 1px solid var(--error-border); }
 .sync-state-dropped_from_source { background: var(--warn-bg); color: var(--warn-ink); padding: 1px 7px; border-radius: 3px; font-size: 10px; font-weight: 700; text-transform: uppercase; border: 1px solid var(--warn-border); }
 
+/* T18: status pill — visual indicator on template cards + infographic rows.
+   Three hues match standard review semantics: amber = draft (awaiting review),
+   green = published (live in the picker), grey = archived (hidden). The pill
+   itself is non-interactive; the adjacent toggle button mutates state. */
+.status-pill {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 4px;
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  white-space: nowrap;
+}
+.status-draft     { background: rgba(245, 158, 11, .18); color: #fcd34d; border: 1px solid rgba(245, 158, 11, .35); }
+.status-published { background: rgba(34, 197, 94, .18);  color: #86efac; border: 1px solid rgba(34, 197, 94, .35); }
+.status-archived  { background: var(--panel-raised);     color: var(--ink-dim); border: 1px solid var(--border); }
+
+/* T18: status filter chip row beneath the category chips. Shares the .chip
+   styling but adds a count badge so admins can scan how many rows live in
+   each state. */
+.status-filter-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+.status-chips { gap: 6px; }
+.chip-count {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 6px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, .08);
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--ink-soft);
+}
+.chip.active .chip-count {
+  background: rgba(0, 0, 0, .25);
+  color: inherit;
+}
+.bulk-publish-btn {
+  white-space: nowrap;
+}
+
 .sync-status {
   margin-bottom: 12px;
   padding: 10px 14px;

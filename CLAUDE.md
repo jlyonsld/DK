@@ -311,15 +311,25 @@ response-console-v3/
     │                                       Realtime publication. Partial
     │                                       unique index on par_task_id
     │                                       (where not null). See §4.33.
-    └── phase_t17a4_engagement_extensions.sql ← T17a-4. `decisions` and
-                                            `weight_ledger_entries` tables.
-                                            Both gated on existing
-                                            manage_tasks (no new perm name);
-                                            SELECT open to authenticated;
-                                            both in supabase_realtime.
-                                            weight_ledger_entries.source_task_id
-                                            is a nullable FK to tasks on
-                                            delete set null. See §4.33.
+    ├── phase_t17a4_engagement_extensions.sql ← T17a-4. `decisions` and
+    │                                       `weight_ledger_entries` tables.
+    │                                       Both gated on existing
+    │                                       manage_tasks (no new perm name);
+    │                                       SELECT open to authenticated;
+    │                                       both in supabase_realtime.
+    │                                       weight_ledger_entries.source_task_id
+    │                                       is a nullable FK to tasks on
+    │                                       delete set null. See §4.33.
+    └── phase_t18_publish_status.sql      ← T18. Shared `content_status` enum
+                                            (draft / published / archived) +
+                                            `status` / `published_at` /
+                                            `published_by` columns on
+                                            `templates` and `infographics`.
+                                            All existing rows backfill to
+                                            'draft'. No new permission —
+                                            reuses edit_templates /
+                                            edit_infographics for the
+                                            publish toggle. See §4.34.
 ```
 
 **Pre-T4 migrations (not in repo) live at the parent folder:**
@@ -365,7 +375,12 @@ DK Optimization/                ← parent folder, NOT a git repo
 ```
 profiles                 — per-auth-user DK profile with role + PAR identity cache
 categories               — template categories (pricing, scheduling, etc.)
-templates                — response templates with {variable} placeholders
+templates                — response templates with {variable} placeholders.
+                           T18: carries `status` (content_status enum:
+                           draft/published/archived) + `published_at` +
+                           `published_by` (FK to profiles). Hidden from
+                           leads-reply picker unless `status='published'`.
+                           See §4.34.
 classes                  — classes synced nightly from Jackrabbit
 teachers                 — DK-side teacher roster
 class_teachers           — many-to-many: which teacher is primary/sub for which class
@@ -386,7 +401,11 @@ clock_ins                — teacher shift timestamps (one row per
                            teacher+class+day). Fed by the clock_in /
                            clock_out RPCs. Feeds the "Teacher hours"
                            report for payroll. See §4.16.
-infographics             — image assets in Supabase Storage bucket
+infographics             — image assets in Supabase Storage bucket.
+                           T18: carries `status` (content_status enum) +
+                           `published_at` + `published_by`. Hidden from
+                           Templates-tab sidebar + leads-reply attach
+                           strip unless `status='published'`. See §4.34.
 curriculum_items         — DK-curated lesson library (PDFs, videos,
                            images, scripts, links). Stored in the
                            private `curriculum-assets` bucket. T5b
@@ -1205,6 +1224,45 @@ Importer parses → upserts by `id` (so re-imports are idempotent and edits land
 - "Off your plate" Reports entry merges `weight_ledger_entries` with done-tasks into one chronological surface; CSV export carries a `Source` column distinguishing task vs. ledger origin.
 - No federation: decisions and weight_ledger are explicitly local-only. PAR has no canonical "weight ledger" surface yet; if/when Margin adds one, this is the canonical schema to mirror.
 
+### 4.34 Templates + infographics publish workflow (T18)
+
+T18 adds a draft / published / archived workflow to `templates` and `infographics` so Sharon (or any manager) can curate a draft, bless it as published when reviewed, and archive it later — and so the response-console picker contexts (Leads reply modal template select, leads reply infographic attach strip, Templates tab infographics sidebar) physically can't surface unreviewed content. Without this, anyone with `edit_templates` could draft a half-finished template and a different manager could send it to a parent twenty minutes later, unreviewed.
+
+**Schema (migration `phase_t18_publish_status.sql`):** ONE shared `content_status` enum (`draft` / `published` / `archived`) used by both tables — same review workflow, same type. Each table gains `status content_status not null default 'draft'`, `published_at timestamptz`, `published_by uuid references profiles(id) on delete set null`. Indexes on `(status)` for both tables. **All existing rows backfill to `draft`** — forces an explicit review pass before anything reaches the response-console, with a super_admin-only "Publish all drafts" escape hatch in each manage surface for the franchise that wants to opt-in en masse.
+
+**Permissions: REUSED, not new.** `edit_templates` / `edit_infographics` (manager+) already cover write access; the publish/unpublish toggle is just another UPDATE on the same row. Same §4.5 pattern as T15 reusing `respond_to_leads` — granular split (a future `publish_templates` separate from `edit_templates`) is a one-line gate change if a franchise ever wants a designated reviewer role.
+
+**Visibility — the safety property.** Two distinct contexts, treated differently:
+
+| Surface | Behavior |
+|---|---|
+| Templates tab card grid | All statuses with filter chips: `All` / `Drafts` / `Published` / `Archived` (each chip carries a live count) |
+| Manage infographics modal table | All statuses with the same filter chips + a `Status` column |
+| Templates tab infographics sidebar (`renderInfographicsSidebar`) | **Published only** — drafts and archived hidden entirely |
+| Leads reply modal template picker (`openLeadReply`) | **Published only** |
+| Leads reply modal infographic attach strip (`renderLeadReplyInfographics`) | **Published only** |
+| Card status pills | Amber `Draft`, green `Published`, grey `Archived` everywhere |
+
+Picker contexts hide drafts/archived **entirely**, not "show greyed out." A manager composing a reply physically cannot pick an unreviewed template or attach an unreviewed image — there's no surface that lists them in the reply flow. The Templates tab and Manage infographics modal are the only places drafts surface, both of which are admin/manager review contexts.
+
+**Status pill + quick-toggle UX.** Each template card renders a non-interactive status pill next to the category badge. Adjacent to the existing ✎ Edit / ⎘ Duplicate buttons sits a single status-toggle button whose label cycles based on current state: Draft → "✓ Publish" / Published → "↩ Unpublish" / Archived → "↻ Restore." The toggle calls `setTemplateStatus(id, nextStatus)` directly — no modal open required, so Sharon can review a batch fast. The Manage infographics modal mirrors the pattern row-by-row.
+
+**`nextStatusFor(status)` deliberately omits Archive.** The quick-toggle cycle is review-state-only (draft↔published, archived→draft). Archiving is a less-common operation that lives in the edit modal's status dropdown (or in a future contextual menu). This keeps the card head lean — adding a third button per row crowded the action area on mobile.
+
+**Audit fields (`published_at`, `published_by`) stamp on publish, clear on unpublish.** When `setTemplateStatus(id, 'published')` runs, it writes `published_at = now()` + `published_by = state.profile.id`. Any transition AWAY from published (unpublish, archive, restore) clears both back to NULL. This means re-publishing the same row later writes a fresh timestamp + reviewer — so "when was this last blessed?" always answers truthfully, and the FK survives a reviewer's profile deletion via `on delete set null`.
+
+**Duplicated templates always land as draft.** `duplicateTemplate()` sets `status: 'draft'` on the new row regardless of the source's status. A duplicate hasn't been reviewed by anyone — it's a fresh row that happens to share content with another.
+
+**Edits do NOT auto-demote published rows back to draft.** Saving an edit to a published template via `saveTemplate()` leaves `status` and `published_at` unchanged. This is a deliberate tradeoff — it keeps the UX predictable (Save means save), but it means a manager with `edit_templates` could in theory tweak a published template without re-review. Mitigations: franchise-level habit (re-check published rows quarterly), the realtime channel surfaces edits across browsers within the 300ms debounce so Sharon sees changes live, and a future T18b could add an auto-demote-on-substantive-content-change gate if the trust model demands it. For Charleston's scale (a few trusted managers), the simpler semantic is correct.
+
+**Bulk-publish button is super_admin-only and auto-hidden when no drafts exist.** Lives in both manage surfaces (Templates tab head + Manage infographics modal head). One UPDATE round-trip flips every draft → published + stamps audit fields. Confirmation prompt names the count. **This is an escape hatch, not a workflow** — its only legitimate use is the post-T18-deploy backfill case when a franchise has hundreds of inherited drafts that don't need per-row review. After that, drafts should reach published via individual review.
+
+**`renderTemplateStatusChips()` + `renderInfographicStatusChips()` own the bulk-publish button visibility.** The chip renderer counts drafts in the same pass it counts each status for the chip badges, so it's the natural place to gate the bulk button (`super_admin && counts.draft > 0`). Don't move this logic into `applyRoleVisibility()` — the count is dynamic (changes as Sharon publishes drafts) and would force a second count loop. The chip renderer already runs on every render.
+
+**Realtime publication is unchanged.** Both tables were already in `supabase_realtime` from prior phases; T18 adds columns, not tables. Status changes flow live across browsers within the 300ms debounce — admins can watch each other publish in real time, which is useful when two reviewers are working a batch in parallel.
+
+**Out of scope for v1 (deliberate, do not bolt on):** scheduled publish ("go live Monday at 9 AM" — would need a pg_cron + a `publish_at` column; v1 doesn't need it); per-status SELECT RLS gates (drafts are visible to anyone with `edit_templates`, archived too — the gate is at the picker context, not the row); a "Review queue" report listing drafts older than N days (could be a §4.15 Reports entry later); cross-row review checklists ("did Sharon approve every category?" — manual count via the chip badges is fine for v1); reviewer-name annotation on cards (the `published_by` FK is there for it, but rendering a reviewer chip per card is visual noise for a 2-person review team).
+
 ---
 
 ## 5. Gotchas, quirks, and "don't touch this"
@@ -1284,6 +1342,16 @@ Importer parses → upserts by `id` (so re-imports are idempotent and edits land
 **`record_waiver_signature()` is the ONLY path that inserts into `liability_waiver_signatures`.** The signatures table has NO INSERT/UPDATE/DELETE policies. The RPC is `security definer` and gates either on caller-is-the-teacher (email match against `auth.jwt() ->> 'email'`) OR `manage_teacher_compliance`. **Don't add a self-INSERT policy on the table** — it would bypass the email-match check and let a teacher forge a signature on a coworker's behalf. The RPC pattern is the entire reason both the self-sign and admin-recorded paths can share one writer.
 
 **`teacher-documents` storage SELECT is gated, but `curriculum-assets` is not.** Both are private buckets but they handle reads differently. `teacher-documents` exposes a SELECT policy gated to `manage_teacher_compliance` because the compliance admins see ALL docs and there's no per-row authorization story (lead windows, assignments, etc.). `curriculum-assets` has NO SELECT policy because the per-teacher lead-window check needs to run server-side AND every read needs an audit-log row, both of which require the Edge Function intermediary. **Don't unify the two patterns** — adding an Edge Function for teacher-documents would just be ceremony with no security benefit; adding a SELECT policy to curriculum-assets would let teachers bypass the audit log and the lead-window gate.
+
+**T18 picker contexts hide drafts AND archived ENTIRELY, not greyed out.** The leads reply modal template select, the leads reply infographic attach strip, and the Templates tab infographics sidebar all filter to `status === 'published'` before iterating. This is the entire safety property of the feature — there must be no surface where a manager composing a reply can click on or even *see* an unreviewed row. **If you add a new picker context** (e.g. a Messenger composer in T16b, a future broadcast surface), copy the filter pattern: source from `state.templates.filter(t => t.status === 'published')` / `state.infographics.filter(i => i.status === 'published')`, NOT from the raw state arrays. Greying out drafts with a "draft" badge would seem nice but it leaves them clickable and visible, which defeats the point.
+
+**`status` defaults to `'draft'` AND existing rows backfill to `'draft'`.** The `default 'draft'` in the migration only fires for newly-inserted rows; for existing rows, Postgres handles the ADD COLUMN backfill via `pg_attribute.atthasmissing` on the FIRST migration run. The migration's defensive `update ... set status = 'draft' where status is null` covers re-runs and any rows that somehow ended up NULL anyway — idempotent on a fresh DB, no-op on an already-applied DB. **Don't add a `not null` constraint without a default** in any follow-up — it would lock out INSERT from any path that doesn't explicitly pass `status`.
+
+**T18 edit-doesn't-auto-demote is a deliberate choice, NOT an oversight.** `saveTemplate()` and `saveInfographic()` leave `status` and `published_at` alone — only `setTemplateStatus()` / `setInfographicStatus()` / `publishAllDraft*` write those columns. The reason: at Charleston's scale (2–3 trusted managers), auto-demoting on every save would force a re-publish click on trivial typo fixes and burn review fatigue. **If a future franchise has a less-trusted reviewer setup** and wants auto-demote on substantive content change, the right place to add it is the save handler: diff `tpl.body` / `tpl.title` / etc. against the pre-edit values and, if any tracked field changed AND `tpl.status === 'published'`, set `payload.status = 'draft'` + null the audit fields. Keep the rest of the visibility rules intact — the picker filter is the safety property, not the auto-demote.
+
+**Status mutation clears audit fields on transition away from `'published'`.** When `setTemplateStatus(id, 'draft')` or `'archived'` runs, the payload explicitly sets `published_at = null` AND `published_by = null`. **Don't preserve those fields across a draft trip** — re-publishing later should write a fresh timestamp + reviewer so "when was this last blessed?" answers truthfully. The `published_by` FK has `on delete set null` so a reviewer deleting their profile doesn't break the row.
+
+**Bulk-publish button visibility lives in the chip renderer, NOT in `applyRoleVisibility()`.** `renderTemplateStatusChips()` and `renderInfographicStatusChips()` already count drafts in the same pass that builds the chip badges, so they're the natural place to gate the bulk button (`super_admin && counts.draft > 0`). `applyRoleVisibility()` runs less often and would force a second count loop. The chip renderers run on every render anyway. **If you move the bulk button to a different surface** (e.g. a dedicated Review queue tab), keep this co-location pattern — the alternative is the button flickering between renders as the count goes stale.
 
 **Categories AND Infographics tabs are gone — both are managed via modals off the Templates tab head.** The standalone Categories tab was retired during T6b's UI consolidation; the Infographics CRUD tab followed during T6c for the same reason (handful of inline-editable rows that didn't justify a top-level slot, and the Templates tab is the natural place to discover them since both are template-companions). The "⚙ Manage categories" and "🖼 Manage infographics" buttons in the Templates tab head open `#categoriesOverlay` and `#infographicsOverlay` respectively; the existing `renderCategoriesTab()` / `renderInfographicsTab()` functions stayed as-is — they now render into the modals' `#categoryList` / `#infographicsTable` (same ids as before, just relocated) and the modal-open handlers call them. **`ROLE_TAB_VISIBILITY` no longer lists "categories" or "infographics"** for any role; the tools-overflow auto-hide check was updated to match; `SIDEBAR_TABS` shrunk from `{templates, infographics}` to `{templates}`. If you want to bring back a standalone tab, restore those strings AND add a tab panel to `index.html` AND add the panel id back to whatever bento/sidebar logic toggles tab visibility.
 
@@ -1388,6 +1456,8 @@ Importer parses → upserts by `id` (so re-imports are idempotent and edits land
 
 - **Phase T11 — student intake form (full PII fields + parent self-fill flow).** ✅ **Shipped.** Adds nine PII columns to `students` (allergies, medical_notes, photo_permission tri-state, emergency_contact_name/phone/relationship, school_name, grade, authorized_pickup) — parent contact arrays were already on the schema. New `student_intake_requests` table stores `sha256(token)` + class_id + parent_email + audit fields; raw token lives only in the URL emailed to the parent. Two Edge Functions: `dk-send-intake-form` (verify_jwt: true; admin gate via `has_permission('edit_students')` called under user-bound supabase-js client; emails via Resend with copy/paste fallback) and `dk-submit-intake-form` (verify_jwt: false; public; auth IS the token; atomically inserts student + enrollment + marks intake completed using service-role). New public page `student-intake.html` parallels `install.html`. Add Student modal expands with full intake fields + parents repeater + "📧 Send form to parent" shortcut. Class detail panel grows a "Pending parent forms" subsection above the enrollments list with Resend / Cancel actions, and enriches each enrolled-student row with parent name(s)/email/phone, emergency contact, and chips for `⚠ allergies`/`⚕ medical`/`📷 no photos`. No new permission name — reuses `edit_students`. `cancel_student_intake(uuid)` RPC powers the admin cancel surface. See `migrations/phase_t11_student_intake.sql`, `T11_VERIFICATION.md`, and §4.28.
 
+- **Phase T18 — Templates + infographics publish workflow (draft / published / archived).** ✅ **Shipped 2026-05-12.** Shared `content_status` enum + `status` / `published_at` / `published_by` columns on both `templates` and `infographics`. All existing rows backfill to `'draft'` — Sharon's first move post-deploy is per-row review with the quick-toggle ✓ Publish on each card OR bulk-publish via the super_admin "Publish all drafts" escape hatch on each manage surface. The Templates tab card grid and the Manage infographics modal show all statuses with filter chips; the response-console picker contexts (leads reply modal template select + infographic attach strip, Templates tab infographics sidebar) hide drafts and archived entirely so a manager composing a reply physically cannot pick unreviewed content. No new permission name — reuses `edit_templates` / `edit_infographics`. See `migrations/phase_t18_publish_status.sql`, `T18_VERIFICATION.md`, and §4.34.
+
 - **Phase T12 — Mailchimp sync (one-way DK → MC + MC webhooks back).** ✅ **Code-complete, awaiting Sharon's API key + audience selection.** Adds `dk_config.mailchimp_*` columns + `students.marketing_status` + `mailchimp_sync_outbox` queue + `mailchimp_sync_log` audit. Two triggers (`students_mc_sync` on identity-relevant column updates + `enrollments_mc_sync` on any enrollment change) enqueue one row per `(student, parent_email)` pair. Three Edge Functions: `dk-mailchimp-drain` (verify_jwt: false, every 60s via pg_cron, reads cron secret from vault via the `get_mailchimp_drain_cron_secret()` RPC, no-ops gracefully if MC not configured); `mailchimp-webhook` (verify_jwt: false, public, auth via `?secret=` query param against `dk_config.mailchimp_webhook_secret`, always returns 200); `dk-mailchimp-ping` (verify_jwt: true, super_admin only, ping/list audiences/list+create merge fields). Allow-listed merge fields: FNAME, LNAME, STUDENT, CLASS, SCHOOL, STATUS — sensitive PII (allergies, medical_notes, payment_details, waivers) explicitly excluded by triple-redundant gates. Tags applied per parent: `dk-<status>`, `class:<slug>`, `school:<slug>`. New super_admin-only `⚙ Mailchimp` button on the Templates tab head opens the connect / webhook / merge-fields-checklist / sync-status-pill modal. No new permission name — `dk_config` writes already gate on `is_super_admin()`. See `migrations/phase_t12_mailchimp_sync.sql`, `T12_MAILCHIMP_SYNC.md` (original spec), and §4.29.
 
 ### Wave 1 leftovers (pre-freemium ops work)
@@ -1473,3 +1543,4 @@ META_PAGE_ACCESS_TOKEN           # T15 — long-lived Page token to fetch lead f
 | T15 — Meta Lead Ads inbox (DK side: leads staging table + dk-meta-lead-webhook Edge Function + Leads tab with reply / promote / junk / archive) | ✅ DK side shipped, awaiting Sharon's Meta App + env vars + Mailchimp's native FB Lead Ads connector |
 | T16 — Messenger / Instagram inbox, **as a feature of the PAR Spoke Skeleton** (not a per-spoke feature) | 📋 Designed (CLAUDE.md §4.32). Architecture decision: **ONE Meta App at the SKELETON level, App-Reviewed once, serves every spoke (DK, Margin, future) × every franchise across all time.** PAR hosts a `spoke-meta-webhook-router` Edge Function that verifies Meta's HMAC and forwards events to each spoke's webhook signed with `SPOKE_INSTALL_SIGNING_SECRET`. Franchises connect Pages via OAuth in PAR's Connected Apps panel. Phase split: T16a = skeleton scaffolding (PAR dispatcher + OAuth flow + spoke schema templates) + DK receive-only inbox + T15.5 lead-webhook migration to PAR-forward verification. T16b = send path + composer (needs `pages_messaging` App Review — clears once for entire skeleton). T16c = Instagram parity. Retroactive: T15 (DK leads) and Margin's future Meta integration both adopt the skeleton pattern. |
 | T17 — Task federation: DK→PAR push via Margin's `spoke-create-task` pattern (DK side: `tasks` table + `dk-create-par-task` Edge Function with 501 fallback + Tasks tab + YAML engagement-doc importer) | ✅ Shipped (T17a + T17b + T17a-4). Mirrors Margin's federation built 2026-05-06 with one DK simplification: reads `dk_config.par_franchise_org_id` instead of carrying a `DK_PAR_ORG_ID` env var (single source of truth, install flow already populates it). T17b turn-on rediscovered two PAR-side requirements Margin's setup doc didn't flag: `spoke_capabilities` row required per (spoke, endpoint) — without it, `403 capability_missing`; and `admin_install_spoke()` rejects SQL Editor calls (uses `auth.uid()`), so direct INSERTs into `spoke_installations` are the path. T17a-4 (2026-05-08) lifts `decisions` + `weight_ledger_entries` from "silently ignored by importer" to first-class: new tables, new YAML import paths, decisions render in Tasks tab, weight_ledger merges into "Off your plate" Reports entry. T17c (deferred, same open question Margin punted on) = status round-trip via PAR webhook keyed on `external_ref`. |
+| T18 — Templates + infographics publish workflow (draft / published / archived) — `content_status` enum + status/published_at/published_by columns on both tables, status pills + quick-toggle buttons, status filter chips, super_admin "Publish all drafts" escape hatch, picker contexts (leads reply modal template select + infographic attach strip, Templates tab infographics sidebar) hide drafts and archived entirely | ✅ Shipped (2026-05-12). All existing rows backfill to `'draft'`; Sharon's first move post-deploy is either bulk-publish via the super_admin button OR per-row review with the ✓ Publish quick-toggle. No new permission name — reuses `edit_templates` / `edit_infographics`. Edit-doesn't-auto-demote is a deliberate tradeoff for Charleston's small-team scale (CLAUDE.md §5). See `migrations/phase_t18_publish_status.sql` and §4.34. |
