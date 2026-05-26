@@ -77,7 +77,57 @@
 
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; }
+/* ── Light mode ──────────────────────────────────────────────
+   Overrides the semantic tokens only; the slate/emerald palette and
+   every var()-driven surface flip automatically. Dark mode is the
+   default (no [data-theme] attribute) and is left untouched. */
+[data-theme="light"] {
+  --bg-gradient: linear-gradient(135deg, #f8fafc 0%, #eef2f7 55%, #e7f5ee 100%);
+  --panel: #ffffff;
+  --panel-hover: #f1f5f9;
+  --panel-solid: #ffffff;
+  --panel-raised: #f1f5f9;
+  --border: #e2e8f0;
+  --border-strong: #cbd5e1;
+  --ink: #0f172a;
+  --ink-soft: #334155;
+  --ink-dim: #475569;
+  --ink-mute: #64748b;
+  --accent: #059669;
+  --accent-solid: #059669;
+  --accent-ink: #047857;
+  --accent-soft: rgba(5, 150, 105, 0.10);
+  --accent-soft-2: rgba(5, 150, 105, 0.16);
+  --accent-border: rgba(5, 150, 105, 0.30);
+  --warn-ink: #92600a;
+  --error-ink: #b91c1c;
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, .06);
+  --shadow: 0 10px 25px -14px rgba(15, 23, 42, .18), 0 1px 2px rgba(15, 23, 42, .05);
+  --shadow-lg: 0 24px 60px -18px rgba(15, 23, 42, .22);
+  background: #eef2f7;
+}
+
+/* Theme switch (header) */
+.theme-switch { background: none; border: none; padding: 0; cursor: pointer; display: inline-flex; align-items: center; }
+.theme-switch-track {
+  position: relative; width: 46px; height: 24px; border-radius: 999px;
+  background: var(--panel-raised); border: 1px solid var(--border);
+  display: inline-flex; align-items: center; transition: background .2s;
+}
+.theme-switch-ico { position: absolute; top: 50%; transform: translateY(-50%); font-size: 11px; line-height: 1; pointer-events: none; }
+.theme-switch-ico.sun  { left: 5px;  opacity: .5; }
+.theme-switch-ico.moon { right: 5px; opacity: .9; }
+.theme-switch-thumb {
+  position: absolute; top: 2px; left: 2px; width: 18px; height: 18px;
+  border-radius: 50%; background: var(--accent); transition: transform .2s;
+}
+[data-theme="light"] .theme-switch-thumb { transform: translateX(22px); }
+[data-theme="light"] .theme-switch-ico.sun  { opacity: 1; }
+[data-theme="light"] .theme-switch-ico.moon { opacity: .45; }
+.theme-switch:focus-visible .theme-switch-track { outline: 2px solid var(--accent); outline-offset: 2px; }
+
 html { background: var(--slate-950); }
+[data-theme="light"] html, html[data-theme="light"] { background: #eef2f7; }
 body {
   font-family: var(--font-sans);
   background: var(--bg-gradient);

@@ -13,6 +13,15 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-title" content="PAR DK" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <script>
+    // Apply saved theme before first paint to avoid a flash. Default = dark.
+    (function () {
+      try {
+        var t = localStorage.getItem("dk-theme");
+        if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    })();
+  </script>
 </head>
 <body>
 
@@ -100,6 +109,13 @@
           </div>
         </div>
         <div class="header-actions">
+          <button type="button" class="theme-switch" id="themeToggle" role="switch" aria-checked="false" aria-label="Toggle light or dark mode" title="Light / dark mode">
+            <span class="theme-switch-track">
+              <span class="theme-switch-ico sun" aria-hidden="true">☀</span>
+              <span class="theme-switch-ico moon" aria-hidden="true">🌙</span>
+              <span class="theme-switch-thumb"></span>
+            </span>
+          </button>
           <button type="button" class="user-chip" id="userChip" aria-haspopup="true" aria-expanded="false"></button>
           <button class="btn ghost small" id="signOutBtn" title="Sign out">Sign out</button>
           <!-- Tap-to-open user menu. On mobile this is the ONLY way to sign
@@ -2178,6 +2194,23 @@ workstreams:
         navigator.serviceWorker.register('/sw.js').catch(() => {});
       });
     }
+    // Dark / light mode toggle. The <head> script applies the saved value
+    // before first paint; this just flips + persists on click. Default = dark.
+    (function () {
+      var btn = document.getElementById("themeToggle");
+      if (!btn) return;
+      function sync() {
+        btn.setAttribute("aria-checked",
+          document.documentElement.getAttribute("data-theme") === "light" ? "true" : "false");
+      }
+      sync();
+      btn.addEventListener("click", function () {
+        var next = document.documentElement.getAttribute("data-theme") === "light" ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", next);
+        try { localStorage.setItem("dk-theme", next); } catch (e) {}
+        sync();
+      });
+    })();
   </script>
 </body>
 </html>
