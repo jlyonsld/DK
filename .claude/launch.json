@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dk-static",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["-y", "http-server", "/Users/jasonlyonsdesign/Documents/Claude/Projects/DK Optimization/response-console-v3", "-p", "8765", "-c-1", "--silent"],
+      "port": 8765
+    }
+  ]
+}

@@ -266,7 +266,7 @@
   // Which tabs each role is allowed to see. (Role Management tab doesn't
   // exist in T1 — it lands in T6.)
   const ROLE_TAB_VISIBILITY = {
-    super_admin: new Set(["home","schedule","templates","classes","schools","teachers","subrequests","events","inventory","leads","tasks","curriculum","reports","users"]),
+    super_admin: new Set(["home","schedule","templates","classes","schools","teachers","subrequests","events","inventory","leads","tasks","curriculum","reports","users","settings"]),
     admin:       new Set(["home","schedule","templates","classes","schools","teachers","subrequests","events","inventory","leads","tasks","curriculum","reports","users"]),
     manager:     new Set(["home","schedule","templates","classes","schools","teachers","subrequests","events","inventory","leads","tasks","curriculum"]),
     teacher:     new Set(["home","schedule","subrequests","events","inventory"]),
@@ -311,7 +311,6 @@
         { tab: "templates", label: "Templates" },
         { action: () => openCategoriesModal(),   label: "Categories",   manage: true, perm: "edit_categories" },
         { action: () => openInfographicsModal(), label: "Infographics", manage: true, perm: "edit_infographics" },
-        { action: () => openMailchimpModal(),    label: "Mailchimp",    manage: true, superOnly: true },
     ] },
     { id: "tasks",    label: "Tasks",   tab: "tasks",
       desc: "Your personal work queue." },
@@ -321,6 +320,8 @@
         { report: "par_funnel",    label: "PAR funnel" },
         { report: "off_plate",     label: "Off your plate" },
     ] },
+    { id: "settings", label: "Settings", tab: "settings",
+      desc: "Integrations and configuration." },
   ];
 
   // Active zone + per-zone memory of the last tab visited (nicer re-entry).
@@ -1019,6 +1020,37 @@
     renderCurriculumTab();
     renderReportsTab();
     renderUsersTab();
+    renderSettingsTab();
+  }
+
+  // Settings tab — integrations hub. Mailchimp lives here now (moved out of
+  // the Comms zone); Meta is a labeled placeholder until its verification
+  // clears. Super_admin-only via ROLE_TAB_VISIBILITY.
+  function renderSettingsTab() {
+    const grid = document.getElementById("settingsGrid");
+    if (!grid) return;
+    const cfg = state.dkConfig || {};
+    const mcOn = !!cfg.mailchimp_audience_id;
+    grid.innerHTML = `
+      <div class="settings-card">
+        <div class="settings-card-head">
+          <span class="settings-card-title">📧 Mailchimp</span>
+          <span class="settings-pill ${mcOn ? "on" : "off"}">${mcOn ? "Connected" : "Not connected"}</span>
+        </div>
+        <p class="settings-card-desc">Keep your Mailchimp audience in sync with your roster so marketing emails reach the right families automatically.</p>
+        <button class="btn primary small" id="settingsMailchimpBtn" type="button">${mcOn ? "Manage" : "Connect"}</button>
+      </div>
+      <div class="settings-card">
+        <div class="settings-card-head">
+          <span class="settings-card-title">📱 Meta · Facebook &amp; Instagram</span>
+          <span class="settings-pill soon">Coming soon</span>
+        </div>
+        <p class="settings-card-desc">Connect Facebook &amp; Instagram so lead-ad submissions and messages flow into the console. Waiting on Meta's business verification.</p>
+        <button class="btn small" type="button" disabled>Not yet available</button>
+      </div>
+    `;
+    const mcBtn = document.getElementById("settingsMailchimpBtn");
+    if (mcBtn) mcBtn.onclick = openMailchimpModal;
   }
 
   /* ═════════════ HOME (Bento) ═════════════ */
@@ -3396,6 +3428,11 @@
         const id = el.dataset.openClass;
         state.cState.openClassId = id;
         go("classes");
+        // Land ON the opened class's detail rather than the top of the list.
+        requestAnimationFrame(() => {
+          const card = document.querySelector(`#classTable .class-card[data-id="${id}"]`);
+          if (card) card.scrollIntoView({ behavior: "smooth", block: "start" });
+        });
       };
     });
     $$("[data-open-event]", $("#schedView")).forEach((el) => {
@@ -3416,15 +3453,22 @@
   /* ═════════════ TEMPLATES ═════════════ */
 
   function renderCategoryChips() {
+    // Category filter as a pulldown (replaces the old chip row) so the
+    // Templates sub-bar stays compact as categories grow.
     const wrap = $("#categoryChips");
     wrap.innerHTML = "";
-    [{ id: "all", label: "All" }].concat(state.categories).forEach((cat) => {
-      const chip = document.createElement("button");
-      chip.className = "chip" + (state.tState.category === cat.id ? " active" : "");
-      chip.textContent = cat.label;
-      chip.onclick = () => { state.tState.category = cat.id; renderCategoryChips(); renderTemplates(); };
-      wrap.appendChild(chip);
+    const sel = document.createElement("select");
+    sel.className = "cat-select";
+    sel.setAttribute("aria-label", "Filter by category");
+    [{ id: "all", label: "All categories" }].concat(state.categories).forEach((cat) => {
+      const o = document.createElement("option");
+      o.value = cat.id;
+      o.textContent = cat.label;
+      if (state.tState.category === cat.id) o.selected = true;
+      sel.appendChild(o);
     });
+    sel.onchange = () => { state.tState.category = sel.value; renderTemplates(); };
+    wrap.appendChild(sel);
     renderTemplateStatusChips();
   }
 
@@ -10836,6 +10880,10 @@
     $("#t_cpr_expires").value        = t ? (t.cpr_expires_date || "") : "";
     $("#t_first_aid").checked        = t ? !!t.first_aid_certified : false;
     $("#t_first_aid_expires").value  = t ? (t.first_aid_expires_date || "") : "";
+    $("#t_nda_on_file").checked      = t ? !!t.nda_on_file : false;
+    $("#t_nda_date").value           = t ? (t.nda_signed_date || "") : "";
+    $("#t_contract_on_file").checked = t ? !!t.contract_on_file : false;
+    $("#t_contract_date").value      = t ? (t.contract_signed_date || "") : "";
 
     // Payroll section (view_pay_rates)
     $("#t_pay_type").value        = t ? (t.pay_type || "") : "";
@@ -11229,6 +11277,10 @@
         cpr_expires_date: $("#t_cpr_expires").value || null,
         first_aid_certified: $("#t_first_aid").checked,
         first_aid_expires_date: $("#t_first_aid_expires").value || null,
+        nda_on_file: $("#t_nda_on_file").checked,
+        nda_signed_date: $("#t_nda_date").value || null,
+        contract_on_file: $("#t_contract_on_file").checked,
+        contract_signed_date: $("#t_contract_date").value || null,
         // liability_waiver_signed / liability_waiver_date are now stamped
         // by record_waiver_signature() RPC; not editable from this modal.
       });

@@ -284,6 +284,14 @@
           <!-- Phase T6d: role management. Body rendered by renderUsersTab(). -->
         </div>
 
+        <div class="tab-panel" data-tab="settings" style="display:none">
+          <div class="settings-head">
+            <h2 class="settings-title">Settings</h2>
+            <p class="settings-sub">Integrations and configuration for your franchise.</p>
+          </div>
+          <div class="settings-grid" id="settingsGrid"></div>
+        </div>
+
       </section>
     </main>
 
@@ -639,7 +647,9 @@
         </div>
 
         <div class="personnel-only">
-          <h4 class="modal-section-title">Compliance &amp; background</h4>
+          <h4 class="modal-section-title">Compliance &amp; background
+            <span class="modal-section-sub">SLED / background check</span>
+          </h4>
           <div class="field-row">
             <div class="field">
               <label>Background check status</label>
@@ -654,7 +664,7 @@
             </div>
             <div class="field">
               <label>Provider</label>
-              <input type="text" id="t_bg_provider" placeholder="e.g. Sterling, Checkr" />
+              <input type="text" id="t_bg_provider" placeholder="e.g. SLED, Sterling, Checkr" />
             </div>
           </div>
           <div class="field-row">
@@ -683,6 +693,30 @@
             <div class="field">
               <label>First aid expires</label>
               <input type="date" id="t_first_aid_expires" />
+            </div>
+          </div>
+        </div>
+
+        <div class="personnel-only">
+          <h4 class="modal-section-title">Agreements
+            <span class="modal-section-sub">NDA &amp; contract — upload the signed files in Documents below</span>
+          </h4>
+          <div class="field-row">
+            <div class="field">
+              <label class="checkbox-label"><input type="checkbox" id="t_nda_on_file" /> NDA on file</label>
+            </div>
+            <div class="field">
+              <label>NDA signed</label>
+              <input type="date" id="t_nda_date" />
+            </div>
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label class="checkbox-label"><input type="checkbox" id="t_contract_on_file" /> Contract on file</label>
+            </div>
+            <div class="field">
+              <label>Contract signed</label>
+              <input type="date" id="t_contract_date" />
             </div>
           </div>
         </div>
@@ -742,6 +776,9 @@
               <option value="certification_cpr">CPR certification</option>
               <option value="certification_first_aid">First-aid certification</option>
               <option value="certification_background">Background check report</option>
+              <option value="certification_sled">SLED background check</option>
+              <option value="agreement_nda">NDA (non-disclosure)</option>
+              <option value="agreement_contract">Employment contract</option>
               <option value="certification_other">Other certification</option>
               <option value="other">Other document</option>
             </select>

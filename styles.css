@@ -2572,7 +2572,7 @@ footer code {
 
 .sr-reason {
   font-size: 13px;
-  background: var(--surface-alt, #fafafa);
+  background: var(--panel-raised, #334155);
   border: 1px solid var(--border-subtle, #eee);
   border-radius: 6px;
   padding: 8px 10px;
@@ -2590,7 +2590,7 @@ footer code {
 }
 
 .sr-claims {
-  background: var(--surface-alt, #fafafa);
+  background: var(--panel-raised, #334155);
   border: 1px solid var(--border-subtle, #eee);
   border-radius: 8px;
   padding: 8px 10px;
@@ -2688,6 +2688,48 @@ footer code {
  * and the "cancelled" overlay style for schedule blocks.
  */
 
+.settings-head { margin-bottom: 14px; }
+.settings-title { font-size: 18px; font-weight: 700; color: var(--ink, #e8edf5); margin: 0 0 2px; }
+.settings-sub { font-size: 13px; color: var(--ink-dim, #94a3b8); margin: 0; }
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 14px;
+}
+.settings-card {
+  background: var(--panel, #1e293b);
+  border: 1px solid var(--border, rgba(51,65,85,.5));
+  border-radius: 12px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.settings-card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.settings-card-title { font-weight: 600; font-size: 14.5px; color: var(--ink, #e8edf5); }
+.settings-card-desc { font-size: 12.5px; color: var(--ink-dim, #94a3b8); margin: 0; line-height: 1.5; }
+.settings-pill { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+.settings-pill.on { background: rgba(16,185,129,.15); color: #34d399; border: 1px solid rgba(16,185,129,.35); }
+.settings-pill.off { background: rgba(148,163,184,.15); color: #94a3b8; border: 1px solid rgba(148,163,184,.3); }
+.settings-pill.soon { background: rgba(59,130,246,.15); color: #60a5fa; border: 1px solid rgba(59,130,246,.35); }
+.settings-card button[disabled] { opacity: .5; cursor: not-allowed; }
+
+.cat-select {
+  appearance: none;
+  -webkit-appearance: none;
+  background: var(--panel, #1e293b);
+  color: var(--ink, #e8edf5);
+  border: 1px solid var(--border, rgba(51,65,85,.5));
+  border-radius: 8px;
+  padding: 6px 28px 6px 10px;
+  font-size: 13px;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath fill='%2394a3b8' d='M0 0l5 6 5-6z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+}
+.cat-select:focus { outline: 2px solid var(--accent, #10b981); outline-offset: 1px; }
+
 .schools-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
@@ -2705,7 +2747,8 @@ footer code {
 }
 
 .school-card {
-  background: var(--surface, #fff);
+  background: var(--panel, #1e293b);
+  color: var(--ink, #e8edf5);
   border: 1px solid var(--border, #d8d8d8);
   border-radius: 10px;
   padding: 12px 14px;
@@ -2738,7 +2781,7 @@ footer code {
   letter-spacing: .04em;
   padding: 2px 8px;
   border-radius: 999px;
-  background: var(--surface-alt, #fafafa);
+  background: var(--panel-raised, #334155);
   color: var(--ink-dim, #6b6b6b);
   border: 1px solid var(--border, #d8d8d8);
 }
@@ -2749,7 +2792,7 @@ footer code {
 .school-class-count {
   display: inline-block;
   padding: 2px 8px;
-  background: var(--surface-alt, #fafafa);
+  background: var(--panel-raised, #334155);
   border: 1px solid var(--border-subtle, #eee);
   border-radius: 999px;
   font-size: 11.5px;
@@ -2788,7 +2831,7 @@ footer code {
   border-radius: 8px;
   padding: 10px 12px;
   margin-top: 10px;
-  background: var(--surface-alt, #fafafa);
+  background: var(--panel-raised, #334155);
 }
 .schools-modal-section-head {
   display: flex;
@@ -2813,7 +2856,7 @@ footer code {
   font-size: 12.5px;
   margin-bottom: 10px;
   padding: 8px 10px;
-  background: var(--surface-alt, #fafafa);
+  background: var(--panel-raised, #334155);
   border: 1px solid var(--border-subtle, #eee);
   border-radius: 6px;
 }
@@ -3684,7 +3727,7 @@ footer code {
   gap: 8px;
   align-items: center;
   padding: 6px 8px;
-  background: var(--surface-alt, #fafafa);
+  background: var(--panel-raised, #334155);
   border: 1px solid var(--border-subtle, #eee);
   border-radius: 6px;
 }
@@ -3850,7 +3893,7 @@ footer code {
 .inv-assign-banner {
   font-size: 13px;
   padding: 10px 12px;
-  background: var(--surface-alt, #fafafa);
+  background: var(--panel-raised, #334155);
   border: 1px solid var(--border-subtle, #eee);
   border-radius: 6px;
   margin-bottom: 12px;
@@ -3896,7 +3939,7 @@ footer code {
 .inv-class-panel-row {
   margin-top: 10px;
   padding: 8px 10px;
-  background: var(--surface-alt, #fafafa);
+  background: var(--panel-raised, #334155);
   border: 1px solid var(--border-subtle, #eee);
   border-radius: 6px;
   display: flex;
