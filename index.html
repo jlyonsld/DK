@@ -106,22 +106,14 @@
         </div>
       </div>
 
-      <div class="tabs" role="tablist">
-        <button class="tab active" data-tab="home">Home</button>
-        <button class="tab" data-tab="schedule">Schedule</button>
-        <button class="tab" data-tab="templates">Templates</button>
-        <button class="tab" data-tab="classes">Classes</button>
-        <button class="tab" data-tab="schools">Schools</button>
-        <button class="tab" data-tab="teachers">Teachers</button>
-        <button class="tab" data-tab="subrequests">Sub requests</button>
-        <button class="tab" data-tab="events">Events</button>
-        <button class="tab" data-tab="inventory">Inventory</button>
-        <button class="tab" data-tab="leads">Leads</button>
-        <button class="tab" data-tab="tasks">Tasks</button>
-        <button class="tab" data-tab="curriculum">Curriculum</button>
-        <button class="tab" data-tab="reports">Reports</button>
-        <button class="tab" data-tab="users">Users</button>
-      </div>
+      <!-- ── Two-tier navigation ──────────────────────────────────────────
+           Tier 1 (#zoneBar): the 5 zones + direct items, rendered by
+           renderZoneBar() from the ZONES config in app.js.
+           Tier 2 (#subZoneBar): contextual children of the active zone,
+           rendered by renderSubZoneBar(). Generalizes the Reports sub-nav
+           pattern to the whole app. Both honor role visibility. -->
+      <div class="zones" id="zoneBar" role="tablist"></div>
+      <div class="subzones" id="subZoneBar" role="tablist" aria-label="Section"></div>
 
       <div class="sub-bar" id="subBarTemplates">
         <input id="search" class="search" type="search" placeholder="Search templates… (title, body, tags, notes)" autocomplete="off" />
@@ -176,9 +168,8 @@
           <div class="tab-head">
             <div class="results-meta" id="resultsMeta"></div>
             <div style="display:flex; gap:8px; align-items:center;">
-              <button class="btn small" id="manageCategoriesBtn">⚙ Manage categories</button>
-              <button class="btn small" id="manageInfographicsBtn">🖼 Manage infographics</button>
-              <button class="btn small" id="manageMailchimpBtn">⚙ Mailchimp</button>
+              <!-- Manage categories / infographics / Mailchimp now live in the
+                   Comms zone's tier-2 row (see ZONES in app.js). -->
               <button class="btn primary small" id="newTemplateBtn">＋ New template</button>
             </div>
           </div>
@@ -1780,46 +1771,66 @@ workstreams:
         <h3>Tools</h3>
         <button class="btn ghost small" id="mobileToolsClose" type="button">✕</button>
       </div>
+      <!-- Grouped by the same zones as the desktop tier-1 nav, so mobile and
+           desktop express one mental model. Items keep data-tab + the existing
+           .mobile-tools-item wiring; group headers are non-interactive. Each
+           header row hides itself if the role can see none of its items
+           (handled in applyRoleVisibility). -->
       <div class="mobile-tools-list">
-        <button class="mobile-tools-item" data-tab="templates" type="button">
-          <span class="mobile-tools-ico" aria-hidden="true">📝</span>
-          <span>Templates</span>
+        <div class="mobile-tools-group" data-tools-group="programs">Programs</div>
+        <button class="mobile-tools-item" data-tab="classes" type="button">
+          <span class="mobile-tools-ico" aria-hidden="true">🎭</span>
+          <span>Classes</span>
         </button>
         <button class="mobile-tools-item" data-tab="schools" type="button">
           <span class="mobile-tools-ico" aria-hidden="true">🏫</span>
           <span>Schools</span>
         </button>
-        <button class="mobile-tools-item" data-tab="subrequests" type="button">
-          <span class="mobile-tools-ico" aria-hidden="true">🔄</span>
-          <span>Sub requests</span>
-        </button>
         <button class="mobile-tools-item" data-tab="events" type="button">
           <span class="mobile-tools-ico" aria-hidden="true">★</span>
           <span>Events</span>
-        </button>
-        <button class="mobile-tools-item" data-tab="inventory" type="button">
-          <span class="mobile-tools-ico" aria-hidden="true">📦</span>
-          <span>Inventory</span>
-        </button>
-        <button class="mobile-tools-item" data-tab="leads" type="button">
-          <span class="mobile-tools-ico" aria-hidden="true">📥</span>
-          <span>Leads</span>
-        </button>
-        <button class="mobile-tools-item" data-tab="tasks" type="button">
-          <span class="mobile-tools-ico" aria-hidden="true">✓</span>
-          <span>Tasks</span>
         </button>
         <button class="mobile-tools-item" data-tab="curriculum" type="button">
           <span class="mobile-tools-ico" aria-hidden="true">📚</span>
           <span>Curriculum</span>
         </button>
-        <button class="mobile-tools-item" data-tab="reports" type="button">
-          <span class="mobile-tools-ico" aria-hidden="true">📊</span>
-          <span>Reports</span>
+        <button class="mobile-tools-item" data-tab="inventory" type="button">
+          <span class="mobile-tools-ico" aria-hidden="true">📦</span>
+          <span>Inventory</span>
+        </button>
+
+        <div class="mobile-tools-group" data-tools-group="people">People</div>
+        <button class="mobile-tools-item" data-tab="teachers" type="button">
+          <span class="mobile-tools-ico" aria-hidden="true">👥</span>
+          <span>Teachers</span>
+        </button>
+        <button class="mobile-tools-item" data-tab="subrequests" type="button">
+          <span class="mobile-tools-ico" aria-hidden="true">🔄</span>
+          <span>Sub requests</span>
         </button>
         <button class="mobile-tools-item" data-tab="users" type="button">
           <span class="mobile-tools-ico" aria-hidden="true">🛡</span>
-          <span>Users</span>
+          <span>Users &amp; access</span>
+        </button>
+
+        <div class="mobile-tools-group" data-tools-group="comms">Comms</div>
+        <button class="mobile-tools-item" data-tab="leads" type="button">
+          <span class="mobile-tools-ico" aria-hidden="true">📥</span>
+          <span>Leads</span>
+        </button>
+        <button class="mobile-tools-item" data-tab="templates" type="button">
+          <span class="mobile-tools-ico" aria-hidden="true">📝</span>
+          <span>Templates</span>
+        </button>
+
+        <div class="mobile-tools-group" data-tools-group="more">Tasks &amp; reports</div>
+        <button class="mobile-tools-item" data-tab="tasks" type="button">
+          <span class="mobile-tools-ico" aria-hidden="true">✓</span>
+          <span>Tasks</span>
+        </button>
+        <button class="mobile-tools-item" data-tab="reports" type="button">
+          <span class="mobile-tools-ico" aria-hidden="true">📊</span>
+          <span>Reports</span>
         </button>
       </div>
     </div>

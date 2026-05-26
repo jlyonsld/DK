@@ -253,6 +253,146 @@
     return (ROLE_TAB_VISIBILITY[role] || new Set()).has(tab);
   }
 
+  /* ═════════════ Two-tier zone navigation ═════════════
+   * Tier 1 = zones (#zoneBar); tier 2 = the active zone's children
+   * (#subZoneBar). Children are either a tab destination (route via go),
+   * a report view (sets rptState.active + go("reports")), or an action
+   * (open a modal). This generalizes the Reports sub-nav pattern to the
+   * whole app. Role visibility reuses canSeeTab(): a grouped zone shows
+   * iff at least one of its tab/report children is visible; "manage"
+   * action children are gated by perm/superOnly and never make a zone
+   * appear on their own. canSeeTab() / ROLE_TAB_VISIBILITY remains the
+   * single source of truth for per-destination access.
+   */
+  const ZONES = [
+    { id: "home",     label: "Home",     tab: "home",
+      desc: "Your overview — what needs attention today." },
+    { id: "schedule", label: "Schedule", tab: "schedule",
+      desc: "Day · Week · Month — your classes and closures." },
+    { id: "programs", label: "Programs", children: [
+        { tab: "classes",    label: "Classes" },
+        { tab: "schools",    label: "Schools" },
+        { tab: "events",     label: "Events" },
+        { tab: "curriculum", label: "Curriculum" },
+        { tab: "inventory",  label: "Inventory" },
+    ] },
+    { id: "people",   label: "People", children: [
+        { tab: "teachers",    label: "Teachers" },
+        { tab: "subrequests", label: "Sub requests" },
+        { tab: "users",       label: "Users & access" },
+    ] },
+    { id: "comms",    label: "Comms", children: [
+        { tab: "leads",     label: "Leads" },
+        { tab: "templates", label: "Templates" },
+        { action: () => openCategoriesModal(),   label: "Categories",   manage: true, perm: "edit_categories" },
+        { action: () => openInfographicsModal(), label: "Infographics", manage: true, perm: "edit_infographics" },
+        { action: () => openMailchimpModal(),    label: "Mailchimp",    manage: true, superOnly: true },
+    ] },
+    { id: "tasks",    label: "Tasks",   tab: "tasks",
+      desc: "Your personal work queue." },
+    { id: "reports",  label: "Reports", reportZone: true, children: [
+        { report: "attendance",    label: "Attendance" },
+        { report: "teacher_hours", label: "Teacher hours" },
+        { report: "par_funnel",    label: "PAR funnel" },
+        { report: "off_plate",     label: "Off your plate" },
+    ] },
+  ];
+
+  // Active zone + per-zone memory of the last tab visited (nicer re-entry).
+  let activeZone = "home";
+  const zoneLastTab = {};
+
+  function zoneForTab(tab) {
+    return ZONES.find((z) => z.tab === tab || (z.children && z.children.some((c) => c.tab === tab)))
+      || (tab === "reports" ? ZONES.find((z) => z.reportZone) : null);
+  }
+  function canSeeZone(z) {
+    if (z.tab) return canSeeTab(z.tab);
+    if (z.reportZone) return canSeeTab("reports");
+    return (z.children || []).some((c) => c.tab && canSeeTab(c.tab));
+  }
+  function firstVisibleTabOfZone(z) {
+    if (z.tab) return z.tab;
+    if (z.reportZone) return "reports";
+    const kid = (z.children || []).find((c) => c.tab && canSeeTab(c.tab));
+    return kid ? kid.tab : null;
+  }
+
+  function renderZoneBar() {
+    const bar = $("#zoneBar");
+    if (!bar) return;
+    bar.innerHTML = "";
+    ZONES.forEach((z) => {
+      if (!canSeeZone(z)) return;
+      const btn = document.createElement("button");
+      btn.className = "zone" + (z.id === activeZone ? " active" : "");
+      btn.dataset.zone = z.id;
+      btn.setAttribute("role", "tab");
+      const grouped = !!z.children;
+      btn.innerHTML = escapeHtml(z.label) + (grouped ? " <span class='caret' aria-hidden='true'>▾</span>" : "");
+      btn.onclick = () => {
+        if (z.tab) { go(z.tab); return; }
+        const remembered = zoneLastTab[z.id];
+        const target = (remembered && canSeeTab(remembered)) ? remembered : firstVisibleTabOfZone(z);
+        if (target) { go(target); }
+        else { activeZone = z.id; renderZoneBar(); renderSubZoneBar(); }
+      };
+      bar.appendChild(btn);
+    });
+  }
+
+  function renderSubZoneBar() {
+    const bar = $("#subZoneBar");
+    if (!bar) return;
+    bar.innerHTML = "";
+    const z = ZONES.find((x) => x.id === activeZone);
+    if (!z) return;
+
+    // Direct zone (Home / Schedule / Tasks): one-line descriptor, no children.
+    if (z.tab && !z.children) {
+      const d = document.createElement("div");
+      d.className = "ctx-direct";
+      d.innerHTML = "<b>" + escapeHtml(z.label) + "</b> — " + escapeHtml(z.desc || "");
+      bar.appendChild(d);
+      return;
+    }
+
+    const lab = document.createElement("span");
+    lab.className = "ctx-label";
+    lab.textContent = z.label;
+    bar.appendChild(lab);
+
+    let manageHeaderAdded = false;
+    (z.children || []).forEach((c) => {
+      if (c.tab && !canSeeTab(c.tab)) return;
+      if (c.report && !canSeeTab("reports")) return;
+      if (c.action) {
+        if (c.superOnly && !isSuperAdmin()) return;
+        if (c.perm && !hasPerm(c.perm)) return;
+      }
+      if (c.manage && !manageHeaderAdded) {
+        manageHeaderAdded = true;
+        const m = document.createElement("span");
+        m.className = "ctx-label";
+        m.textContent = "Manage";
+        bar.appendChild(m);
+      }
+      const b = document.createElement("button");
+      b.className = "subtab" + (c.manage ? " manage" : "");
+      b.setAttribute("role", "tab");
+      b.textContent = c.label;
+      if (c.tab && state.router === c.tab) b.classList.add("active");
+      if (c.report && z.reportZone && state.router === "reports"
+          && (state.rptState.active || "attendance") === c.report) b.classList.add("active");
+      b.onclick = () => {
+        if (c.tab) { go(c.tab); }
+        else if (c.report) { state.rptState.active = c.report; go("reports"); renderReportsTab(); }
+        else if (c.action) { c.action(); }
+      };
+      bar.appendChild(b);
+    });
+  }
+
   // Friendly role label
   function roleLabel(r) {
     return ({
@@ -2342,7 +2482,14 @@
     // Route guard: if the role can't see this tab, fall back to home.
     if (!canSeeTab(tab)) tab = "home";
     state.router = tab;
-    $$(".tab, .mtab[data-tab], .mobile-tools-item").forEach((t) => t.classList.toggle("active", t.dataset.tab === tab));
+    // Active zone follows the destination; remember it for nicer re-entry.
+    const z = zoneForTab(tab);
+    activeZone = z ? z.id : "home";
+    if (z) zoneLastTab[z.id] = tab;
+    renderZoneBar();
+    renderSubZoneBar();
+    // Mobile bottom nav + Tools-sheet items still mirror the active tab.
+    $$(".mtab[data-tab], .mobile-tools-item").forEach((t) => t.classList.toggle("active", t.dataset.tab === tab));
     $$(".tab-panel").forEach((p) => p.style.display = p.dataset.tab === tab ? "" : "none");
     $("#subBarTemplates").classList.toggle("hidden", tab !== "templates");
     const layout = document.querySelector(".layout");
@@ -2357,9 +2504,23 @@
    * once on boot. Re-render of tab/page content lives in renderAll().
    */
   function applyRoleVisibility() {
-    // Tab buttons (top bar + mobile bottom nav + mobile Tools sheet items)
-    $$(".tab, .mtab[data-tab], .mobile-tools-item").forEach((t) => {
+    // Desktop tier-1 / tier-2 nav — both render role-filtered internally.
+    renderZoneBar();
+    renderSubZoneBar();
+
+    // Mobile bottom nav + mobile Tools-sheet items: hide unreachable tabs.
+    $$(".mtab[data-tab], .mobile-tools-item").forEach((t) => {
       t.style.display = canSeeTab(t.dataset.tab) ? "" : "none";
+    });
+    // Mobile Tools-sheet group headers: hide a header when none of the items
+    // beneath it (up to the next header) are visible for this role.
+    $$(".mobile-tools-group").forEach((h) => {
+      let n = h.nextElementSibling, anyVisible = false;
+      while (n && n.classList.contains("mobile-tools-item")) {
+        if (n.style.display !== "none") anyVisible = true;
+        n = n.nextElementSibling;
+      }
+      h.classList.toggle("hidden", !anyVisible);
     });
 
     // Hide the Tools center slot when the role has no visible tool tabs.
@@ -11728,8 +11889,8 @@
   /* ═════════════ Event wiring ═════════════ */
 
   function wireEvents() {
-    // Tabs
-    $$(".tab").forEach((t) => t.onclick = () => go(t.dataset.tab));
+    // Tier-1 zone buttons get their click handlers in renderZoneBar(); tier-2
+    // children in renderSubZoneBar(). Nothing to wire here for the top nav.
 
     // Mobile bottom nav — route tabs that carry data-tab directly.
     $$(".mtab[data-tab]").forEach((t) => t.onclick = () => go(t.dataset.tab));

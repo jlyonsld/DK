@@ -394,6 +394,71 @@ header {
 .tab:hover { color: var(--accent); }
 .tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
 
+/* ── Two-tier navigation ──────────────────────────────────────────────
+   Tier 1: zones (.zones / .zone). Tier 2: contextual children
+   (.subzones / .subtab). Replaces the flat .tabs row. */
+.zones { display: flex; gap: 2px; padding: 0 18px; flex-wrap: wrap; }
+.zone {
+  position: relative;
+  padding: 13px 15px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ink-dim);
+  cursor: pointer;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: color .12s;
+}
+.zone:hover { color: var(--accent); }
+.zone.active { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
+.zone .caret { font-size: 9px; opacity: .55; transform: translateY(1px); }
+
+.subzones {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 10px 22px;
+  min-height: 44px;
+  background: rgba(2, 6, 23, 0.4);
+  border-top: 1px solid var(--border);
+}
+.subzones:empty { display: none; }
+.subzones .ctx-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .12em;
+  color: var(--ink-mute);
+  margin-right: 4px;
+}
+.subzones .ctx-label + .ctx-label { margin-left: 6px; }
+.subtab {
+  padding: 6px 13px;
+  font-size: 12.5px;
+  border-radius: var(--radius-chip);
+  color: var(--ink-soft);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all .12s;
+}
+.subtab:hover { border-color: var(--accent-border); color: var(--ink); }
+.subtab.active { background: var(--accent-soft); border-color: var(--accent-border); color: var(--accent-ink); font-weight: 600; }
+.subtab.manage { color: var(--ink-dim); font-style: italic; }
+.ctx-direct { font-size: 13px; color: var(--ink-mute); }
+.ctx-direct b { color: var(--ink-soft); font-weight: 600; }
+
+/* Reports' four views are promoted into tier-2, so the in-tab sub-nav that
+   renderReportsTab() still builds is hidden to avoid a duplicate row. */
+#reportSubNav { display: none !important; }
+
 .sub-bar {
   display: flex;
   gap: 12px;
@@ -2783,8 +2848,8 @@ footer code {
 .mobile-tools-overlay { display: none; }
 
 @media (max-width: 720px) {
-  /* Replace the top tabs with the bottom bar */
-  .tabs { display: none !important; }
+  /* Replace the top tabs (now the two-tier zone bars) with the bottom bar */
+  .tabs, .zones, .subzones { display: none !important; }
 
   /* Clear space so page content isn't hidden under the fixed bar */
   body { padding-bottom: calc(76px + env(safe-area-inset-bottom)); }
@@ -2907,6 +2972,17 @@ footer code {
   .mobile-tools-item .mobile-tools-ico { font-size: 18px; width: 24px; text-align: center; }
   .mobile-tools-item:hover  { background: var(--panel-raised); }
   .mobile-tools-item.active { background: var(--accent-soft); color: var(--accent); }
+  /* Zone group headers inside the Tools sheet (mirror desktop tier-1). */
+  .mobile-tools-group {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: .12em;
+    color: var(--ink-mute);
+    padding: 14px 12px 6px;
+    margin-top: 4px;
+  }
+  .mobile-tools-group:first-child { margin-top: 0; }
+  .mobile-tools-group.hidden { display: none; }
 }
 
 /* ─── Curriculum tab (T5a) ─── */
