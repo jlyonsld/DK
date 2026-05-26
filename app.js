@@ -841,6 +841,26 @@
       "Click it to finish signing in — this tab will pick up the session automatically.";
   });
 
+  // Google OAuth sign-in. Redirects the whole page out to Google, then back to
+  // this origin (which must be in the Supabase redirect allow-list). On return,
+  // detectSessionInUrl picks up the session and onAuthStateChange runs bootApp().
+  // Same email as PAR org owner → par-identity-proxy auto-promotes the role.
+  $("#loginGoogle").addEventListener("click", async () => {
+    const errEl = $("#loginError");
+    errEl.classList.remove("visible");
+    showLoader(true);
+    const { error } = await sb.auth.signInWithOAuth({
+      provider: "google",
+      options: { redirectTo: window.location.origin },
+    });
+    // On success the browser navigates to Google before reaching here.
+    if (error) {
+      showLoader(false);
+      errEl.textContent = error.message || "Couldn't start Google sign-in. Try again, or use the email sign-in link.";
+      errEl.classList.add("visible");
+    }
+  });
+
   /* ═════════════ Data loading ═════════════ */
 
   async function reloadAll() {
