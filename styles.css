@@ -7,6 +7,7 @@
    ───────────────────────────────────────────────────────────── */
 
 :root {
+  color-scheme: dark;
   /* ── PAR slate palette ────────────── */
   --slate-950: #020617;
   --slate-900: #0f172a;
@@ -82,6 +83,14 @@ html, body { margin: 0; padding: 0; }
    every var()-driven surface flip automatically. Dark mode is the
    default (no [data-theme] attribute) and is left untouched. */
 [data-theme="light"] {
+  color-scheme: light;
+  /* The raw slate palette is used ONLY as surface backgrounds in this codebase
+     (verified: never as text or border color), so remapping these three flips
+     every hardcoded-dark surface — form inputs, dropdowns, modal headers,
+     thumbnails — to light in one shot. */
+  --slate-900: #ffffff;
+  --slate-850: #f8fafc;
+  --slate-800: #f1f5f9;
   --bg-gradient: linear-gradient(135deg, #f8fafc 0%, #eef2f7 55%, #e7f5ee 100%);
   --panel: #ffffff;
   --panel-hover: #f1f5f9;
