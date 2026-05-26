@@ -107,6 +107,13 @@ html, body { margin: 0; padding: 0; }
   background: #eef2f7;
 }
 
+/* Light-mode nav + table surfaces hardcode dark backgrounds, so they need
+   explicit light overrides (everything else flips via the tokens). The
+   modal/loader scrims and the curriculum media viewer stay dark on purpose. */
+[data-theme="light"] header { background: rgba(255, 255, 255, 0.88); }
+[data-theme="light"] .subzones { background: rgba(241, 245, 249, 0.75); }
+[data-theme="light"] .data-table tr:hover td { background: rgba(15, 23, 42, 0.04); }
+
 /* Theme switch (header) */
 .theme-switch { background: none; border: none; padding: 0; cursor: pointer; display: inline-flex; align-items: center; }
 .theme-switch-track {
