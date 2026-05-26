@@ -111,8 +111,12 @@
     weightLedger: [],
     dkConfig: null,
     latestSyncLog: null,
-    tState: { query: "", category: "all", filled: {} },
-    igState: { query: "", tag: "all" },
+    // T18: `status` filter ∈ {all, draft, published, archived}. Defaults to
+    // "all" so admins see everything in the manage views; the picker contexts
+    // (leads reply modal, Templates tab sidebar) apply their own hard
+    // `published` filter regardless of this.
+    tState: { query: "", category: "all", status: "all", filled: {} },
+    igState: { query: "", tag: "all", status: "all" },
     cState: { showTest: false, openClassId: null },
     curState: { typeFilter: "all", showArchived: false, editingId: null },
     // Schedule state: `anchor` is the currently-focused date (ISO); mode is
@@ -236,6 +240,27 @@
     if (revoked.includes(perm)) return false;
     if (granted.includes(perm)) return true;
     return (PERM_BUNDLES[role] || []).includes(perm);
+  }
+
+  // T18: shared status helpers for templates + infographics. Both tables
+  // share the `content_status` enum (draft / published / archived). The
+  // pill is a non-interactive visual indicator; toggle buttons next to it
+  // do the actual status mutation via setTemplateStatus / setInfographicStatus.
+  const CONTENT_STATUS_LABEL = { draft: "Draft", published: "Published", archived: "Archived" };
+  function statusPillHtml(status) {
+    const s = status || "draft";
+    const label = CONTENT_STATUS_LABEL[s] || s;
+    return `<span class="status-pill status-${escapeHtml(s)}">${escapeHtml(label)}</span>`;
+  }
+  // What the quick-toggle button does next. Draft → Publish; Published →
+  // Unpublish (back to draft); Archived → Restore (back to draft). Archive
+  // is a separate explicit action from the edit modal (handled in
+  // saveTemplate / saveInfographic flow via the status dropdown there).
+  function nextStatusFor(status) {
+    if (status === "draft")     return { to: "published", label: "Publish",   icon: "✓"  };
+    if (status === "published") return { to: "draft",     label: "Unpublish", icon: "↩" };
+    if (status === "archived")  return { to: "draft",     label: "Restore",   icon: "↻" };
+    return { to: "published", label: "Publish", icon: "✓" };
   }
 
   // Which tabs each role is allowed to see. (Role Management tab doesn't
@@ -3380,6 +3405,41 @@
       chip.onclick = () => { state.tState.category = cat.id; renderCategoryChips(); renderTemplates(); };
       wrap.appendChild(chip);
     });
+    renderTemplateStatusChips();
+  }
+
+  // T18: per-status filter chips, rendered next to the category chips.
+  // Drafts get a count badge so Sharon can see at a glance how many rows
+  // are still awaiting review. Super_admin also gets the "Publish all
+  // drafts" escape hatch (visible only when at least one draft exists).
+  function renderTemplateStatusChips() {
+    const wrap = $("#templateStatusChips");
+    if (!wrap) return;
+    const counts = {
+      all:       state.templates.length,
+      draft:     state.templates.filter((t) => (t.status || "draft") === "draft").length,
+      published: state.templates.filter((t) => t.status === "published").length,
+      archived:  state.templates.filter((t) => t.status === "archived").length
+    };
+    const groups = [
+      { k: "all",       label: "All" },
+      { k: "draft",     label: "Drafts" },
+      { k: "published", label: "Published" },
+      { k: "archived",  label: "Archived" }
+    ];
+    wrap.innerHTML = "";
+    groups.forEach((g) => {
+      const chip = document.createElement("button");
+      chip.className = "chip" + (state.tState.status === g.k ? " active" : "");
+      chip.innerHTML = `${escapeHtml(g.label)} <span class="chip-count">${counts[g.k]}</span>`;
+      chip.onclick = () => { state.tState.status = g.k; renderTemplateStatusChips(); renderTemplates(); };
+      wrap.appendChild(chip);
+    });
+    const bulkBtn = $("#publishAllDraftTemplatesBtn");
+    if (bulkBtn) {
+      bulkBtn.style.display = (isSuperAdmin() && counts.draft > 0) ? "" : "none";
+      bulkBtn.textContent = `↑ Publish all ${counts.draft} draft${counts.draft === 1 ? "" : "s"}`;
+    }
   }
 
   function matchesQuery(t, q) {
@@ -3398,6 +3458,10 @@
     const metaEl  = $("#resultsMeta");
     const filtered = state.templates.filter((t) => {
       if (state.tState.category !== "all" && t.category_id !== state.tState.category) return false;
+      // T18: status filter. "all" passes everything; any other value matches
+      // exactly (rows with NULL status read as 'draft' per the migration's
+      // backfill — but the default makes that unreachable post-migration).
+      if (state.tState.status !== "all" && (t.status || "draft") !== state.tState.status) return false;
       return matchesQuery(t, state.tState.query);
     });
     metaEl.textContent = filtered.length + (filtered.length === 1 ? " template" : " templates");
@@ -3418,17 +3482,24 @@
     const tagLine = (tpl.tags || []).slice(0, 4).map((t) => "#" + t).join(" ");
 
     const showEditBtns = hasPerm("edit_templates");
+    // T18: status pill + quick-toggle. Pill is non-interactive; toggle
+    // button cycles draft↔published (and archived→draft) without opening
+    // the edit modal so Sharon can review a batch fast.
+    const status = tpl.status || "draft";
+    const tog = nextStatusFor(status);
     card.innerHTML = `
       <div class="card-head">
         <div style="flex:1">
           <h3 class="card-title"></h3>
           <div class="card-meta">
             <span class="badge"></span>
+            ${statusPillHtml(status)}
             <span class="tag-line"></span>
           </div>
         </div>
         <div class="card-actions-head">
           ${showEditBtns ? `
+            <button class="btn small ghost" data-act="status-toggle" title="${escapeHtml(tog.label)}">${tog.icon}</button>
             <button class="btn small ghost" data-act="edit" title="Edit template">✎</button>
             <button class="btn small ghost" data-act="dup" title="Duplicate template">⎘</button>
           ` : ""}
@@ -3444,6 +3515,7 @@
     if (showEditBtns) {
       $('[data-act="edit"]', card).onclick = (e) => { e.stopPropagation(); openTemplateEditor(tpl.id); };
       $('[data-act="dup"]',  card).onclick = (e) => { e.stopPropagation(); duplicateTemplate(tpl.id); };
+      $('[data-act="status-toggle"]', card).onclick = (e) => { e.stopPropagation(); setTemplateStatus(tpl.id, tog.to); };
     }
     $(".card-head", card).onclick = () => {
       const willOpen = !card.classList.contains("open");
@@ -3747,7 +3819,10 @@
       variables: src.variables || [],
       notes: src.notes,
       tags: src.tags || [],
-      images: src.images || []
+      images: src.images || [],
+      // T18: a duplicated row hasn't been reviewed by anyone yet — force
+      // draft regardless of the source row's status.
+      status: "draft"
     };
     showLoader(true);
     const { error } = await sb.from("templates").insert(payload);
@@ -3756,6 +3831,50 @@
     await reloadAll();
     renderAll();
     showToast("Duplicated — open the copy to edit", "success");
+  }
+
+  // T18: status mutation. Stamps audit fields when publishing; clears them
+  // on unpublish / archive / restore so re-publishing later writes a fresh
+  // timestamp + reviewer.
+  async function setTemplateStatus(id, status) {
+    const payload = { status };
+    if (status === "published") {
+      payload.published_at = new Date().toISOString();
+      payload.published_by = state.profile ? state.profile.id : null;
+    } else {
+      payload.published_at = null;
+      payload.published_by = null;
+    }
+    showLoader(true);
+    const { error } = await sb.from("templates").update(payload).eq("id", id);
+    showLoader(false);
+    if (error) { showToast(error.message, "error"); return; }
+    await reloadAll();
+    renderAll();
+    showToast(`Template ${status}`, "success");
+  }
+
+  // T18: super_admin escape hatch for the post-T18-deploy backfill case.
+  // Flips every draft to published in one round trip + stamps audit fields.
+  // Refuses if there are no drafts (button is auto-hidden anyway).
+  async function publishAllDraftTemplates() {
+    const drafts = state.templates.filter((t) => (t.status || "draft") === "draft");
+    if (drafts.length === 0) { showToast("No drafts to publish", "ok"); return; }
+    if (!confirm(`Publish all ${drafts.length} draft template${drafts.length === 1 ? "" : "s"}? This skips per-row review.`)) return;
+    showLoader(true);
+    const { error } = await sb
+      .from("templates")
+      .update({
+        status: "published",
+        published_at: new Date().toISOString(),
+        published_by: state.profile ? state.profile.id : null
+      })
+      .eq("status", "draft");
+    showLoader(false);
+    if (error) { showToast(error.message, "error"); return; }
+    await reloadAll();
+    renderAll();
+    showToast(`Published ${drafts.length} template${drafts.length === 1 ? "" : "s"}`, "success");
   }
 
   /* ═════════════ CLASSES ═════════════ */
@@ -8413,9 +8532,14 @@
     const tagRow = $("#lead_reply_ig_tags");
     if (!strip || !tagRow) return;
 
+    // T18: picker context — drafts and archived rows are hidden entirely so
+    // managers composing a reply can't attach unreviewed images. Tag chips
+    // and the empty-state message reflect the published-only set.
+    const published = state.infographics.filter((i) => i.status === "published");
+
     // Tag chips — reuses the same idea as renderInfographicsSidebar()
     const allTags = new Set();
-    state.infographics.forEach((i) => (i.tags || []).forEach((t) => allTags.add(t)));
+    published.forEach((i) => (i.tags || []).forEach((t) => allTags.add(t)));
     tagRow.innerHTML = "";
     [{ k: "all", label: "All" }].concat([...allTags].sort().map((t) => ({ k: t, label: "#" + t })))
       .forEach((t) => {
@@ -8428,7 +8552,7 @@
       });
 
     const q = (state.lState.igQuery || "").toLowerCase();
-    const filtered = state.infographics.filter((i) => {
+    const filtered = published.filter((i) => {
       if (state.lState.igTag !== "all" && !(i.tags || []).includes(state.lState.igTag)) return false;
       if (!q) return true;
       return (i.name || "").toLowerCase().includes(q)
@@ -8437,8 +8561,8 @@
 
     if (filtered.length === 0) {
       strip.innerHTML = `<div class="lead-reply-ig-empty">${
-        state.infographics.length === 0
-          ? "No infographics yet. Templates → 🖼 Manage infographics."
+        published.length === 0
+          ? "No published infographics. Templates → 🖼 Manage infographics → publish a draft."
           : "No matches — clear the search/tag filter."
       }</div>`;
       return;
@@ -8573,10 +8697,13 @@
       ].filter(Boolean).join(" · ")}</div>
     `;
 
-    // Template picker — group by category for readability
+    // Template picker — group by category for readability.
+    // T18: picker context — only published templates appear here; drafts and
+    // archived are hidden entirely so an unreviewed template can't be sent.
     const sel = $("#lead_reply_template_select");
     const byCat = {};
     for (const t of state.templates) {
+      if (t.status !== "published") continue;
       const c = state.categories.find((x) => x.id === t.category_id);
       const key = c ? c.name : "Uncategorized";
       (byCat[key] = byCat[key] || []).push(t);
@@ -11674,10 +11801,15 @@
   /* ═════════════ INFOGRAPHICS sidebar ═════════════ */
 
   function renderInfographicsSidebar() {
-    $("#igCount").textContent = state.infographics.length;
+    // T18: sidebar is a picker context — drafts and archived rows are
+    // hidden entirely so a manager composing a reply can't pick
+    // unreviewed copy. Count + tag chips reflect the published-only
+    // visible set, not the total table.
+    const published = state.infographics.filter((i) => i.status === "published");
+    $("#igCount").textContent = published.length;
 
     const allTags = new Set();
-    state.infographics.forEach((i) => (i.tags || []).forEach((t) => allTags.add(t)));
+    published.forEach((i) => (i.tags || []).forEach((t) => allTags.add(t)));
     const tagRow = $("#igTagRow");
     tagRow.innerHTML = "";
     [{ k: "all", label: "All" }].concat([...allTags].sort().map((t) => ({ k: t, label: "#" + t }))).forEach((t) => {
@@ -11689,7 +11821,7 @@
     });
 
     const q = state.igState.query.toLowerCase();
-    const filtered = state.infographics.filter((i) => {
+    const filtered = published.filter((i) => {
       if (state.igState.tag !== "all" && !(i.tags || []).includes(state.igState.tag)) return false;
       if (!q) return true;
       return (i.name || "").toLowerCase().includes(q) || (i.tags || []).some((t) => t.toLowerCase().includes(q));
@@ -11758,29 +11890,116 @@
     const el = $("#infographicsTable");
     $("#igManageMeta").textContent = state.infographics.length + " image" + (state.infographics.length === 1 ? "" : "s");
     const showEdit = hasPerm("edit_infographics");
-    const colCount = 4 + (showEdit ? 1 : 0);
-    const rows = state.infographics.map((i) => {
+    // T18: show all statuses with a filter chip row above the table so admins
+    // can review without losing track of what's still in draft. The chip row
+    // lives in #infographicsStatusChips (added to index.html).
+    renderInfographicStatusChips();
+    const filtered = state.infographics.filter((i) => {
+      if (state.igState.status === "all") return true;
+      return (i.status || "draft") === state.igState.status;
+    });
+    // Status column always renders (5 cols base + 1 if showEdit).
+    const colCount = 5 + (showEdit ? 1 : 0);
+    const rows = filtered.map((i) => {
       const src = i.storage_path ? publicUrlFor(i.storage_path) : i.external_url;
       const srcType = i.storage_path ? "Uploaded" : (i.external_url ? "External" : "—");
+      const status = i.status || "draft";
+      const tog = nextStatusFor(status);
       return `
         <tr>
           <td class="thumb-cell">${src ? `<img src="${escapeHtml(src)}" alt="" />` : '<div class="no-thumb">🖼</div>'}</td>
           <td><b>${escapeHtml(i.name)}</b>${i.notes ? `<div style="font-size:11.5px;color:var(--ink-dim)">${escapeHtml(i.notes)}</div>` : ""}</td>
           <td>${(i.tags || []).map((t) => `<span class="type-badge type-workshop">#${escapeHtml(t)}</span>`).join(" ")}</td>
           <td>${srcType}</td>
-          ${showEdit ? `<td class="row-actions"><button class="btn small ghost" data-act="edit-ig" data-id="${escapeHtml(i.id)}">Edit</button></td>` : ""}
+          <td>${statusPillHtml(status)}</td>
+          ${showEdit ? `<td class="row-actions">
+            <button class="btn small ghost" data-act="ig-status-toggle" data-id="${escapeHtml(i.id)}" data-to="${escapeHtml(tog.to)}" title="${escapeHtml(tog.label)}">${tog.icon} ${escapeHtml(tog.label)}</button>
+            <button class="btn small ghost" data-act="edit-ig" data-id="${escapeHtml(i.id)}">Edit</button>
+          </td>` : ""}
         </tr>
       `;
     }).join("");
     el.innerHTML = `
       <table>
-        <thead><tr><th>Preview</th><th>Name</th><th>Tags</th><th>Source</th>${showEdit ? "<th></th>" : ""}</tr></thead>
-        <tbody>${rows || `<tr><td colspan="${colCount}" style="text-align:center;color:var(--ink-dim);padding:24px">No images yet${showEdit ? " — click <b>＋ Upload / add image</b>." : "."}</td></tr>`}</tbody>
+        <thead><tr><th>Preview</th><th>Name</th><th>Tags</th><th>Source</th><th>Status</th>${showEdit ? "<th></th>" : ""}</tr></thead>
+        <tbody>${rows || `<tr><td colspan="${colCount}" style="text-align:center;color:var(--ink-dim);padding:24px">No images${state.igState.status === "all" ? " yet" : " in this status"}${showEdit && state.igState.status === "all" ? " — click <b>＋ Upload / add image</b>." : "."}</td></tr>`}</tbody>
       </table>
     `;
     if (showEdit) {
       $$('[data-act="edit-ig"]', el).forEach((btn) => btn.onclick = () => openIgEditor(btn.dataset.id));
+      $$('[data-act="ig-status-toggle"]', el).forEach((btn) => btn.onclick = () => setInfographicStatus(btn.dataset.id, btn.dataset.to));
     }
+  }
+
+  // T18: per-status filter chips for the Manage infographics modal. Mirrors
+  // renderTemplateStatusChips. The bulk-publish button is super_admin-only
+  // and only renders when at least one draft exists.
+  function renderInfographicStatusChips() {
+    const wrap = $("#infographicsStatusChips");
+    if (!wrap) return;
+    const counts = {
+      all:       state.infographics.length,
+      draft:     state.infographics.filter((i) => (i.status || "draft") === "draft").length,
+      published: state.infographics.filter((i) => i.status === "published").length,
+      archived:  state.infographics.filter((i) => i.status === "archived").length
+    };
+    const groups = [
+      { k: "all",       label: "All" },
+      { k: "draft",     label: "Drafts" },
+      { k: "published", label: "Published" },
+      { k: "archived",  label: "Archived" }
+    ];
+    wrap.innerHTML = "";
+    groups.forEach((g) => {
+      const chip = document.createElement("button");
+      chip.className = "chip" + (state.igState.status === g.k ? " active" : "");
+      chip.innerHTML = `${escapeHtml(g.label)} <span class="chip-count">${counts[g.k]}</span>`;
+      chip.onclick = () => { state.igState.status = g.k; renderInfographicsTab(); };
+      wrap.appendChild(chip);
+    });
+    const bulkBtn = $("#publishAllDraftInfographicsBtn");
+    if (bulkBtn) {
+      bulkBtn.style.display = (isSuperAdmin() && counts.draft > 0) ? "" : "none";
+      bulkBtn.textContent = `↑ Publish all ${counts.draft} draft${counts.draft === 1 ? "" : "s"}`;
+    }
+  }
+
+  async function setInfographicStatus(id, status) {
+    const payload = { status };
+    if (status === "published") {
+      payload.published_at = new Date().toISOString();
+      payload.published_by = state.profile ? state.profile.id : null;
+    } else {
+      payload.published_at = null;
+      payload.published_by = null;
+    }
+    showLoader(true);
+    const { error } = await sb.from("infographics").update(payload).eq("id", id);
+    showLoader(false);
+    if (error) { showToast(error.message, "error"); return; }
+    await reloadAll();
+    renderAll();
+    showToast(`Image ${status}`, "success");
+  }
+
+  async function publishAllDraftInfographics() {
+    const drafts = state.infographics.filter((i) => (i.status || "draft") === "draft");
+    if (drafts.length === 0) { showToast("No drafts to publish", "ok"); return; }
+    if (!confirm(`Publish all ${drafts.length} draft image${drafts.length === 1 ? "" : "s"}? This skips per-row review.`)) return;
+    showLoader(true);
+    const { error } = await sb
+      .from("infographics")
+      .update({
+        status: "published",
+        published_at: new Date().toISOString(),
+        published_by: state.profile ? state.profile.id : null
+      })
+      .eq("status", "draft");
+    showLoader(false);
+    if (error) { showToast(error.message, "error"); return; }
+    await reloadAll();
+    renderAll();
+    showToast(`Published ${drafts.length} image${drafts.length === 1 ? "" : "s"}`, "success");
   }
 
   function openIgEditor(id) {
@@ -11964,6 +12183,14 @@
     $("#infographicsModalClose").onclick = closeInfographicsModal;
     $("#infographicsModalDone").onclick  = closeInfographicsModal;
     $("#infographicsOverlay").onclick    = (e) => { if (e.target.id === "infographicsOverlay") closeInfographicsModal(); };
+
+    // T18: bulk-publish escape hatch for the post-migration backfill case.
+    // Visibility is gated in the chip renderers (super_admin + drafts > 0);
+    // wiring is unconditional because the buttons are static markup.
+    const pubAllTplBtn = $("#publishAllDraftTemplatesBtn");
+    if (pubAllTplBtn) pubAllTplBtn.onclick = publishAllDraftTemplates;
+    const pubAllIgBtn = $("#publishAllDraftInfographicsBtn");
+    if (pubAllIgBtn) pubAllIgBtn.onclick = publishAllDraftInfographics;
 
     // T12: Mailchimp settings modal (Templates tab head, super_admin only)
     const mcOpenBtn = $("#manageMailchimpBtn");

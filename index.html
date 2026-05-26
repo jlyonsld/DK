@@ -118,6 +118,14 @@
       <div class="sub-bar" id="subBarTemplates">
         <input id="search" class="search" type="search" placeholder="Search templates… (title, body, tags, notes)" autocomplete="off" />
         <div class="chips" id="categoryChips"></div>
+        <!-- T18: status filter chips (draft / published / archived). Sits
+             below the category chips so admins can scope by review state
+             without losing the category filter. Bulk-publish button next
+             to it is super_admin-only + auto-hides when no drafts. -->
+        <div class="status-filter-row">
+          <div class="chips status-chips" id="templateStatusChips"></div>
+          <button class="btn ghost small bulk-publish-btn" id="publishAllDraftTemplatesBtn" style="display:none" title="Publish every draft template at once"></button>
+        </div>
       </div>
     </header>
 
@@ -1878,8 +1886,16 @@ workstreams:
       <div class="modal-body">
         <div class="tab-head" style="margin:0 0 10px 0">
           <div class="results-meta" id="igManageMeta"></div>
-          <button class="btn primary small" id="newInfographicBtn">＋ Upload / add image</button>
+          <div style="display:flex; gap:8px; align-items:center;">
+            <!-- T18: bulk-publish escape hatch — super_admin-only +
+                 auto-hides when no drafts exist (logic in
+                 renderInfographicStatusChips). -->
+            <button class="btn ghost small bulk-publish-btn" id="publishAllDraftInfographicsBtn" style="display:none" title="Publish every draft image at once"></button>
+            <button class="btn primary small" id="newInfographicBtn">＋ Upload / add image</button>
+          </div>
         </div>
+        <!-- T18: status filter chips. Mirrors the Templates tab pattern. -->
+        <div class="chips status-chips" id="infographicsStatusChips" style="margin-bottom:10px"></div>
         <div class="data-table" id="infographicsTable"></div>
       </div>
       <div class="modal-foot">
