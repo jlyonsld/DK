@@ -451,6 +451,17 @@
             <select id="c_active"><option value="true">Active</option><option value="false">Inactive</option></select>
           </div>
         </div>
+        <div class="field-row" id="c_pay_basis_row" style="display:none">
+          <div class="field">
+            <label>Pay basis <span style="font-weight:400;color:var(--ink-dim)">(super_admin · payroll)</span></label>
+            <select id="c_pay_basis">
+              <option value="">— Unset (treated as hourly)</option>
+              <option value="hourly">By the hour</option>
+              <option value="per_class">By the class (flat per session)</option>
+            </select>
+          </div>
+          <div class="field"></div>
+        </div>
         <div class="field">
           <label>Notes</label>
           <input type="text" id="c_notes" />

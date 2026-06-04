@@ -10601,7 +10601,9 @@
   function minToDecimalHours(mins) { return Math.round((mins / 60) * 100) / 100; }
 
   function buildPayrollRows(start, end) {
-    // Teaching minutes by teacher_id (completed shifts only).
+    // Teaching by teacher_id (completed shifts only). Split by the class's
+    // pay basis (T20): hourly classes accrue minutes; per-class classes accrue
+    // a session count (paid flat per session). Unset/no-class → hourly.
     const teach = new Map();
     let openTeaching = 0;
     state.clockIns
@@ -10609,8 +10611,12 @@
       .forEach((c) => {
         if (!c.clocked_out_at) { openTeaching++; return; }
         const mins = Math.max(0, Math.round((new Date(c.clocked_out_at) - new Date(c.clocked_in_at)) / 60000));
-        const t = teach.get(c.teacher_id) || { minutes: 0, shifts: 0 };
-        t.minutes += mins; t.shifts++; teach.set(c.teacher_id, t);
+        const cls = c.class_id ? state.classes.find((x) => x.id === c.class_id) : null;
+        const perClass = !!(cls && cls.pay_basis === "per_class");
+        const t = teach.get(c.teacher_id) || { hourlyMin: 0, perClassSessions: 0, shifts: 0 };
+        t.shifts++;
+        if (perClass) t.perClassSessions++; else t.hourlyMin += mins;
+        teach.set(c.teacher_id, t);
       });
 
     // Admin minutes by user_id (profiles.id), clock-in within range, completed.
@@ -10640,7 +10646,8 @@
         email: (teacher && teacher.email) || (prof && prof.email) || "",
         payType: teacher ? (teacher.pay_type || "") : "",
         payRate: teacher ? (teacher.pay_rate || "") : "",
-        teachingMin: tv.minutes,
+        hourlyTeachMin: tv.hourlyMin,
+        perClassSessions: tv.perClassSessions,
         adminMin,
       });
     }
@@ -10654,12 +10661,15 @@
         email: (prof && prof.email) || (linkedTeacher && linkedTeacher.email) || "",
         payType: linkedTeacher ? (linkedTeacher.pay_type || "") : "",
         payRate: linkedTeacher ? (linkedTeacher.pay_rate || "") : "",
-        teachingMin: 0,
+        hourlyTeachMin: 0,
+        perClassSessions: 0,
         adminMin: av.minutes,
       });
     }
-    rows.forEach((r) => { r.totalMin = r.teachingMin + r.adminMin; });
-    rows.sort((a, b) => b.totalMin - a.totalMin);
+    // "Hourly minutes" = hourly teaching + admin (admin is always hourly).
+    // Per-class sessions are a separate flat-pay count.
+    rows.forEach((r) => { r.hourlyMin = r.hourlyTeachMin + r.adminMin; });
+    rows.sort((a, b) => (b.hourlyMin + b.perClassSessions * 1000) - (a.hourlyMin + a.perClassSessions * 1000));
     return { rows, openTeaching, openAdmin };
   }
 
@@ -10668,8 +10678,9 @@
     const showPay = hasPerm("view_pay_rates");
     const { rows, openTeaching, openAdmin } = buildPayrollRows(s.start, s.end);
     const fmtHours = (mins) => { const h = Math.floor(mins / 60); return h > 0 ? `${h}h ${mins % 60}m` : `${mins}m`; };
-    const totTeach = rows.reduce((a, r) => a + r.teachingMin, 0);
+    const totTeach = rows.reduce((a, r) => a + r.hourlyTeachMin, 0);
     const totAdmin = rows.reduce((a, r) => a + r.adminMin, 0);
+    const totPerClass = rows.reduce((a, r) => a + r.perClassSessions, 0);
     const presetBtn = (label, days) => `<button data-rpt-preset="${days}" class="btn small">${escapeHtml(label)}</button>`;
     const rangeBtn = (label, key) => `<button data-payroll-range="${key}" class="btn small">${escapeHtml(label)}</button>`;
     const openNote = (openTeaching || openAdmin)
@@ -10692,12 +10703,13 @@
 
       <div style="margin-top:16px">
         <div class="section-title">Summary <span style="font-weight:400;color:var(--ink-dim);text-transform:none;letter-spacing:0">${escapeHtml(s.start)} → ${escapeHtml(s.end)}</span></div>
-        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;padding:12px 0">
+        <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;padding:12px 0">
           ${[
             ["People", rows.length, ""],
-            ["Teaching", fmtHours(totTeach), ""],
+            ["Teaching (hrly)", fmtHours(totTeach), ""],
+            ["Per-class sessions", totPerClass, ""],
             ["Admin", fmtHours(totAdmin), ""],
-            ["Grand total", fmtHours(totTeach + totAdmin), ""],
+            ["Hourly total", fmtHours(totTeach + totAdmin), ""],
           ].map(([k, v, col]) => `
             <div style="padding:10px 12px;background:var(--surface-alt,#f5f4ef);border-radius:8px">
               <div style="font-size:11px;color:var(--ink-dim);text-transform:uppercase;letter-spacing:.5px">${escapeHtml(k)}</div>
@@ -10716,9 +10728,10 @@
                 <th style="padding:6px 8px;font-weight:600">Person</th>
                 <th style="padding:6px 8px;font-weight:600">Email</th>
                 ${showPay ? '<th style="padding:6px 8px;font-weight:600">Pay</th>' : ""}
-                <th style="padding:6px 8px;font-weight:600;text-align:right">Teaching</th>
+                <th style="padding:6px 8px;font-weight:600;text-align:right">Teaching (hrly)</th>
+                <th style="padding:6px 8px;font-weight:600;text-align:right">Per-class</th>
                 <th style="padding:6px 8px;font-weight:600;text-align:right">Admin</th>
-                <th style="padding:6px 8px;font-weight:600;text-align:right">Total</th>
+                <th style="padding:6px 8px;font-weight:600;text-align:right">Hourly total</th>
                 <th style="padding:6px 8px;font-weight:600;text-align:right">Decimal hrs</th>
               </tr>
             </thead>
@@ -10728,10 +10741,11 @@
                   <td style="padding:6px 8px">${escapeHtml(r.name)}</td>
                   <td style="padding:6px 8px;color:var(--ink-dim)">${escapeHtml(r.email)}</td>
                   ${showPay ? `<td style="padding:6px 8px;color:var(--ink-dim)">${escapeHtml(r.payType)}${r.payRate ? ` · ${escapeHtml(r.payRate)}` : ""}</td>` : ""}
-                  <td style="padding:6px 8px;text-align:right">${escapeHtml(fmtHours(r.teachingMin))}</td>
+                  <td style="padding:6px 8px;text-align:right">${escapeHtml(fmtHours(r.hourlyTeachMin))}</td>
+                  <td style="padding:6px 8px;text-align:right">${r.perClassSessions || "—"}</td>
                   <td style="padding:6px 8px;text-align:right">${escapeHtml(fmtHours(r.adminMin))}</td>
-                  <td style="padding:6px 8px;text-align:right;font-weight:600">${escapeHtml(fmtHours(r.totalMin))}</td>
-                  <td style="padding:6px 8px;text-align:right;font-variant-numeric:tabular-nums">${minToDecimalHours(r.totalMin).toFixed(2)}</td>
+                  <td style="padding:6px 8px;text-align:right;font-weight:600">${escapeHtml(fmtHours(r.hourlyMin))}</td>
+                  <td style="padding:6px 8px;text-align:right;font-variant-numeric:tabular-nums">${minToDecimalHours(r.hourlyMin).toFixed(2)}</td>
                 </tr>`).join("")}
             </tbody>
           </table>`}
@@ -10767,12 +10781,13 @@
 
   function downloadPayrollCsv(rows, start, end) {
     const esc = (v) => { const s = String(v == null ? "" : v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
-    const header = ["Name", "Email", "Pay type", "Pay rate", "Teaching hours", "Admin hours", "Total hours", "Period start", "Period end"].join(",");
+    const header = ["Name", "Email", "Pay type", "Pay rate", "Teaching hours (hourly)", "Per-class sessions", "Admin hours", "Total hourly hours", "Period start", "Period end"].join(",");
     const body = rows.map((r) => [
       r.name, r.email, r.payType, r.payRate,
-      minToDecimalHours(r.teachingMin).toFixed(2),
+      minToDecimalHours(r.hourlyTeachMin).toFixed(2),
+      r.perClassSessions,
       minToDecimalHours(r.adminMin).toFixed(2),
-      minToDecimalHours(r.totalMin).toFixed(2),
+      minToDecimalHours(r.hourlyMin).toFixed(2),
       start, end,
     ].map(esc).join(",")).join("\n");
     const csv = header + "\n" + body + "\n";
@@ -10806,15 +10821,19 @@
     const CONSEC_ABSENCE = 2, MIN_SESSIONS = 4, RATE_THRESHOLD = 0.6;
     const atRisk = [];
     state.enrollments.filter((e) => e.status === "active").forEach((e) => {
+      // Excused absences are neutral: dropped from the denominator and the
+      // consecutive-absence streak entirely (a planned/excused miss isn't a
+      // churn signal). Only present/late vs unexcused-absent counts.
       const atts = state.attendance
         .filter((a) => a.enrollment_id === e.id && a.session_date >= start && a.session_date <= end)
+        .filter((a) => a.status !== "excused")
         .sort((x, y) => (x.session_date < y.session_date ? -1 : 1));
       if (atts.length === 0) return;
       const present = atts.filter((a) => a.status === "present" || a.status === "late").length;
       const rate = present / atts.length;
       let consec = 0;
       for (let i = atts.length - 1; i >= 0; i--) {
-        if (atts[i].status === "absent" || atts[i].status === "excused") consec++; else break;
+        if (atts[i].status === "absent") consec++; else break;
       }
       const lastPresentRec = [...atts].reverse().find((a) => a.status === "present" || a.status === "late");
       const reasons = [];
@@ -10824,6 +10843,7 @@
       const stu = state.students.find((s) => s.id === e.student_id);
       const cls = state.classes.find((c) => c.id === e.class_id);
       atRisk.push({
+        enrollmentId: e.id, studentId: e.student_id,
         student: studentFullName(stu), className: cls ? (cls.name || "—") : "(unknown class)",
         reasons, rate, sessions: atts.length,
         lastAttended: lastPresentRec ? lastPresentRec.session_date : null,
@@ -10866,6 +10886,7 @@
         <div class="field" style="flex:0 0 160px"><label>To</label><input type="date" id="rpt_end" value="${escapeHtml(s.end)}" /></div>
         <div style="display:flex;gap:4px">${presetBtn("Last 30d", 30)}${presetBtn("Last 60d", 60)}${presetBtn("Last 90d", 90)}</div>
         <div style="flex:1"></div>
+        ${atRisk.length ? '<button class="btn small" id="rpt_retention_tasks_all">＋ Follow-up tasks for all</button>' : ""}
         <button class="btn small" id="rpt_export_retention_csv">Export CSV (at-risk)</button>
       </div>
 
@@ -10881,10 +10902,13 @@
                 <th style="padding:6px 8px;font-weight:600;text-align:right">Rate</th>
                 <th style="padding:6px 8px;font-weight:600">Last attended</th>
                 <th style="padding:6px 8px;font-weight:600">Parent contact</th>
+                <th style="padding:6px 8px;font-weight:600">Outreach</th>
               </tr>
             </thead>
             <tbody>
-              ${atRisk.map((r) => `
+              ${atRisk.map((r, i) => {
+                const hasTask = hasOpenRetentionTask(r);
+                return `
                 <tr style="border-bottom:1px solid var(--border-subtle,#eee)">
                   <td style="padding:6px 8px;font-weight:500">${escapeHtml(r.student)}</td>
                   <td style="padding:6px 8px">${escapeHtml(r.className)}</td>
@@ -10892,7 +10916,13 @@
                   <td style="padding:6px 8px;text-align:right;${r.rate < 0.6 ? "color:#b91c1c;font-weight:600" : ""}">${Math.round(r.rate * 100)}%</td>
                   <td style="padding:6px 8px;white-space:nowrap">${escapeHtml(fmtDate(r.lastAttended))}</td>
                   <td style="padding:6px 8px">${contactCell(r.parent)}</td>
-                </tr>`).join("")}
+                  <td style="padding:6px 8px;white-space:nowrap">
+                    ${hasTask
+                      ? '<span class="type-badge" style="background:rgba(16,185,129,.14);color:#047857" title="A follow-up task is already open">✓ tasked</span>'
+                      : `<button class="btn ghost small" data-retention-task="${i}" title="Create a follow-up task">＋ Task</button>`}
+                    ${r.parent && r.parent.email ? `<button class="btn ghost small" data-retention-email="${i}" title="Draft a parent email">✉ Email</button>` : ""}
+                  </td>
+                </tr>`; }).join("")}
             </tbody>
           </table>`}
       </div>
@@ -10937,6 +10967,19 @@
       };
     });
     $("#rpt_export_retention_csv").onclick = () => downloadRetentionCsv(atRisk, s.start, s.end, showContact);
+    const allBtn = $("#rpt_retention_tasks_all");
+    if (allBtn) allBtn.onclick = () => createAllRetentionTasks(atRisk);
+    host.querySelectorAll("[data-retention-task]").forEach((b) => {
+      b.onclick = async () => {
+        const r = atRisk[parseInt(b.dataset.retentionTask, 10)];
+        if (!r) return;
+        const res = await createRetentionTask(r);
+        if (res.created) { await reloadAll(); renderAll(); showToast("Follow-up task created", "success"); }
+      };
+    });
+    host.querySelectorAll("[data-retention-email]").forEach((b) => {
+      b.onclick = () => { const r = atRisk[parseInt(b.dataset.retentionEmail, 10)]; if (r) draftRetentionEmail(r); };
+    });
   }
 
   function downloadRetentionCsv(rows, start, end, showContact) {
@@ -10953,6 +10996,82 @@
     a.href = url; a.download = `at-risk-${start}-to-${end}.csv`;
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
     URL.revokeObjectURL(url);
+  }
+
+  /* ── Retention outreach ──────────────────────────────────────
+   * Turns a flagged at-risk student into action: a follow-up task (into the
+   * T17 tasks system, owned by the current admin) and/or a pre-filled parent
+   * email draft. De-dupes on a stable title marker so re-running the report
+   * doesn't pile up duplicate tasks for the same student+class.
+   */
+  function retentionTaskTitle(row) {
+    return `Retention follow-up: ${row.student} — ${row.className}`;
+  }
+  function hasOpenRetentionTask(row) {
+    const title = retentionTaskTitle(row).toLowerCase();
+    return (state.tasks || []).some((t) =>
+      (t.title || "").toLowerCase() === title &&
+      !["done", "archived"].includes((t.status || "").toLowerCase()));
+  }
+
+  async function createRetentionTask(row, opts) {
+    if (hasOpenRetentionTask(row)) {
+      if (!opts?.silent) showToast("Follow-up task already open for this student", "info");
+      return { skipped: true };
+    }
+    const p = row.parent || {};
+    const contact = [p.name && `Parent: ${p.name}`, p.email, p.phone].filter(Boolean).join(" · ");
+    const description = [
+      `${row.student} is at risk in ${row.className}.`,
+      `Why: ${row.reasons.join("; ")} (attendance ${Math.round(row.rate * 100)}% over ${row.sessions} sessions).`,
+      contact ? `Contact — ${contact}` : "No parent contact on file.",
+    ].join("\n");
+    const resp = await sb.from("tasks").insert({
+      title: retentionTaskTitle(row),
+      description,
+      project_name: "DK: Retention",
+      priority: row.reasons.some((r) => /in a row/.test(r)) ? "high" : "medium",
+      status: "open",
+      owner_profile_id: myUserId(),
+      assignee_label: p.name || null,
+    });
+    if (resp.error) { if (!opts?.silent) showToast(resp.error.message, "error"); return { error: resp.error }; }
+    return { created: true };
+  }
+
+  function draftRetentionEmail(row) {
+    const p = row.parent || {};
+    if (!p.email) { showToast("No parent email on file for this student", "error"); return; }
+    const first = (row.student || "").split(" ")[0] || "your child";
+    const subject = `Checking in about ${first} at Drama Kids`;
+    const body =
+`Hi${p.name ? " " + p.name.split(" ")[0] : ""},
+
+We've missed ${first} in ${row.className} recently and wanted to check in — is everything okay? We'd love to help get them back into the swing of things.
+
+Please let us know if there's anything we can do, or if you'd like to talk through options.
+
+Warmly,
+Drama Kids`;
+    const url = `mailto:${encodeURIComponent(p.email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+    const a = document.createElement("a");
+    a.href = url; document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  }
+
+  async function createAllRetentionTasks(rows) {
+    const pending = rows.filter((r) => !hasOpenRetentionTask(r));
+    if (!pending.length) { showToast("Every at-risk student already has an open follow-up task", "info"); return; }
+    if (!confirm(`Create ${pending.length} follow-up task${pending.length === 1 ? "" : "s"} (one per at-risk student without one)?`)) return;
+    showLoader(true);
+    let created = 0;
+    for (const r of pending) {
+      const res = await createRetentionTask(r, { silent: true });
+      if (res.created) created++;
+    }
+    showLoader(false);
+    await reloadAll();
+    renderAll();
+    showToast(`Created ${created} follow-up task${created === 1 ? "" : "s"}`, "success");
   }
 
   /* ── T7b: PAR funnel report ─────────────────────────────────
@@ -11498,6 +11617,11 @@
     $("#c_end_date").value          = c ? (c.end_date || "") : "";
     $("#c_active").value            = (c && c.active === false) ? "false" : "true";
     $("#c_notes").value             = c ? (c.notes || "") : "";
+    // T20: pay basis is super_admin-only. Hide the row entirely for everyone
+    // else so a manager editing a class can't see/alter the payroll setting.
+    const payBasisRow = $("#c_pay_basis_row");
+    if (payBasisRow) payBasisRow.style.display = isSuperAdmin() ? "" : "none";
+    $("#c_pay_basis").value         = c ? (c.pay_basis || "") : "";
     $("#deleteClassBtn").style.display = c ? "" : "none";
     $("#classModalOverlay").classList.add("open");
     setTimeout(() => $("#c_name").focus(), 50);
@@ -11521,6 +11645,11 @@
       end_date: $("#c_end_date").value || null,
       notes: $("#c_notes").value || null
     };
+    // T20: only super_admin can set pay basis; managers' saves leave it
+    // untouched (field omitted from their payload).
+    if (isSuperAdmin()) {
+      payload.pay_basis = $("#c_pay_basis").value || null;
+    }
     showLoader(true);
     let resp;
     if (editingClassId) {
