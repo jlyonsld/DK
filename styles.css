@@ -2517,8 +2517,10 @@ footer code {
     padding: 0 4px;
   }
   .sched-month-closure { display: none; }
-  .sched-month-rows > .sched-month-row:nth-child(n+3),
-  .sched-month-rows > .sched-month-row-more { display: none; }
+  /* Row count is controlled in JS (MAX_ROWS=2 at ≤720px) so the "+N more"
+     count is accurate; the nth-child rule is a harmless safety net. The
+     more-note stays visible so the hidden count is always shown. */
+  .sched-month-rows > .sched-month-row:nth-child(n+3) { display: none; }
   .sched-month-row { padding: 1px 4px; gap: 3px; border-left-width: 2px; }
   .sched-month-row-time { font-size: 9px; }
   .sched-month-row-name { font-size: 10px; }

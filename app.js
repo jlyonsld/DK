@@ -1106,18 +1106,61 @@
   // JR-synced cls.times ("3:00 PM - 3:45 PM") and falls back to cls.day_time
   // for in-app-edited classes ("Fridays, 3:00–3:45 PM").
   function classStartTimeOn(cls, onDate) {
-    const src = cls?.times || cls?.day_time;
-    if (!src) return null;
-    const m = String(src).match(/(\d{1,2}):(\d{2})\s*([AP]M)/i);
-    if (!m) return null;
-    let h = parseInt(m[1], 10);
-    const mm = parseInt(m[2], 10);
-    const isPm = m[3].toUpperCase() === "PM";
-    if (isPm && h < 12) h += 12;
-    if (!isPm && h === 12) h = 0;
+    const t = parseTimeOfDay(cls?.times || cls?.day_time);
+    if (!t) return null;
     const d = new Date(onDate);
-    d.setHours(h, mm, 0, 0);
+    d.setHours(t.h, t.m, 0, 0);
     return d;
+  }
+
+  // Tolerant start-of-day-time parser. Returns { h (0-23), m } for the START
+  // time in a string, or null. Handles, in priority order:
+  //   1. Single-trailing-meridian ranges — "3:00–3:45 PM", "3-3:45pm",
+  //      "Fridays, 3:00–3:45 PM" → 3:00 PM (NOT the 3:45 end). Late-morning
+  //      ranges that cross noon ("11:30–12:15 PM", "11–1:30 PM") correctly
+  //      resolve the start to AM.
+  //   2. First explicit time with its own meridian — "3:00 PM", "3:00PM",
+  //      "3 PM", "3pm", "3 p.m." (covers Jackrabbit "3:00 PM - 3:45 PM").
+  //   3. 24-hour clock — "15:00", "15:00–15:45".
+  // Anything without a recognizable clock time returns null (caller no-ops).
+  function parseTimeOfDay(raw) {
+    if (!raw) return null;
+    const s = String(raw).toLowerCase().replace(/\./g, ""); // "p.m." → "pm"
+    const to24 = (h, mm, mer) => {
+      if (mer === "pm" && h < 12) h += 12;
+      if (mer === "am" && h === 12) h = 0;
+      return { h, m: mm };
+    };
+
+    // 1. Range with one trailing meridian shared by both ends.
+    let m = s.match(/(\d{1,2})(?::(\d{2}))?\s*[-–—]\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)/);
+    if (m) {
+      const startH = parseInt(m[1], 10);
+      const startMin = m[2] ? parseInt(m[2], 10) : 0;
+      const endH = parseInt(m[3], 10);
+      const mer = m[5];
+      if (startH >= 1 && startH <= 12 && startMin <= 59) {
+        // If the start hour is late morning and the range crosses into the
+        // afternoon (start > end, or end is 12), the start is actually AM.
+        let useMer = mer;
+        if (mer === "pm" && startH <= 11 && (startH > endH || endH === 12)) useMer = "am";
+        return to24(startH, startMin, useMer);
+      }
+    }
+
+    // 2. First standalone time carrying its own meridian.
+    m = s.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)/);
+    if (m) {
+      const h = parseInt(m[1], 10);
+      const mm = m[2] ? parseInt(m[2], 10) : 0;
+      if (h >= 1 && h <= 12 && mm <= 59) return to24(h, mm, m[3]);
+    }
+
+    // 3. 24-hour clock (requires a colon to avoid matching ages/dates).
+    m = s.match(/\b([01]?\d|2[0-3]):([0-5]\d)\b/);
+    if (m) return { h: parseInt(m[1], 10), m: parseInt(m[2], 10) };
+
+    return null;
   }
 
   function formatRelativeTimeUntil(target) {
@@ -3667,7 +3710,13 @@
     ).join("");
 
     const cells = [];
-    const MAX_ROWS = 3;
+    // Visible rows per cell must match what the CSS actually shows at this
+    // breakpoint, or the "+N more" count is wrong. ≤720px shows 2 rows; wider
+    // shows 3. A debounced resize listener (wired once in wireEvents)
+    // re-renders the schedule so the count stays correct after a resize.
+    const isNarrow = typeof window !== "undefined" && window.matchMedia
+      ? window.matchMedia("(max-width: 720px)").matches : false;
+    const MAX_ROWS = isNarrow ? 2 : 3;
     for (let i = 0; i < 42; i++) {
       const d = addDays(gridStart, i);
       const iso = isoDate(d);
@@ -13616,6 +13665,17 @@ Drama Kids`;
     $("#capManagerClose").onclick = closeCapManager;
     $("#capManagerDone").onclick  = closeCapManager;
     $("#capManagerOverlay").onclick = (e) => { if (e.target.id === "capManagerOverlay") closeCapManager(); };
+
+    // Month-view rows-per-cell depends on the viewport breakpoint, so re-render
+    // the schedule when the window crosses it (debounced) to keep the
+    // "+N more" overflow count accurate.
+    let schedResizeTimer = null;
+    window.addEventListener("resize", () => {
+      clearTimeout(schedResizeTimer);
+      schedResizeTimer = setTimeout(() => {
+        if (state.sState && state.sState.mode === "month") renderScheduleTab();
+      }, 200);
+    });
 
     // Teacher modal
     $("#teacherCancel").onclick    = closeTeacherEditor;
