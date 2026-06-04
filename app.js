@@ -49,6 +49,10 @@
     paymentMethods: [],          // T6c: super_admin-managed list of options
                                  // for teachers.payment_method. SELECT open
                                  // to all authenticated; writes super_admin.
+    teacherTags: [],             // T6e: admin-managed personnel tag catalog
+                                 // (what a teacher does / doesn't do). SELECT
+                                 // open to all authenticated; writes edit_teachers.
+    teacherTagAssignments: [],   // T6e: (teacher_id, tag_id) join rows.
     teacherPaymentDetails: [],   // T6b: bank/routing/account/handle. RLS:
                                  // manage_teacher_payments (admin+super_admin).
     teacherDocuments: [],        // T6b: tax forms, certs metadata. RLS:
@@ -650,6 +654,7 @@
       "teacher_payment_details", "teacher_documents",
       "liability_waivers", "liability_waiver_signatures",
       "payment_methods",
+      "teacher_tags", "teacher_tag_assignments",
       "events", "event_staff",
       "inventory_items", "inventory_assignments",
       "student_intake_requests",
@@ -867,7 +872,7 @@
   async function reloadAll() {
     showLoader(true);
     try {
-      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches, att, clk, subs, subClm, schs, canc, cur, curA, tpd, tdocs, waivers, wSigs, pms, prof, evs, evStaff, invItems, invAssigns, intakes, parPromo, leadsRes, tasksRes, decisionsRes, weightLedgerRes] = await Promise.all([
+      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches, att, clk, subs, subClm, schs, canc, cur, curA, tpd, tdocs, waivers, wSigs, pms, prof, evs, evStaff, invItems, invAssigns, intakes, parPromo, leadsRes, tasksRes, decisionsRes, weightLedgerRes, tTags, tTagAssigns] = await Promise.all([
         sb.from("categories").select("*").order("sort_order", { ascending: true }),
         sb.from("templates").select("*").order("created_at", { ascending: true }),
         sb.from("classes").select("*").order("name", { ascending: true }),
@@ -905,7 +910,9 @@
         sb.from("leads").select("*").order("received_at", { ascending: false }),
         sb.from("tasks").select("*").order("created_at", { ascending: false }),
         sb.from("decisions").select("*").order("not_before", { ascending: true, nullsFirst: false }),
-        sb.from("weight_ledger_entries").select("*").order("dated_at", { ascending: false })
+        sb.from("weight_ledger_entries").select("*").order("dated_at", { ascending: false }),
+        sb.from("teacher_tags").select("*").order("sort_order", { ascending: true }),
+        sb.from("teacher_tag_assignments").select("*")
       ]);
       for (const r of [cats, tpls, cls, igs, tch, ct, ci, stu, enr]) if (r.error) throw r.error;
       // Non-admin roles may not have SELECT access to teacher_invitations /
@@ -994,6 +1001,11 @@
       // T17a-4: decisions + weight_ledger entries (local-only).
       state.decisions     = (decisionsRes && !decisionsRes.error) ? decisionsRes.data : [];
       state.weightLedger  = (weightLedgerRes && !weightLedgerRes.error) ? weightLedgerRes.data : [];
+      // T6e: personnel tag catalog + assignments. SELECT open to any
+      // signed-in user; empty fallback covers the window before
+      // phase_t6e_teacher_tags.sql is applied in any local-dev branch.
+      state.teacherTags            = (tTags && !tTags.error) ? tTags.data : [];
+      state.teacherTagAssignments  = (tTagAssigns && !tTagAssigns.error) ? tTagAssigns.data : [];
     } catch (e) {
       console.error(e);
       showToast("Failed to load: " + e.message, "error");
@@ -10723,6 +10735,81 @@
 
   let editingTeacherId = null;
   let inviteEditorTeacherId = null;
+  // T6e: tag IDs selected in the open personnel modal (pending until save).
+  let editingTeacherTagIds = new Set();
+  // T6e: current name/tag search query + active tag filter on the Teachers tab.
+  let teacherSearchQuery = "";
+  let teacherTagFilter = "all";
+
+  /* ═════════════ T6e: Personnel tags ═════════════ */
+
+  // Tags assigned to a teacher, sorted by the catalog's sort_order.
+  function tagsForTeacher(teacherId) {
+    const ids = new Set(
+      state.teacherTagAssignments.filter((a) => a.teacher_id === teacherId).map((a) => a.tag_id)
+    );
+    return state.teacherTags
+      .filter((t) => ids.has(t.id))
+      .sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
+  }
+
+  // Inline style for a colored chip. Colors are #rrggbb; we tint the
+  // background/border off the same hex so any catalog color stays legible.
+  function tagChipStyle(color) {
+    if (!color || !/^#[0-9a-fA-F]{6}$/.test(color)) return "";
+    return `background:${color}1f;color:${color};border-color:${color}66;`;
+  }
+
+  function tagChipHtml(tag) {
+    return `<span class="teacher-tag-chip${tag.is_active ? "" : " inactive"}" style="${tagChipStyle(tag.color)}" title="${escapeHtml(tag.label)}">${escapeHtml(tag.label)}</span>`;
+  }
+
+  // Toggle chips inside the personnel modal. Active tags + any already-
+  // assigned inactive tag are shown; clicking toggles editingTeacherTagIds.
+  function renderTeacherTagPicker() {
+    const host = $("#t_tag_picker");
+    if (!host) return;
+    const tags = [...state.teacherTags]
+      .filter((t) => t.is_active || editingTeacherTagIds.has(t.id))
+      .sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
+    if (!tags.length) {
+      host.innerHTML = `<span class="muted" style="font-size:12.5px">No tags yet — click <b>Manage tags</b> to create some.</span>`;
+      return;
+    }
+    host.innerHTML = tags.map((t) => {
+      const on = editingTeacherTagIds.has(t.id);
+      return `<button type="button" class="tag-toggle${on ? " on" : ""}" data-tag-id="${escapeHtml(t.id)}" style="${on ? tagChipStyle(t.color) : ""}">${on ? "✓ " : ""}${escapeHtml(t.label)}${t.is_active ? "" : " (inactive)"}</button>`;
+    }).join("");
+    $$('.tag-toggle', host).forEach((btn) => {
+      btn.onclick = () => {
+        const id = btn.dataset.tagId;
+        if (editingTeacherTagIds.has(id)) editingTeacherTagIds.delete(id);
+        else editingTeacherTagIds.add(id);
+        renderTeacherTagPicker();
+      };
+    });
+  }
+
+  // Diff editingTeacherTagIds against what's in the DB for this teacher and
+  // apply the inserts/deletes on the join table. Caller must hold edit_teachers.
+  async function persistTeacherTags(teacherId) {
+    const existing = new Set(
+      state.teacherTagAssignments.filter((a) => a.teacher_id === teacherId).map((a) => a.tag_id)
+    );
+    const desired = editingTeacherTagIds;
+    const toAdd = [...desired].filter((id) => !existing.has(id));
+    const toRemove = [...existing].filter((id) => !desired.has(id));
+    if (toAdd.length) {
+      const resp = await sb.from("teacher_tag_assignments")
+        .insert(toAdd.map((tag_id) => ({ teacher_id: teacherId, tag_id })));
+      if (resp.error) showToast("Tags partially saved: " + resp.error.message, "error");
+    }
+    for (const tag_id of toRemove) {
+      const resp = await sb.from("teacher_tag_assignments")
+        .delete().eq("teacher_id", teacherId).eq("tag_id", tag_id);
+      if (resp.error) showToast("Tags partially saved: " + resp.error.message, "error");
+    }
+  }
 
   function renderTeachersTab() {
     const el = $("#teacherTable");
@@ -10736,10 +10823,38 @@
     const showEdit   = hasPerm("edit_teachers");
     const showInvite = isAdminOrAbove();
     const rowClickEdit = isAdminOrAbove();
-    const colCount = 4 + (showPay ? 1 : 0) + (showEdit || showInvite ? 1 : 0);
+    // +1 column for Tags. colCount used only for the empty-state colspan.
+    const colCount = 5 + (showPay ? 1 : 0) + (showEdit || showInvite ? 1 : 0);
 
-    const rows = state.teachers.map((t) => {
+    // T6e: name/tag search + tag filter. The search box itself is static in
+    // index.html (so typing keeps focus across re-renders); we just read its
+    // current value here. A tag-filter chip row renders above the table.
+    const q = teacherSearchQuery.trim().toLowerCase();
+    const matchesTeacher = (t) => {
+      const tags = tagsForTeacher(t.id);
+      if (teacherTagFilter !== "all" && !tags.some((tag) => tag.id === teacherTagFilter)) return false;
+      if (!q) return true;
+      const hay = [t.full_name, t.preferred_name, t.email, t.phone, t.title]
+        .concat(tags.map((tag) => tag.label));
+      return hay.some((v) => (v || "").toLowerCase().includes(q));
+    };
+    const visibleTeachers = state.teachers.filter(matchesTeacher);
+
+    // Tag filter chips — only tags actually in use, plus "All".
+    const usedTagIds = new Set(state.teacherTagAssignments.map((a) => a.tag_id));
+    const filterTags = state.teacherTags
+      .filter((tag) => usedTagIds.has(tag.id))
+      .sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
+    const chipRow = `
+      <div class="teacher-tag-filter">
+        <button type="button" class="chip${teacherTagFilter === "all" ? " active" : ""}" data-tag-filter="all">All</button>
+        ${filterTags.map((tag) => `<button type="button" class="chip${teacherTagFilter === tag.id ? " active" : ""}" data-tag-filter="${escapeHtml(tag.id)}">${escapeHtml(tag.label)}</button>`).join("")}
+        ${showEdit ? `<button type="button" class="btn ghost small" id="manageTagsBtn" style="margin-left:auto">⚙ Manage tags</button>` : ""}
+      </div>`;
+
+    const rows = visibleTeachers.map((t) => {
       const classCount = state.classTeachers.filter((ct) => ct.teacher_id === t.id).length;
+      const tagCell = tagsForTeacher(t.id).map(tagChipHtml).join(" ");
       const statusLabel = { active: "Active", on_leave: "On leave", inactive: "Inactive" };
       const parBadge = t.par_person_id
         ? ` <span class="par-linked-badge" title="Linked to PAR person ${escapeHtml(t.par_person_id)}">PAR \u2713</span>`
@@ -10775,17 +10890,30 @@
           <td>${escapeHtml(t.phone || "")}</td>
           ${showPay  ? `<td>${escapeHtml(t.pay_rate || "")}</td>` : ""}
           <td><span class="type-badge status-badge-${escapeHtml(t.status)}">${statusLabel[t.status] || t.status}</span></td>
+          <td class="teacher-tag-cell">${tagCell || `<span style="color:var(--ink-mute)">—</span>`}</td>
           <td style="font-size:12px">${classCount} class${classCount === 1 ? "" : "es"}</td>
           ${actionCell}
         </tr>
       `;
     }).join("");
+    const filtering = !!q || teacherTagFilter !== "all";
+    const emptyMsg = filtering
+      ? "No teachers match your search."
+      : `No teachers yet${showEdit ? " — click <b>＋ New teacher</b>." : "."}`;
     el.innerHTML = `
+      ${chipRow}
       <table>
-        <thead><tr><th>Name</th><th>Phone</th>${showPay ? "<th>Pay rate</th>" : ""}<th>Status</th><th>Assigned</th>${showEdit || showInvite ? "<th></th>" : ""}</tr></thead>
-        <tbody>${rows || `<tr><td colspan="${colCount}" style="text-align:center;color:var(--ink-dim);padding:24px">No teachers yet${showEdit ? " — click <b>＋ New teacher</b>." : "."}</td></tr>`}</tbody>
+        <thead><tr><th>Name</th><th>Phone</th>${showPay ? "<th>Pay rate</th>" : ""}<th>Status</th><th>Tags</th><th>Assigned</th>${showEdit || showInvite ? "<th></th>" : ""}</tr></thead>
+        <tbody>${rows || `<tr><td colspan="${colCount}" style="text-align:center;color:var(--ink-dim);padding:24px">${emptyMsg}</td></tr>`}</tbody>
       </table>
     `;
+    // Tag filter chips
+    $$('[data-tag-filter]', el).forEach((btn) => btn.onclick = () => {
+      teacherTagFilter = btn.dataset.tagFilter;
+      renderTeachersTab();
+    });
+    const mtBtn = $("#manageTagsBtn", el);
+    if (mtBtn) mtBtn.onclick = openTagManager;
     if (showEdit) {
       $$('[data-act="edit-teacher"]', el).forEach((btn) => btn.onclick = (e) => { e.stopPropagation(); openTeacherEditor(btn.dataset.id); });
     }
@@ -11051,6 +11179,11 @@
       $("#t_doc_file").disabled = newTeacher;
       $("#t_waiver_open_btn").disabled = newTeacher;
     }
+
+    // T6e: tag picker — gated on edit_teachers (read-only roles never open
+    // this modal). Seed the pending set from the teacher's current tags.
+    editingTeacherTagIds = new Set(t ? tagsForTeacher(t.id).map((tag) => tag.id) : []);
+    renderTeacherTagPicker();
 
     $("#deleteTeacherBtn").style.display = t ? "" : "none";
     $("#teacherModalOverlay").classList.add("open");
@@ -11368,6 +11501,7 @@
     const showPersonnel = isAdminOrAbove();
     const showPayroll   = hasPerm("view_pay_rates");
     const showPayments  = hasPerm("manage_teacher_payments");
+    const showEdit      = hasPerm("edit_teachers");   // gates T6e tag writes
 
     // Always-saved fields. Managers using the Edit button save just these
     // — admin-only fields aren't included so a manager save can't null
@@ -11461,6 +11595,12 @@
           // Don't bail — the teacher row is good; just warn.
         }
       }
+    }
+
+    // T6e: persist tag assignments (diff insert/delete on the join table).
+    // edit_teachers gates the RLS write; showEdit mirrors that client-side.
+    if (showEdit && savedTeacher) {
+      await persistTeacherTags(savedTeacher.id);
     }
 
     // Phase 3 — try to resolve this teacher's PAR identity if they have an email
@@ -11984,6 +12124,90 @@
     showToast("Payment method added", "success");
   }
 
+  /* ═════════════ T6e: Tag catalog manager ═════════════ */
+
+  function openTagManager() {
+    if (!hasPerm("edit_teachers")) { showToast("You don't have permission to manage tags", "error"); return; }
+    renderTagManagerList();
+    $("#tagManagerOverlay").classList.add("open");
+    setTimeout(() => $("#tag_new_label")?.focus(), 40);
+  }
+  function closeTagManager() {
+    $("#tagManagerOverlay").classList.remove("open");
+    // Reflect any catalog edits back into an open personnel modal.
+    if ($("#teacherModalOverlay").classList.contains("open")) renderTeacherTagPicker();
+  }
+
+  function renderTagManagerList() {
+    const wrap = $("#tagManagerList");
+    if (!wrap) return;
+    const rows = [...state.teacherTags].sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
+    if (!rows.length) { wrap.innerHTML = `<div class="muted">No tags yet. Add one below.</div>`; return; }
+    wrap.innerHTML = rows.map((t) => {
+      const inUse = state.teacherTagAssignments.filter((a) => a.tag_id === t.id).length;
+      const color = /^#[0-9a-fA-F]{6}$/.test(t.color || "") ? t.color : "#888888";
+      return `
+        <div class="tag-row" data-tag-id="${t.id}">
+          <input class="tag-color" type="color" value="${color}" title="Chip color" />
+          <input class="tag-label" type="text" value="${escapeHtml(t.label)}" />
+          <label class="tag-active">
+            <input type="checkbox" class="tag-active-cb" ${t.is_active ? "checked" : ""} /> Active
+          </label>
+          <span class="tag-use-count">${inUse} assigned</span>
+          <button type="button" class="btn danger ghost small tag-del" ${inUse > 0 ? `disabled title="In use — remove from teachers first"` : ""}>Delete</button>
+        </div>`;
+    }).join("");
+    $$('#tagManagerList .tag-row').forEach((row) => {
+      const id = row.dataset.tagId;
+      const labelInp = row.querySelector(".tag-label");
+      const colorInp = row.querySelector(".tag-color");
+      const activeCb = row.querySelector(".tag-active-cb");
+      const delBtn   = row.querySelector(".tag-del");
+      const save = async (patch) => {
+        const resp = await sb.from("teacher_tags").update(patch).eq("id", id);
+        if (resp.error) { showToast(resp.error.message, "error"); return; }
+        await reloadAll();
+        renderTagManagerList();
+        if ($("#teacherModalOverlay").classList.contains("open")) renderTeacherTagPicker();
+      };
+      labelInp.onchange = () => {
+        const v = labelInp.value.trim();
+        if (!v) { showToast("Label can't be empty", "error"); return; }
+        save({ label: v });
+      };
+      colorInp.onchange = () => save({ color: colorInp.value });
+      activeCb.onchange = () => save({ is_active: activeCb.checked });
+      if (delBtn && !delBtn.disabled) {
+        delBtn.onclick = async () => {
+          if (!confirm(`Delete tag "${labelInp.value}"? This cannot be undone.`)) return;
+          const resp = await sb.from("teacher_tags").delete().eq("id", id);
+          if (resp.error) { showToast(resp.error.message, "error"); return; }
+          await reloadAll();
+          renderTagManagerList();
+          showToast("Tag deleted", "success");
+        };
+      }
+    });
+  }
+
+  async function addTeacherTag() {
+    const label = $("#tag_new_label").value.trim();
+    const color = $("#tag_new_color").value || null;
+    if (!label) { showToast("Label is required", "error"); return; }
+    const slugs = new Set(state.teacherTags.map((t) => t.slug));
+    const slug = uniqueSlug(slugify(label), slugs);
+    const maxSort = state.teacherTags.reduce((mx, t) => Math.max(mx, t.sort_order || 0), 0);
+    const resp = await sb.from("teacher_tags").insert({
+      slug, label, color, sort_order: maxSort + 10, is_active: true
+    });
+    if (resp.error) { showToast(resp.error.message, "error"); return; }
+    $("#tag_new_label").value = "";
+    await reloadAll();
+    renderTagManagerList();
+    if ($("#teacherModalOverlay").classList.contains("open")) renderTeacherTagPicker();
+    showToast("Tag added", "success");
+  }
+
   async function newCategory() {
     const label = prompt("New category label:");
     if (!label) return;
@@ -12421,6 +12645,19 @@
     $("#newTeacherBtn").onclick    = () => openTeacherEditor(null);
     const refreshParBtn = $("#refreshParLinksBtn");
     if (refreshParBtn) refreshParBtn.onclick = refreshAllTeacherParLinks;
+
+    // T6e: teacher search box + tag manager modal
+    const teacherSearchInp = $("#teacherSearch");
+    if (teacherSearchInp) {
+      teacherSearchInp.value = teacherSearchQuery;
+      teacherSearchInp.oninput = (e) => { teacherSearchQuery = e.target.value; renderTeachersTab(); };
+    }
+    const manageTagsModalBtn = $("#t_manage_tags_btn");
+    if (manageTagsModalBtn) manageTagsModalBtn.onclick = openTagManager;
+    $("#tagManagerClose").onclick = closeTagManager;
+    $("#tagManagerDone").onclick  = closeTagManager;
+    $("#tagManagerOverlay").onclick = (e) => { if (e.target.id === "tagManagerOverlay") closeTagManager(); };
+    $("#tag_add_btn").onclick = addTeacherTag;
 
     // Teacher modal
     $("#teacherCancel").onclick    = closeTeacherEditor;

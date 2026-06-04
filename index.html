@@ -234,6 +234,7 @@
           <div class="tab-head">
             <div class="results-meta" id="teacherMeta"></div>
             <div style="display:flex; gap:8px; align-items:center;">
+              <input type="search" id="teacherSearch" class="search" placeholder="Search by name or tag…" autocomplete="off" style="max-width:240px" />
               <button class="btn small" id="inviteUserBtn" title="Invite anyone (teacher, manager, admin, super_admin) to PAR DK">✉ Invite user</button>
               <button class="btn small" id="refreshParLinksBtn" title="Check each teacher's email against PAR and cache any found identities">⟳ Refresh PAR links</button>
               <button class="btn primary small" id="newTeacherBtn">＋ New teacher</button>
@@ -819,6 +820,14 @@
           <div style="margin-top:8px">
             <button type="button" class="btn small" id="t_waiver_open_btn">Read &amp; sign waiver…</button>
           </div>
+        </div>
+
+        <h4 class="modal-section-title">Tags
+          <button type="button" class="btn ghost small" id="t_manage_tags_btn" style="float:right;font-weight:400">⚙ Manage tags</button>
+        </h4>
+        <div class="field">
+          <div style="margin-bottom:6px;font-size:12px;color:var(--ink-dim)">What this person does or doesn't do. Click to toggle.</div>
+          <div id="t_tag_picker" class="tag-picker"></div>
         </div>
 
         <h4 class="modal-section-title">Notes</h4>
@@ -1933,6 +1942,32 @@ workstreams:
       </div>
       <div class="modal-foot">
         <button class="btn primary" id="paymentMethodsDone">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- T6e: Manage personnel tags. Opened from the Teachers tab tag-filter
+       row and from the personnel modal's Tags section. Edits gate on
+       edit_teachers (RLS enforces; the open button is hidden otherwise). -->
+  <div class="modal-overlay" id="tagManagerOverlay">
+    <div class="modal" style="max-width:620px">
+      <div class="modal-head">
+        <h3>Manage tags</h3>
+        <button class="btn ghost small" id="tagManagerClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="results-meta" style="margin-bottom:10px">
+          Tags describe what a person does or doesn't do (e.g. Improv, Stage combat, Won't travel). Assign them per teacher in the personnel modal; search and filter the Teachers list by tag. Renaming or recoloring a tag updates it everywhere.
+        </div>
+        <div class="tag-list" id="tagManagerList"></div>
+        <div class="tag-add-row">
+          <input type="color" id="tag_new_color" value="#6366f1" title="Chip color" />
+          <input type="text" id="tag_new_label" placeholder="New tag (e.g. Puppetry)" />
+          <button type="button" class="btn primary small" id="tag_add_btn">＋ Add</button>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn primary" id="tagManagerDone">Done</button>
       </div>
     </div>
   </div>
