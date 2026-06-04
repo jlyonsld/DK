@@ -35,6 +35,9 @@
     enrollments: [],
     attendance: [],         // attendance rows (enrollment-scoped); RLS-filtered per role
     clockIns: [],           // clock_ins rows; teacher sees own, admin sees all
+    adminWorkSessions: [],  // T19: office/admin time clock (manager_or_above).
+                            // self sees own; admins see all. one open per user.
+    adminWorkCaps: [],      // T19: per-person weekly minute caps (super_admin-set).
     matchCandidates: [],    // unresolved student_match_candidates rows (admin-visible)
     teacherInvitations: [],
     subRequests: [],        // sub_requests rows (RLS-filtered: open visible to all,
@@ -235,6 +238,7 @@
   function isRole(r) { return currentRole() === r; }
   function isSuperAdmin() { return isRole("super_admin"); }
   function isAdminOrAbove() { return isRole("super_admin") || isRole("admin"); }
+  function isManagerOrAbove() { return isRole("super_admin") || isRole("admin") || isRole("manager"); }
 
   function hasPerm(perm) {
     const role = currentRole();
@@ -565,6 +569,7 @@
     const startTab = canSeeTab(state.router) ? state.router : "home";
     go(startTab);
     setupRealtime();
+    if (isManagerOrAbove()) startAdminClockEngine();   // T19 nudges + live timer
   }
 
   /* No-role screen.
@@ -655,6 +660,7 @@
       "liability_waivers", "liability_waiver_signatures",
       "payment_methods",
       "teacher_tags", "teacher_tag_assignments",
+      "admin_work_sessions", "admin_work_caps",
       "events", "event_staff",
       "inventory_items", "inventory_assignments",
       "student_intake_requests",
@@ -872,7 +878,7 @@
   async function reloadAll() {
     showLoader(true);
     try {
-      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches, att, clk, subs, subClm, schs, canc, cur, curA, tpd, tdocs, waivers, wSigs, pms, prof, evs, evStaff, invItems, invAssigns, intakes, parPromo, leadsRes, tasksRes, decisionsRes, weightLedgerRes, tTags, tTagAssigns] = await Promise.all([
+      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches, att, clk, subs, subClm, schs, canc, cur, curA, tpd, tdocs, waivers, wSigs, pms, prof, evs, evStaff, invItems, invAssigns, intakes, parPromo, leadsRes, tasksRes, decisionsRes, weightLedgerRes, tTags, tTagAssigns, awsRes, awcRes] = await Promise.all([
         sb.from("categories").select("*").order("sort_order", { ascending: true }),
         sb.from("templates").select("*").order("created_at", { ascending: true }),
         sb.from("classes").select("*").order("name", { ascending: true }),
@@ -912,7 +918,9 @@
         sb.from("decisions").select("*").order("not_before", { ascending: true, nullsFirst: false }),
         sb.from("weight_ledger_entries").select("*").order("dated_at", { ascending: false }),
         sb.from("teacher_tags").select("*").order("sort_order", { ascending: true }),
-        sb.from("teacher_tag_assignments").select("*")
+        sb.from("teacher_tag_assignments").select("*"),
+        sb.from("admin_work_sessions").select("*").order("clocked_in_at", { ascending: false }),
+        sb.from("admin_work_caps").select("*")
       ]);
       for (const r of [cats, tpls, cls, igs, tch, ct, ci, stu, enr]) if (r.error) throw r.error;
       // Non-admin roles may not have SELECT access to teacher_invitations /
@@ -1006,6 +1014,11 @@
       // phase_t6e_teacher_tags.sql is applied in any local-dev branch.
       state.teacherTags            = (tTags && !tTags.error) ? tTags.data : [];
       state.teacherTagAssignments  = (tTagAssigns && !tTagAssigns.error) ? tTagAssigns.data : [];
+      // T19: admin work clock sessions + per-person weekly caps. RLS gives
+      // self (manager_or_above) their own; admins see all. Empty fallback
+      // covers the window before the t19 migrations are applied.
+      state.adminWorkSessions      = (awsRes && !awsRes.error) ? awsRes.data : [];
+      state.adminWorkCaps          = (awcRes && !awcRes.error) ? awcRes.data : [];
     } catch (e) {
       console.error(e);
       showToast("Failed to load: " + e.message, "error");
@@ -1033,6 +1046,7 @@
     renderReportsTab();
     renderUsersTab();
     renderSettingsTab();
+    renderAdminClock();   // T19: top-bar work-clock widget
   }
 
   // Settings tab — integrations hub. Mailchimp lives here now (moved out of
@@ -1167,9 +1181,18 @@
     // span-12 collapses, so no visual noise on day one.
     const adminTasksHtml = renderTeacherTasksCard(null);
 
+    // T19: admin work-clock card for manager_or_above. When present it takes
+    // a span-3 slot on row 1 and the Today card narrows from 8 → 5 so the row
+    // still totals 12; viewers (not manager_or_above) keep the wider Today.
+    const showClock = isManagerOrAbove();
+    const clockCardHtml = showClock
+      ? `<div class="bento-card bento-span-3" id="bentoAdminClock">${renderAdminClockCard()}</div>`
+      : "";
+
     grid.innerHTML = `
-      <div class="bento-card bento-span-8">${renderTodayCard(nextClass, todayClasses.length, now)}</div>
+      <div class="bento-card ${showClock ? "bento-span-5" : "bento-span-8"}">${renderTodayCard(nextClass, todayClasses.length, now)}</div>
       <div class="bento-card bento-span-4">${renderStatsCard(activeClasses, activeTeachers, activeEnrollments)}</div>
+      ${clockCardHtml}
       <div class="bento-card bento-span-5" id="bentoSchedule">${renderScheduleCard(todayClasses, now)}</div>
       <div class="bento-card bento-span-4" id="bentoAttention">${renderAttentionCard()}</div>
       <div class="bento-card bento-span-3">${renderWeekCard(now)}</div>
@@ -1186,6 +1209,436 @@
       const id = sel.dataset.taskId;
       sel.onchange = () => setTaskStatusViaRpc(id, sel.value);
     });
+
+    // T19: wire the admin work-clock card buttons (if present)
+    wireAdminClockControls($("#bentoAdminClock"));
+  }
+
+  /* ═══════════════════ T19: ADMIN WORK CLOCK ═══════════════════
+   *
+   * Office/admin time tracking for manager_or_above. A persistent top-bar
+   * widget + a Home bento card share the same render/wire helpers. Nudges
+   * (clock-in on activity, 15-min idle clock-out) and per-person weekly
+   * caps (super_admin-set, "warn + notify", never block) live here too.
+   * The work-week starts Monday (local time).
+   */
+
+  // ---- identity + lookups ----
+  function myUserId() { return state.session?.user?.id || state.profile?.id || null; }
+  function myAdminSessions() {
+    const uid = myUserId();
+    return uid ? state.adminWorkSessions.filter((s) => s.user_id === uid) : [];
+  }
+  function myOpenAdminSession() {
+    return myAdminSessions().find((s) => !s.clocked_out_at) || null;
+  }
+  function adminSessionMinutes(s, nowMs) {
+    const start = new Date(s.clocked_in_at).getTime();
+    const end = s.clocked_out_at ? new Date(s.clocked_out_at).getTime() : (nowMs || Date.now());
+    return Math.max(0, (end - start) / 60000);
+  }
+
+  // ---- Monday-based week bounds (local time) ----
+  function weekStartMonday(d) {
+    const x = new Date(d);
+    x.setHours(0, 0, 0, 0);
+    const dow = (x.getDay() + 6) % 7; // Mon=0 … Sun=6
+    x.setDate(x.getDate() - dow);
+    return x;
+  }
+  function weekRangeFor(d) {
+    const start = weekStartMonday(d);
+    const end = new Date(start);
+    end.setDate(end.getDate() + 7);
+    return { start, end };
+  }
+
+  // Minutes of admin time a user has logged in the week containing `ref`
+  // (default: now). Counts sessions whose clock-in falls in the week; an
+  // open session accrues up to now.
+  function adminWeekMinutes(userId, ref) {
+    const { start, end } = weekRangeFor(ref || new Date());
+    const s0 = start.getTime(), s1 = end.getTime(), now = Date.now();
+    return state.adminWorkSessions
+      .filter((s) => s.user_id === userId)
+      .filter((s) => { const t = new Date(s.clocked_in_at).getTime(); return t >= s0 && t < s1; })
+      .reduce((sum, s) => sum + adminSessionMinutes(s, now), 0);
+  }
+  function adminTodayMinutes(userId) {
+    const start = new Date(); start.setHours(0, 0, 0, 0);
+    const s0 = start.getTime(), now = Date.now();
+    return state.adminWorkSessions
+      .filter((s) => s.user_id === userId)
+      .filter((s) => new Date(s.clocked_in_at).getTime() >= s0)
+      .reduce((sum, s) => sum + adminSessionMinutes(s, now), 0);
+  }
+  function capMinutesFor(userId) {
+    const row = state.adminWorkCaps.find((c) => c.user_id === userId);
+    return row && row.weekly_cap_minutes != null ? row.weekly_cap_minutes : null;
+  }
+
+  // Super_admin "notify" surface: who is over their weekly cap right now.
+  function usersOverCap() {
+    const out = [];
+    for (const c of state.adminWorkCaps) {
+      if (c.weekly_cap_minutes == null) continue;
+      const used = adminWeekMinutes(c.user_id);
+      if (used > c.weekly_cap_minutes) {
+        const prof = state.profiles.find((p) => p.id === c.user_id);
+        out.push({ user_id: c.user_id, used, cap: c.weekly_cap_minutes,
+          name: prof?.full_name || prof?.par_display_name || "Someone" });
+      }
+    }
+    return out;
+  }
+
+  function fmtHm(mins) {
+    const m = Math.round(mins);
+    const h = Math.floor(m / 60);
+    return h ? `${h}h ${m % 60}m` : `${m}m`;
+  }
+
+  // ---- actions ----
+  async function doAdminClockIn() {
+    const uid = myUserId();
+    if (!uid) return;
+    if (myOpenAdminSession()) return; // already in
+    const resp = await sb.from("admin_work_sessions").insert({ user_id: uid }).select().single();
+    if (resp.error) { showToast("Clock in failed: " + resp.error.message, "error"); return; }
+    clockInNudgeSnoozedUntil = 0;
+    idleNudgeShown = false;
+    lastActivityAt = Date.now();
+    await reloadAll();
+    renderAll();
+    showToast("Clocked in", "success");
+  }
+
+  // Clock out at `whenMs` (default now). Used by the button (now) and by the
+  // idle nudge (back-dated to last activity). Validates >= clock-in, <= now.
+  async function doAdminClockOut(sessionId, whenMs) {
+    const s = state.adminWorkSessions.find((x) => x.id === sessionId);
+    if (!s) return;
+    const inMs = new Date(s.clocked_in_at).getTime();
+    let outMs = whenMs || Date.now();
+    if (outMs > Date.now()) outMs = Date.now();
+    if (outMs < inMs) outMs = inMs;
+    const resp = await sb.from("admin_work_sessions")
+      .update({ clocked_out_at: new Date(outMs).toISOString() })
+      .eq("id", sessionId);
+    if (resp.error) { showToast("Clock out failed: " + resp.error.message, "error"); return; }
+    hideClockNudge();
+    await reloadAll();
+    renderAll();
+    showToast("Clocked out · " + fmtHm((outMs - inMs) / 60000), "success");
+  }
+
+  // Amend a session's clock-out to an EARLIER time (forgot to clock out).
+  async function amendAdminClockOut(sessionId, isoLocal) {
+    const s = state.adminWorkSessions.find((x) => x.id === sessionId);
+    if (!s) return;
+    const inMs = new Date(s.clocked_in_at).getTime();
+    const newMs = new Date(isoLocal).getTime();
+    if (isNaN(newMs)) { showToast("Enter a valid time", "error"); return; }
+    if (newMs < inMs) { showToast("Clock-out can't be before clock-in", "error"); return; }
+    if (newMs > Date.now()) { showToast("Clock-out can't be in the future", "error"); return; }
+    const resp = await sb.from("admin_work_sessions")
+      .update({ clocked_out_at: new Date(newMs).toISOString() })
+      .eq("id", sessionId);
+    if (resp.error) { showToast("Update failed: " + resp.error.message, "error"); return; }
+    closeAdminClockEdit();
+    await reloadAll();
+    renderAll();
+    showToast("Clock-out time updated", "success");
+  }
+
+  // ---- top-bar widget ----
+  function renderAdminClock() {
+    const host = $("#adminClockWidget");
+    if (!host) return;
+    if (!isManagerOrAbove()) { host.style.display = "none"; return; }
+    host.style.display = "";
+    const uid = myUserId();
+    const open = myOpenAdminSession();
+    const cap = capMinutesFor(uid);
+    const week = adminWeekMinutes(uid);
+    const over = cap != null && week > cap;
+    const capBadge = cap != null
+      ? `<span class="clock-cap ${over ? "over" : (week >= cap * 0.8 ? "near" : "")}" title="Admin time this week vs your cap">${fmtHm(week)} / ${fmtHm(cap)}</span>`
+      : "";
+    if (open) {
+      const mins = adminSessionMinutes(open);
+      host.innerHTML = `
+        <span class="clock-dot on" title="Clocked in"></span>
+        <span class="clock-time" data-clock-elapsed>${fmtHm(mins)}</span>
+        ${capBadge}
+        <button class="btn ghost small" data-aws-act="out" data-id="${escapeHtml(open.id)}">Clock out</button>`;
+    } else {
+      host.innerHTML = `
+        <span class="clock-dot off" title="Not clocked in"></span>
+        <span class="clock-time muted">Off the clock</span>
+        ${capBadge}
+        <button class="btn primary small" data-aws-act="in">Clock in</button>`;
+    }
+    wireAdminClockControls(host);
+  }
+
+  // ---- Home bento card ----
+  function renderAdminClockCard() {
+    const uid = myUserId();
+    const open = myOpenAdminSession();
+    const cap = capMinutesFor(uid);
+    const week = adminWeekMinutes(uid);
+    const today = adminTodayMinutes(uid);
+    const over = cap != null && week > cap;
+    const pct = cap ? Math.min(100, Math.round((week / cap) * 100)) : 0;
+    const lastClosed = myAdminSessions()
+      .filter((s) => s.clocked_out_at)
+      .sort((a, b) => new Date(b.clocked_out_at) - new Date(a.clocked_out_at))[0];
+
+    const capBlock = cap != null
+      ? `<div class="clock-cap-bar"><div class="clock-cap-fill ${over ? "over" : (week >= cap * 0.8 ? "near" : "")}" style="width:${pct}%"></div></div>
+         <div class="clock-cap-label ${over ? "over" : ""}">${fmtHm(week)} of ${fmtHm(cap)} weekly cap${over ? " · over cap" : ""}</div>`
+      : `<div class="clock-cap-label muted">${fmtHm(week)} this week · no cap set</div>`;
+
+    const statusLine = open
+      ? `<div class="clock-status on"><span class="clock-dot on"></span> Clocked in · <b data-clock-elapsed>${fmtHm(adminSessionMinutes(open))}</b></div>`
+      : `<div class="clock-status off"><span class="clock-dot off"></span> Off the clock</div>`;
+
+    const actions = open
+      ? `<button class="btn small" data-aws-act="out" data-id="${escapeHtml(open.id)}">Clock out</button>`
+      : `<button class="btn primary small" data-aws-act="in">Clock in</button>`;
+
+    const adjust = lastClosed
+      ? `<button class="btn ghost small" data-aws-act="edit" data-id="${escapeHtml(lastClosed.id)}" title="Forgot to clock out? Set an earlier time">Adjust last clock-out</button>`
+      : "";
+
+    // Super_admin: surface anyone over their cap this week + manage caps.
+    let saBlock = "";
+    if (isSuperAdmin()) {
+      const overList = usersOverCap();
+      const overLine = overList.length
+        ? `<div class="clock-overcap-flag">⚠ ${overList.length} over cap: ${escapeHtml(overList.map((o) => o.name).join(", "))}</div>`
+        : "";
+      saBlock = `${overLine}<button class="btn ghost small" data-aws-act="caps">Manage caps</button>`;
+    }
+
+    return `
+      <div class="bento-head"><span class="bento-title">Admin time</span><span class="bento-ico">⏱</span></div>
+      ${statusLine}
+      <div class="clock-today muted">Today: ${fmtHm(today)}</div>
+      ${capBlock}
+      <div class="clock-card-actions">${actions} ${adjust}</div>
+      ${saBlock ? `<div class="clock-sa-actions">${saBlock}</div>` : ""}
+    `;
+  }
+
+  // Wire clock buttons inside a host (widget or card). Idempotent.
+  function wireAdminClockControls(host) {
+    if (!host) return;
+    $$('[data-aws-act]', host).forEach((btn) => {
+      const act = btn.dataset.awsAct;
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        if (act === "in") doAdminClockIn();
+        else if (act === "out") doAdminClockOut(btn.dataset.id);
+        else if (act === "edit") openAdminClockEdit(btn.dataset.id);
+        else if (act === "caps") openCapManager();
+      };
+    });
+  }
+
+  // ---- edit-earlier modal ----
+  let adminClockEditId = null;
+  function openAdminClockEdit(sessionId) {
+    const s = state.adminWorkSessions.find((x) => x.id === sessionId);
+    if (!s) return;
+    adminClockEditId = sessionId;
+    const inDt = new Date(s.clocked_in_at);
+    const outDt = s.clocked_out_at ? new Date(s.clocked_out_at) : new Date();
+    $("#awsEditInfo").innerHTML =
+      `Clocked in <b>${inDt.toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}</b>. ` +
+      `Set the clock-out to when you actually finished (must be after clock-in, not in the future).`;
+    $("#awsEditOut").value = toLocalInputValue(outDt);
+    $("#awsEditOut").min = toLocalInputValue(inDt);
+    $("#awsEditOut").max = toLocalInputValue(new Date());
+    $("#adminClockEditOverlay").classList.add("open");
+  }
+  function closeAdminClockEdit() {
+    $("#adminClockEditOverlay").classList.remove("open");
+    adminClockEditId = null;
+  }
+  // Format a Date as the value a datetime-local input expects (local tz).
+  function toLocalInputValue(d) {
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
+  // ---- cap manager (super_admin) ----
+  function openCapManager() {
+    if (!isSuperAdmin()) { showToast("Super_admins only", "error"); return; }
+    renderCapManagerList();
+    $("#capManagerOverlay").classList.add("open");
+  }
+  function closeCapManager() { $("#capManagerOverlay").classList.remove("open"); }
+
+  function renderCapManagerList() {
+    const wrap = $("#capManagerList");
+    if (!wrap) return;
+    // Only manager_or_above profiles can accrue admin time, so only they
+    // need caps.
+    const people = state.profiles
+      .filter((p) => ["super_admin", "admin", "manager"].includes(p.role))
+      .sort((a, b) => (a.full_name || "").localeCompare(b.full_name || ""));
+    if (!people.length) { wrap.innerHTML = `<div class="muted">No admins or managers yet.</div>`; return; }
+    wrap.innerHTML = people.map((p) => {
+      const cap = capMinutesFor(p.id);
+      const week = adminWeekMinutes(p.id);
+      const over = cap != null && week > cap;
+      const hrs = cap != null ? (cap / 60) : "";
+      return `
+        <div class="cap-row" data-user-id="${escapeHtml(p.id)}">
+          <div class="cap-name">${escapeHtml(p.full_name || p.par_display_name || p.id)}
+            <span class="cap-role">${escapeHtml(p.role)}</span></div>
+          <div class="cap-usage ${over ? "over" : ""}">${fmtHm(week)} this wk</div>
+          <input class="cap-input" type="number" min="0" step="0.5" placeholder="—"
+                 value="${hrs}" title="Weekly cap in hours (blank = no cap)" /> <span class="cap-unit">h/wk</span>
+        </div>`;
+    }).join("");
+    $$('#capManagerList .cap-row').forEach((row) => {
+      const uid = row.dataset.userId;
+      const inp = row.querySelector(".cap-input");
+      inp.onchange = async () => {
+        const raw = inp.value.trim();
+        if (raw === "") {
+          const resp = await sb.from("admin_work_caps").delete().eq("user_id", uid);
+          if (resp.error) { showToast(resp.error.message, "error"); return; }
+        } else {
+          const hours = parseFloat(raw);
+          if (isNaN(hours) || hours < 0) { showToast("Enter a non-negative number of hours", "error"); return; }
+          const resp = await sb.from("admin_work_caps")
+            .upsert({ user_id: uid, weekly_cap_minutes: Math.round(hours * 60), updated_by: myUserId() }, { onConflict: "user_id" });
+          if (resp.error) { showToast(resp.error.message, "error"); return; }
+        }
+        await reloadAll();
+        renderCapManagerList();
+        renderAdminClock();
+      };
+    });
+  }
+
+  /* ───────────── T19: nudge engine + live timer ─────────────
+   * Activity-driven clock-in nudge, 15-min idle clock-out nudge (back-dated
+   * to last activity), and a weekly-cap warning. One nudge on screen at a
+   * time; a 20s tick keeps the displayed elapsed time fresh.
+   */
+  let lastActivityAt = Date.now();
+  let clockInNudgeSnoozedUntil = 0;
+  let idleNudgeShown = false;
+  let capNudgeShownKey = null;
+  let currentNudgeKind = null;
+  let adminClockEngineStarted = false;
+  let adminClockTickTimer = null;
+  let activityThrottleAt = 0;
+  let adminClockBootAt = Date.now();
+  const AWS_IDLE_MS = 15 * 60 * 1000;
+  const AWS_CLOCKIN_GRACE_MS = 60 * 1000;
+  const AWS_CLOCKIN_SNOOZE_MS = 30 * 60 * 1000;
+
+  function startAdminClockEngine() {
+    if (adminClockEngineStarted) return;
+    adminClockEngineStarted = true;
+    adminClockBootAt = Date.now();
+    lastActivityAt = Date.now();
+    ["click", "keydown", "pointerdown", "scroll"].forEach((ev) =>
+      document.addEventListener(ev, onUserActivity, { passive: true, capture: true }));
+    adminClockTickTimer = setInterval(adminClockTick, 20000);
+  }
+
+  function onUserActivity() {
+    const now = Date.now();
+    lastActivityAt = now;
+    if (!isManagerOrAbove()) return;
+    if (now - activityThrottleAt < 3000) return;
+    activityThrottleAt = now;
+    if (!myOpenAdminSession()) maybeNudgeClockIn();
+    refreshClockElapsed();
+  }
+
+  function adminClockTick() {
+    if (!isManagerOrAbove()) return;
+    refreshClockElapsed();
+    const open = myOpenAdminSession();
+    if (open) {
+      const idle = Date.now() - lastActivityAt;
+      if (idle >= AWS_IDLE_MS && currentNudgeKind !== "idle") {
+        const backdateMs = lastActivityAt;
+        idleNudgeShown = true;
+        showClockNudge({
+          kind: "idle",
+          text: `Still working? No console activity for ${Math.round(idle / 60000)} min. Clock out as of your last activity (${new Date(backdateMs).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })})?`,
+          primary: { label: "Clock out", fn: () => doAdminClockOut(open.id, backdateMs) },
+          secondary: { label: "Still here", fn: () => { lastActivityAt = Date.now(); idleNudgeShown = false; } },
+        });
+      }
+      maybeNudgeCap();
+    }
+  }
+
+  function maybeNudgeClockIn() {
+    if (!isManagerOrAbove() || myOpenAdminSession()) return;
+    if (Date.now() - adminClockBootAt < AWS_CLOCKIN_GRACE_MS) return;
+    if (Date.now() < clockInNudgeSnoozedUntil) return;
+    if (currentNudgeKind) return;
+    showClockNudge({
+      kind: "clockin",
+      text: "You're working in the console — clock in to track this admin time?",
+      primary: { label: "Clock in", fn: () => doAdminClockIn() },
+      secondary: { label: "Not now", fn: () => { clockInNudgeSnoozedUntil = Date.now() + AWS_CLOCKIN_SNOOZE_MS; } },
+    });
+  }
+
+  function maybeNudgeCap() {
+    const uid = myUserId();
+    const cap = capMinutesFor(uid);
+    if (cap == null) return;
+    if (adminWeekMinutes(uid) <= cap) return;
+    const key = String(weekStartMonday(new Date()).getTime());
+    if (capNudgeShownKey === key || currentNudgeKind) return;
+    capNudgeShownKey = key;
+    showClockNudge({
+      kind: "cap",
+      text: `You've passed your weekly admin-time cap (${fmtHm(cap)}). Super_admin can see this. You can keep working.`,
+      primary: { label: "Got it", fn: () => {} },
+    });
+  }
+
+  function showClockNudge({ kind, text, primary, secondary }) {
+    const el = $("#clockNudge");
+    if (!el) return;
+    currentNudgeKind = kind;
+    el.innerHTML = `
+      <div class="clock-nudge-text">${escapeHtml(text)}</div>
+      <div class="clock-nudge-actions">
+        ${secondary ? `<button class="btn ghost small" data-nudge="secondary">${escapeHtml(secondary.label)}</button>` : ""}
+        <button class="btn primary small" data-nudge="primary">${escapeHtml(primary.label)}</button>
+      </div>`;
+    el.classList.add("show");
+    el.querySelector('[data-nudge="primary"]').onclick = () => { hideClockNudge(); primary.fn(); };
+    const sec = el.querySelector('[data-nudge="secondary"]');
+    if (sec) sec.onclick = () => { hideClockNudge(); secondary.fn(); };
+  }
+  function hideClockNudge() {
+    const el = $("#clockNudge");
+    if (el) el.classList.remove("show");
+    currentNudgeKind = null;
+  }
+
+  // Cheap in-place refresh of the running timer text (avoids full re-render).
+  function refreshClockElapsed() {
+    const open = myOpenAdminSession();
+    if (!open) return;
+    const txt = fmtHm(adminSessionMinutes(open));
+    $$('[data-clock-elapsed]').forEach((el) => { el.textContent = txt; });
   }
 
   /* ═════════════ TEACHER HOME (bento) ═════════════
@@ -12658,6 +13111,15 @@
     $("#tagManagerDone").onclick  = closeTagManager;
     $("#tagManagerOverlay").onclick = (e) => { if (e.target.id === "tagManagerOverlay") closeTagManager(); };
     $("#tag_add_btn").onclick = addTeacherTag;
+
+    // T19: admin work-clock edit + cap manager modals
+    $("#adminClockEditCancel").onclick = closeAdminClockEdit;
+    $("#adminClockEditClose").onclick  = closeAdminClockEdit;
+    $("#adminClockEditOverlay").onclick = (e) => { if (e.target.id === "adminClockEditOverlay") closeAdminClockEdit(); };
+    $("#adminClockEditSave").onclick = () => { if (adminClockEditId) amendAdminClockOut(adminClockEditId, $("#awsEditOut").value); };
+    $("#capManagerClose").onclick = closeCapManager;
+    $("#capManagerDone").onclick  = closeCapManager;
+    $("#capManagerOverlay").onclick = (e) => { if (e.target.id === "capManagerOverlay") closeCapManager(); };
 
     // Teacher modal
     $("#teacherCancel").onclick    = closeTeacherEditor;

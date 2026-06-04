@@ -109,6 +109,7 @@
           </div>
         </div>
         <div class="header-actions">
+          <div class="admin-clock-widget" id="adminClockWidget" style="display:none"></div>
           <button type="button" class="theme-switch" id="themeToggle" role="switch" aria-checked="false" aria-label="Toggle light or dark mode" title="Light / dark mode">
             <span class="theme-switch-track">
               <span class="theme-switch-ico sun" aria-hidden="true">☀</span>
@@ -2212,6 +2213,49 @@ workstreams:
 
   <div class="toast" id="toast"></div>
   <div class="loader" id="loader"><div class="spinner"></div></div>
+
+  <!-- T19: admin work-clock nudge (clock-in / idle clock-out / cap warning) -->
+  <div class="clock-nudge" id="clockNudge"></div>
+
+  <!-- T19: adjust a forgotten clock-out to an earlier time -->
+  <div class="modal-overlay" id="adminClockEditOverlay">
+    <div class="modal" style="max-width:460px">
+      <div class="modal-head">
+        <h3>Adjust clock-out time</h3>
+        <button class="btn ghost small" id="adminClockEditClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="results-meta" id="awsEditInfo" style="margin-bottom:10px"></div>
+        <div class="field">
+          <label>Clocked out at</label>
+          <input type="datetime-local" id="awsEditOut" />
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" id="adminClockEditCancel">Cancel</button>
+        <button class="btn primary" id="adminClockEditSave">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- T19: super_admin weekly admin-time caps -->
+  <div class="modal-overlay" id="capManagerOverlay">
+    <div class="modal" style="max-width:640px">
+      <div class="modal-head">
+        <h3>Weekly admin-time caps</h3>
+        <button class="btn ghost small" id="capManagerClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="results-meta" style="margin-bottom:10px">
+          Set a weekly admin-time cap (in hours) per person. Only super_admins can edit. Caps warn the person and flag them to super_admins when exceeded — they never block work. Leave blank for no cap. The work-week starts Monday.
+        </div>
+        <div class="cap-list" id="capManagerList"></div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn primary" id="capManagerDone">Done</button>
+      </div>
+    </div>
+  </div>
 
   <!-- Supabase client -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
