@@ -10164,6 +10164,8 @@
   const REPORTS = [
     { id: "attendance", label: "Attendance", render: renderAttendanceReport },
     { id: "teacher_hours", label: "Teacher hours", render: renderTeacherHoursReport },
+    { id: "payroll", label: "Payroll export", render: renderPayrollReport },
+    { id: "retention", label: "Retention / at-risk", render: renderRetentionReport },
     { id: "par_funnel", label: "PAR funnel", render: renderParFunnelReport },
     { id: "off_plate", label: "Off your plate", render: renderOffPlateReport },
   ];
@@ -10586,6 +10588,371 @@
       };
     });
     $("#rpt_export_hours_csv").onclick = () => downloadTeacherHoursCsv(log, s.start, s.end);
+  }
+
+  /* ── Wave 3: Payroll export ─────────────────────────────────
+   * Unifies teaching hours (clock_ins, keyed by teacher_id) and admin/office
+   * hours (admin_work_sessions, keyed by profile/user_id) into one per-person
+   * roll-up for a pay period, then exports a Gusto-importable CSV with decimal
+   * hours. A profile linked to a teacher (profiles.teacher_id) merges both
+   * streams into a single row. Open (not-clocked-out) shifts are excluded from
+   * totals and surfaced as a warning so a period isn't finalized mid-shift.
+   */
+  function minToDecimalHours(mins) { return Math.round((mins / 60) * 100) / 100; }
+
+  function buildPayrollRows(start, end) {
+    // Teaching minutes by teacher_id (completed shifts only).
+    const teach = new Map();
+    let openTeaching = 0;
+    state.clockIns
+      .filter((c) => c.session_date >= start && c.session_date <= end)
+      .forEach((c) => {
+        if (!c.clocked_out_at) { openTeaching++; return; }
+        const mins = Math.max(0, Math.round((new Date(c.clocked_out_at) - new Date(c.clocked_in_at)) / 60000));
+        const t = teach.get(c.teacher_id) || { minutes: 0, shifts: 0 };
+        t.minutes += mins; t.shifts++; teach.set(c.teacher_id, t);
+      });
+
+    // Admin minutes by user_id (profiles.id), clock-in within range, completed.
+    const admin = new Map();
+    let openAdmin = 0;
+    const s0 = new Date(start + "T00:00:00").getTime();
+    const e1 = new Date(end + "T23:59:59").getTime();
+    state.adminWorkSessions.forEach((sws) => {
+      const inMs = new Date(sws.clocked_in_at).getTime();
+      if (inMs < s0 || inMs > e1) return;
+      if (!sws.clocked_out_at) { openAdmin++; return; }
+      const mins = Math.max(0, Math.round((new Date(sws.clocked_out_at) - new Date(sws.clocked_in_at)) / 60000));
+      const a = admin.get(sws.user_id) || { minutes: 0, sessions: 0 };
+      a.minutes += mins; a.sessions++; admin.set(sws.user_id, a);
+    });
+
+    const rows = [];
+    const consumed = new Set();
+    // Teachers with teaching time (merge linked profile's admin time).
+    for (const [tid, tv] of teach) {
+      const teacher = state.teachers.find((t) => t.id === tid);
+      const prof = state.profiles.find((p) => p.teacher_id === tid);
+      let adminMin = 0;
+      if (prof && admin.has(prof.id)) { adminMin = admin.get(prof.id).minutes; consumed.add(prof.id); }
+      rows.push({
+        name: (teacher && teacher.full_name) || (prof && prof.full_name) || "(unknown)",
+        email: (teacher && teacher.email) || (prof && prof.email) || "",
+        payType: teacher ? (teacher.pay_type || "") : "",
+        payRate: teacher ? (teacher.pay_rate || "") : "",
+        teachingMin: tv.minutes,
+        adminMin,
+      });
+    }
+    // Profiles with admin time not already merged into a teacher row.
+    for (const [uid, av] of admin) {
+      if (consumed.has(uid)) continue;
+      const prof = state.profiles.find((p) => p.id === uid);
+      const linkedTeacher = prof && prof.teacher_id ? state.teachers.find((t) => t.id === prof.teacher_id) : null;
+      rows.push({
+        name: (prof && prof.full_name) || (prof && prof.par_display_name) || "(unknown user)",
+        email: (prof && prof.email) || (linkedTeacher && linkedTeacher.email) || "",
+        payType: linkedTeacher ? (linkedTeacher.pay_type || "") : "",
+        payRate: linkedTeacher ? (linkedTeacher.pay_rate || "") : "",
+        teachingMin: 0,
+        adminMin: av.minutes,
+      });
+    }
+    rows.forEach((r) => { r.totalMin = r.teachingMin + r.adminMin; });
+    rows.sort((a, b) => b.totalMin - a.totalMin);
+    return { rows, openTeaching, openAdmin };
+  }
+
+  function renderPayrollReport(host) {
+    const s = state.rptState;
+    const showPay = hasPerm("view_pay_rates");
+    const { rows, openTeaching, openAdmin } = buildPayrollRows(s.start, s.end);
+    const fmtHours = (mins) => { const h = Math.floor(mins / 60); return h > 0 ? `${h}h ${mins % 60}m` : `${mins}m`; };
+    const totTeach = rows.reduce((a, r) => a + r.teachingMin, 0);
+    const totAdmin = rows.reduce((a, r) => a + r.adminMin, 0);
+    const presetBtn = (label, days) => `<button data-rpt-preset="${days}" class="btn small">${escapeHtml(label)}</button>`;
+    const rangeBtn = (label, key) => `<button data-payroll-range="${key}" class="btn small">${escapeHtml(label)}</button>`;
+    const openNote = (openTeaching || openAdmin)
+      ? `<div style="margin-top:10px;font-size:12px;color:#a36a00">⚠ ${openTeaching + openAdmin} open shift${openTeaching + openAdmin === 1 ? "" : "s"} (not clocked out) excluded from totals — finalize them before running payroll.</div>`
+      : "";
+
+    host.innerHTML = `
+      <div style="display:flex;gap:8px;align-items:end;flex-wrap:wrap;padding:12px 0 16px;border-bottom:1px solid var(--border-subtle,#eee)">
+        <div class="field" style="flex:0 0 160px"><label>From</label><input type="date" id="rpt_start" value="${escapeHtml(s.start)}" /></div>
+        <div class="field" style="flex:0 0 160px"><label>To</label><input type="date" id="rpt_end" value="${escapeHtml(s.end)}" /></div>
+        <div style="display:flex;gap:4px;flex-wrap:wrap">
+          ${rangeBtn("This week", "this_week")}
+          ${rangeBtn("Last week", "last_week")}
+          ${presetBtn("Last 14d", 14)}
+          ${presetBtn("Last 30d", 30)}
+        </div>
+        <div style="flex:1"></div>
+        <button class="btn small" id="rpt_export_payroll_csv">Export CSV (Gusto)</button>
+      </div>
+
+      <div style="margin-top:16px">
+        <div class="section-title">Summary <span style="font-weight:400;color:var(--ink-dim);text-transform:none;letter-spacing:0">${escapeHtml(s.start)} → ${escapeHtml(s.end)}</span></div>
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;padding:12px 0">
+          ${[
+            ["People", rows.length, ""],
+            ["Teaching", fmtHours(totTeach), ""],
+            ["Admin", fmtHours(totAdmin), ""],
+            ["Grand total", fmtHours(totTeach + totAdmin), ""],
+          ].map(([k, v, col]) => `
+            <div style="padding:10px 12px;background:var(--surface-alt,#f5f4ef);border-radius:8px">
+              <div style="font-size:11px;color:var(--ink-dim);text-transform:uppercase;letter-spacing:.5px">${escapeHtml(k)}</div>
+              <div style="font-size:22px;font-weight:600;margin-top:2px;${col ? `color:${col}` : ""}">${v}</div>
+            </div>`).join("")}
+        </div>
+        ${openNote}
+      </div>
+
+      <div style="margin-top:16px">
+        <div class="section-title">By person <span style="font-weight:400;color:var(--ink-dim);text-transform:none;letter-spacing:0">(teaching + admin)</span></div>
+        ${rows.length === 0 ? '<div style="padding:12px 0;color:var(--ink-dim);font-size:12.5px">No completed hours in this range.</div>' : `
+          <table style="width:100%;border-collapse:collapse;font-size:12.5px">
+            <thead>
+              <tr style="text-align:left;color:var(--ink-dim);border-bottom:1px solid var(--border)">
+                <th style="padding:6px 8px;font-weight:600">Person</th>
+                <th style="padding:6px 8px;font-weight:600">Email</th>
+                ${showPay ? '<th style="padding:6px 8px;font-weight:600">Pay</th>' : ""}
+                <th style="padding:6px 8px;font-weight:600;text-align:right">Teaching</th>
+                <th style="padding:6px 8px;font-weight:600;text-align:right">Admin</th>
+                <th style="padding:6px 8px;font-weight:600;text-align:right">Total</th>
+                <th style="padding:6px 8px;font-weight:600;text-align:right">Decimal hrs</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows.map((r) => `
+                <tr style="border-bottom:1px solid var(--border-subtle,#eee)">
+                  <td style="padding:6px 8px">${escapeHtml(r.name)}</td>
+                  <td style="padding:6px 8px;color:var(--ink-dim)">${escapeHtml(r.email)}</td>
+                  ${showPay ? `<td style="padding:6px 8px;color:var(--ink-dim)">${escapeHtml(r.payType)}${r.payRate ? ` · ${escapeHtml(r.payRate)}` : ""}</td>` : ""}
+                  <td style="padding:6px 8px;text-align:right">${escapeHtml(fmtHours(r.teachingMin))}</td>
+                  <td style="padding:6px 8px;text-align:right">${escapeHtml(fmtHours(r.adminMin))}</td>
+                  <td style="padding:6px 8px;text-align:right;font-weight:600">${escapeHtml(fmtHours(r.totalMin))}</td>
+                  <td style="padding:6px 8px;text-align:right;font-variant-numeric:tabular-nums">${minToDecimalHours(r.totalMin).toFixed(2)}</td>
+                </tr>`).join("")}
+            </tbody>
+          </table>`}
+      </div>
+    `;
+
+    $("#rpt_start").onchange = (e) => { state.rptState.start = e.target.value; renderReportsTab(); };
+    $("#rpt_end").onchange   = (e) => { state.rptState.end   = e.target.value; renderReportsTab(); };
+    host.querySelectorAll("[data-rpt-preset]").forEach((b) => {
+      b.onclick = () => {
+        const days = parseInt(b.dataset.rptPreset, 10);
+        const today = new Date();
+        const start = new Date(today); start.setDate(start.getDate() - (days - 1));
+        state.rptState.start = isoDate(start);
+        state.rptState.end = isoDate(today);
+        renderReportsTab();
+      };
+    });
+    host.querySelectorAll("[data-payroll-range]").forEach((b) => {
+      b.onclick = () => {
+        const key = b.dataset.payrollRange;
+        const monday = weekStartMonday(new Date());
+        let start = new Date(monday), end;
+        if (key === "this_week") { end = new Date(monday); end.setDate(end.getDate() + 6); }
+        else { start.setDate(start.getDate() - 7); end = new Date(start); end.setDate(end.getDate() + 6); }
+        state.rptState.start = isoDate(start);
+        state.rptState.end = isoDate(end);
+        renderReportsTab();
+      };
+    });
+    $("#rpt_export_payroll_csv").onclick = () => downloadPayrollCsv(rows, s.start, s.end);
+  }
+
+  function downloadPayrollCsv(rows, start, end) {
+    const esc = (v) => { const s = String(v == null ? "" : v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+    const header = ["Name", "Email", "Pay type", "Pay rate", "Teaching hours", "Admin hours", "Total hours", "Period start", "Period end"].join(",");
+    const body = rows.map((r) => [
+      r.name, r.email, r.payType, r.payRate,
+      minToDecimalHours(r.teachingMin).toFixed(2),
+      minToDecimalHours(r.adminMin).toFixed(2),
+      minToDecimalHours(r.totalMin).toFixed(2),
+      start, end,
+    ].map(esc).join(",")).join("\n");
+    const csv = header + "\n" + body + "\n";
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `payroll-${start}-to-${end}.csv`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  /* ── Wave 2: Retention / at-risk students ───────────────────
+   * Read-only. Surfaces currently-enrolled students trending toward dropping,
+   * plus a recently-dropped win-back list. Heuristics (tunable constants):
+   *   - CONSEC_ABSENCE trailing absences in a row (default 2)
+   *   - attendance rate < RATE_THRESHOLD over >= MIN_SESSIONS recorded (60% / 4)
+   * Attendance is bounded by the report's date range; recently-dropped uses
+   * enrollments.dropped_at within the range.
+   */
+  function firstParentContact(stu) {
+    const names  = Array.isArray(stu?.parent_names)  ? stu.parent_names  : [];
+    const emails = Array.isArray(stu?.parent_emails) ? stu.parent_emails : [];
+    const phones = Array.isArray(stu?.parent_phones) ? stu.parent_phones : [];
+    return { name: names[0] || "", email: emails[0] || "", phone: phones[0] || "" };
+  }
+  function studentFullName(stu) {
+    return stu ? `${stu.first_name || ""} ${stu.last_name || ""}`.trim() || "(unnamed)" : "(unknown)";
+  }
+
+  function buildRetentionData(start, end) {
+    const CONSEC_ABSENCE = 2, MIN_SESSIONS = 4, RATE_THRESHOLD = 0.6;
+    const atRisk = [];
+    state.enrollments.filter((e) => e.status === "active").forEach((e) => {
+      const atts = state.attendance
+        .filter((a) => a.enrollment_id === e.id && a.session_date >= start && a.session_date <= end)
+        .sort((x, y) => (x.session_date < y.session_date ? -1 : 1));
+      if (atts.length === 0) return;
+      const present = atts.filter((a) => a.status === "present" || a.status === "late").length;
+      const rate = present / atts.length;
+      let consec = 0;
+      for (let i = atts.length - 1; i >= 0; i--) {
+        if (atts[i].status === "absent" || atts[i].status === "excused") consec++; else break;
+      }
+      const lastPresentRec = [...atts].reverse().find((a) => a.status === "present" || a.status === "late");
+      const reasons = [];
+      if (consec >= CONSEC_ABSENCE) reasons.push(`${consec} absences in a row`);
+      if (atts.length >= MIN_SESSIONS && rate < RATE_THRESHOLD) reasons.push(`Low attendance (${Math.round(rate * 100)}%)`);
+      if (!reasons.length) return;
+      const stu = state.students.find((s) => s.id === e.student_id);
+      const cls = state.classes.find((c) => c.id === e.class_id);
+      atRisk.push({
+        student: studentFullName(stu), className: cls ? (cls.name || "—") : "(unknown class)",
+        reasons, rate, sessions: atts.length,
+        lastAttended: lastPresentRec ? lastPresentRec.session_date : null,
+        parent: firstParentContact(stu),
+        riskScore: (consec >= CONSEC_ABSENCE ? consec * 10 : 0) + Math.round((1 - rate) * 100),
+      });
+    });
+    atRisk.sort((a, b) => b.riskScore - a.riskScore);
+
+    const s0 = start, s1 = end;
+    const recentlyDropped = state.enrollments
+      .filter((e) => e.status !== "active" && e.dropped_at)
+      .filter((e) => { const d = isoDate(new Date(e.dropped_at)); return d >= s0 && d <= s1; })
+      .map((e) => {
+        const stu = state.students.find((s) => s.id === e.student_id);
+        const cls = state.classes.find((c) => c.id === e.class_id);
+        return {
+          student: studentFullName(stu), className: cls ? (cls.name || "—") : "(unknown class)",
+          droppedAt: e.dropped_at, reason: e.drop_reason || "", parent: firstParentContact(stu),
+        };
+      })
+      .sort((a, b) => new Date(b.droppedAt) - new Date(a.droppedAt));
+
+    return { atRisk, recentlyDropped };
+  }
+
+  function renderRetentionReport(host) {
+    const s = state.rptState;
+    const showContact = hasPerm("view_parent_contact") || isAdminOrAbove();
+    const { atRisk, recentlyDropped } = buildRetentionData(s.start, s.end);
+    const presetBtn = (label, days) => `<button data-rpt-preset="${days}" class="btn small">${escapeHtml(label)}</button>`;
+    const contactCell = (p) => showContact
+      ? `${escapeHtml(p.name || "—")}${p.email ? `<div style="font-size:11px;color:var(--ink-dim)">${escapeHtml(p.email)}</div>` : ""}${p.phone ? `<div style="font-size:11px;color:var(--ink-dim)">${escapeHtml(p.phone)}</div>` : ""}`
+      : '<span style="color:var(--ink-mute)">—</span>';
+    const fmtDate = (iso) => iso ? new Date(iso.length > 10 ? iso : iso + "T00:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) : "—";
+
+    host.innerHTML = `
+      <div style="display:flex;gap:8px;align-items:end;flex-wrap:wrap;padding:12px 0 16px;border-bottom:1px solid var(--border-subtle,#eee)">
+        <div class="field" style="flex:0 0 160px"><label>From</label><input type="date" id="rpt_start" value="${escapeHtml(s.start)}" /></div>
+        <div class="field" style="flex:0 0 160px"><label>To</label><input type="date" id="rpt_end" value="${escapeHtml(s.end)}" /></div>
+        <div style="display:flex;gap:4px">${presetBtn("Last 30d", 30)}${presetBtn("Last 60d", 60)}${presetBtn("Last 90d", 90)}</div>
+        <div style="flex:1"></div>
+        <button class="btn small" id="rpt_export_retention_csv">Export CSV (at-risk)</button>
+      </div>
+
+      <div style="margin-top:16px">
+        <div class="section-title">At-risk <span style="font-weight:400;color:var(--ink-dim);text-transform:none;letter-spacing:0">(active enrollments · ≥2 absences in a row or &lt;60% attendance over ≥4 sessions)</span></div>
+        ${atRisk.length === 0 ? '<div style="padding:12px 0;color:var(--ink-dim);font-size:12.5px">No at-risk students in this range. 🎉</div>' : `
+          <table style="width:100%;border-collapse:collapse;font-size:12.5px">
+            <thead>
+              <tr style="text-align:left;color:var(--ink-dim);border-bottom:1px solid var(--border)">
+                <th style="padding:6px 8px;font-weight:600">Student</th>
+                <th style="padding:6px 8px;font-weight:600">Class</th>
+                <th style="padding:6px 8px;font-weight:600">Why</th>
+                <th style="padding:6px 8px;font-weight:600;text-align:right">Rate</th>
+                <th style="padding:6px 8px;font-weight:600">Last attended</th>
+                <th style="padding:6px 8px;font-weight:600">Parent contact</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${atRisk.map((r) => `
+                <tr style="border-bottom:1px solid var(--border-subtle,#eee)">
+                  <td style="padding:6px 8px;font-weight:500">${escapeHtml(r.student)}</td>
+                  <td style="padding:6px 8px">${escapeHtml(r.className)}</td>
+                  <td style="padding:6px 8px">${r.reasons.map((x) => `<span class="type-badge" style="background:rgba(239,68,68,.12);color:#b91c1c">${escapeHtml(x)}</span>`).join(" ")}</td>
+                  <td style="padding:6px 8px;text-align:right;${r.rate < 0.6 ? "color:#b91c1c;font-weight:600" : ""}">${Math.round(r.rate * 100)}%</td>
+                  <td style="padding:6px 8px;white-space:nowrap">${escapeHtml(fmtDate(r.lastAttended))}</td>
+                  <td style="padding:6px 8px">${contactCell(r.parent)}</td>
+                </tr>`).join("")}
+            </tbody>
+          </table>`}
+      </div>
+
+      <div style="margin-top:16px">
+        <div class="section-title">Recently dropped <span style="font-weight:400;color:var(--ink-dim);text-transform:none;letter-spacing:0">(win-back candidates)</span></div>
+        ${recentlyDropped.length === 0 ? '<div style="padding:12px 0;color:var(--ink-dim);font-size:12.5px">No drops recorded in this range.</div>' : `
+          <table style="width:100%;border-collapse:collapse;font-size:12.5px">
+            <thead>
+              <tr style="text-align:left;color:var(--ink-dim);border-bottom:1px solid var(--border)">
+                <th style="padding:6px 8px;font-weight:600">Student</th>
+                <th style="padding:6px 8px;font-weight:600">Class</th>
+                <th style="padding:6px 8px;font-weight:600">Dropped</th>
+                <th style="padding:6px 8px;font-weight:600">Reason</th>
+                <th style="padding:6px 8px;font-weight:600">Parent contact</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${recentlyDropped.map((r) => `
+                <tr style="border-bottom:1px solid var(--border-subtle,#eee)">
+                  <td style="padding:6px 8px;font-weight:500">${escapeHtml(r.student)}</td>
+                  <td style="padding:6px 8px">${escapeHtml(r.className)}</td>
+                  <td style="padding:6px 8px;white-space:nowrap">${escapeHtml(fmtDate(r.droppedAt))}</td>
+                  <td style="padding:6px 8px;color:var(--ink-dim)">${escapeHtml(r.reason || "—")}</td>
+                  <td style="padding:6px 8px">${contactCell(r.parent)}</td>
+                </tr>`).join("")}
+            </tbody>
+          </table>`}
+      </div>
+    `;
+
+    $("#rpt_start").onchange = (e) => { state.rptState.start = e.target.value; renderReportsTab(); };
+    $("#rpt_end").onchange   = (e) => { state.rptState.end   = e.target.value; renderReportsTab(); };
+    host.querySelectorAll("[data-rpt-preset]").forEach((b) => {
+      b.onclick = () => {
+        const days = parseInt(b.dataset.rptPreset, 10);
+        const today = new Date();
+        const start = new Date(today); start.setDate(start.getDate() - (days - 1));
+        state.rptState.start = isoDate(start);
+        state.rptState.end = isoDate(today);
+        renderReportsTab();
+      };
+    });
+    $("#rpt_export_retention_csv").onclick = () => downloadRetentionCsv(atRisk, s.start, s.end, showContact);
+  }
+
+  function downloadRetentionCsv(rows, start, end, showContact) {
+    const esc = (v) => { const s = String(v == null ? "" : v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+    const header = ["Student", "Class", "Reasons", "AttendanceRate", "Sessions", "LastAttended"]
+      .concat(showContact ? ["ParentName", "ParentEmail", "ParentPhone"] : []).join(",");
+    const body = rows.map((r) => [
+      r.student, r.className, r.reasons.join("; "), Math.round(r.rate * 100) + "%", r.sessions, r.lastAttended || "",
+    ].concat(showContact ? [r.parent.name, r.parent.email, r.parent.phone] : []).map(esc).join(",")).join("\n");
+    const csv = header + "\n" + body + "\n";
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `at-risk-${start}-to-${end}.csv`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   }
 
   /* ── T7b: PAR funnel report ─────────────────────────────────
