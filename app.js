@@ -3781,6 +3781,7 @@
     $("#f_notes").value = tpl ? (tpl.notes || "") : "";
     populateCategorySelect("#f_category", tpl ? tpl.category_id : (state.categories[0]?.id));
     renderImageRows(tpl ? tpl.images : []);
+    buildVarMenu();
     updateDetectedVars();
     $("#deleteTemplateBtn").style.display = tpl ? "" : "none";
     $("#templateModalOverlay").classList.add("open");
@@ -3821,6 +3822,46 @@
   function updateDetectedVars() {
     const vars = detectVars($("#f_body").value);
     $("#detectedVars").textContent = vars.length ? vars.map((v) => "{" + v + "}").join(" · ") : "—";
+  }
+
+  // Clickable menu of the standard variables that auto-fill on a lead reply
+  // (see leadVariableContext). Clicking a chip inserts {var} at the cursor in
+  // the body. Built once and inserted just above the body textarea.
+  const TEMPLATE_VAR_MENU = [
+    { group: "Parent", vars: ["parent_name", "first_name", "last_name", "email", "phone"] },
+    { group: "Child",  vars: ["child_name", "child_first_name", "child_dob"] },
+    { group: "Other",  vars: ["school"] },
+  ];
+
+  function buildVarMenu() {
+    const body = $("#f_body");
+    if (!body || document.getElementById("f_var_menu")) return;
+    const menu = document.createElement("div");
+    menu.id = "f_var_menu";
+    menu.style.cssText = "margin:6px 0 4px;display:flex;flex-wrap:wrap;gap:6px;align-items:center";
+    menu.innerHTML =
+      `<span style="font-size:12px;color:var(--ink-dim);margin-right:2px">Insert variable:</span>` +
+      TEMPLATE_VAR_MENU.map((g) =>
+        g.vars.map((v) =>
+          `<button type="button" class="btn ghost small" data-var="${v}" title="Insert {${v}} at the cursor">{${v}}</button>`
+        ).join("")
+      ).join("");
+    body.parentNode.insertBefore(menu, body);
+    menu.querySelectorAll("[data-var]").forEach((b) => {
+      b.onclick = () => insertVarAtCursor("{" + b.dataset.var + "}");
+    });
+  }
+
+  function insertVarAtCursor(token) {
+    const ta = $("#f_body");
+    if (!ta) return;
+    const start = (ta.selectionStart != null) ? ta.selectionStart : ta.value.length;
+    const end = (ta.selectionEnd != null) ? ta.selectionEnd : ta.value.length;
+    ta.value = ta.value.slice(0, start) + token + ta.value.slice(end);
+    const pos = start + token.length;
+    ta.focus();
+    try { ta.setSelectionRange(pos, pos); } catch (e) {}
+    updateDetectedVars();
   }
 
   async function saveTemplate() {
@@ -8395,15 +8436,19 @@
 
     const canManage = hasPerm("respond_to_leads");
 
+    // One card per person (grouped by email/phone); each submission is listed
+    // as its own inquiry underneath so re-inquiries / multiple children are
+    // never collapsed away.
+    const groups = groupLeadsByContact(rows);
     const cards = rows.length === 0
       ? `<div class="sr-empty">${state.leads.length === 0
           ? "No leads yet. Once Meta is wired up, parent submissions will appear here."
           : "No leads match this filter."}</div>`
-      : rows.map((l) => leadCardHtml(l, canManage)).join("");
+      : groups.map((g) => leadGroupCardHtml(g, canManage)).join("");
 
     panel.innerHTML = `
       <div class="tab-head">
-        <div class="results-meta">${rows.length} of ${state.leads.length} lead${state.leads.length === 1 ? "" : "s"}</div>
+        <div class="results-meta">${groups.length} contact${groups.length === 1 ? "" : "s"} · ${rows.length} of ${state.leads.length} lead${state.leads.length === 1 ? "" : "s"}</div>
         <div style="display:flex;gap:8px;align-items:center">
           <input class="search" id="lead_search" type="search" placeholder="Search by name, email, child…" value="${escapeHtml(state.lState.query || "")}" style="width:240px" />
         </div>
@@ -8471,6 +8516,87 @@
         ${l.notes ? `<div class="lead-card-notes">📝 ${escapeHtml(l.notes)}</div>` : ""}
         ${fetchErr}
         <div class="lead-card-actions">${actions}</div>
+      </div>
+    `;
+  }
+
+  // Group filtered lead rows into one entry per person (by email, then phone,
+  // else the row id). Each group is sorted newest-first; groups are ordered by
+  // their most-recent inquiry.
+  function groupLeadsByContact(rows) {
+    const map = new Map();
+    for (const l of rows) {
+      const key = (l.parent_email && l.parent_email.trim().toLowerCase())
+        || (l.parent_phone && ("phone:" + l.parent_phone.trim()))
+        || ("id:" + l.id);
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(l);
+    }
+    const groups = [];
+    for (const arr of map.values()) {
+      arr.sort((a, b) => new Date(b.received_at || 0) - new Date(a.received_at || 0));
+      groups.push(arr);
+    }
+    groups.sort((a, b) => new Date(b[0].received_at || 0) - new Date(a[0].received_at || 0));
+    return groups;
+  }
+
+  function leadGroupCardHtml(group, canManage) {
+    const primary = group[0]; // most recent inquiry drives the headline + actions
+    const meta = LEAD_STATUS_META[primary.status] || LEAD_STATUS_META.new;
+
+    const contactLines = [
+      primary.parent_email ? `📧 <a href="mailto:${escapeHtml(primary.parent_email)}">${escapeHtml(primary.parent_email)}</a>` : "",
+      primary.parent_phone ? `📞 <a href="tel:${escapeHtml(primary.parent_phone)}">${escapeHtml(primary.parent_phone)}</a>` : "",
+    ].filter(Boolean).map((line) => `<div class="lead-detail-line">${line}</div>`).join("");
+
+    const inquiries = group.map((l) => {
+      const im = LEAD_STATUS_META[l.status] || LEAD_STATUS_META.new;
+      const when = l.received_at ? formatRelativePast(new Date(l.received_at)) : "";
+      const bits = [
+        l.child_name ? `👶 ${escapeHtml(l.child_name)}` : "",
+        l.school_of_interest ? `🏫 ${escapeHtml(l.school_of_interest)}` : "",
+        l.notes ? escapeHtml(l.notes) : "",
+      ].filter(Boolean).join(" · ");
+      const replyBtn = canManage && l.status !== "promoted"
+        ? `<button class="btn small ghost" data-lead-action="reply" data-lead-id="${l.id}" title="Reply to this inquiry">✉</button>`
+        : "";
+      return `
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:4px 0;border-top:1px solid var(--line,#eee);font-size:12px;color:var(--ink-dim)">
+          <span class="lead-status-chip ${im.chip}">${im.label}</span>
+          <span>${escapeHtml(when)}</span>
+          ${bits ? `<span>${bits}</span>` : ""}
+          ${replyBtn ? `<span style="margin-left:auto">${replyBtn}</span>` : ""}
+        </div>`;
+    }).join("");
+
+    let actions = "";
+    if (canManage) {
+      const l = primary;
+      const isTerminal = l.status === "promoted" || l.status === "archived";
+      actions = `
+        <button class="btn small" data-lead-action="view" data-lead-id="${l.id}">View</button>
+        ${l.status !== "promoted" ? `<button class="btn small primary" data-lead-action="reply" data-lead-id="${l.id}">✉ Reply</button>` : ""}
+        ${l.status !== "promoted" && l.status !== "junk" ? `<button class="btn small" data-lead-action="promote" data-lead-id="${l.id}">→ Promote</button>` : ""}
+        ${l.status !== "junk" && !isTerminal ? `<button class="btn small" data-lead-action="junk" data-lead-id="${l.id}">Junk</button>` : ""}
+        ${!isTerminal ? `<button class="btn small" data-lead-action="archive" data-lead-id="${l.id}">Archive</button>` : ""}
+        ${l.status === "junk" || l.status === "archived" ? `<button class="btn small" data-lead-action="reopen" data-lead-id="${l.id}">Reopen</button>` : ""}
+      `;
+    }
+
+    const countBadge = group.length > 1
+      ? `<span style="font-size:11px;color:var(--ink-dim);font-weight:500">· ${group.length} inquiries</span>`
+      : "";
+
+    return `
+      <div class="lead-card">
+        <div class="lead-card-head">
+          <div class="lead-card-name">${escapeHtml(leadSummaryName(primary))} ${countBadge}</div>
+          <span class="lead-status-chip ${meta.chip}">${meta.label}</span>
+        </div>
+        ${contactLines ? `<div class="lead-card-details">${contactLines}</div>` : ""}
+        <div style="margin-top:6px">${inquiries}</div>
+        <div class="lead-card-actions" style="margin-top:8px">${actions}</div>
       </div>
     `;
   }
