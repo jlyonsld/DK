@@ -2268,6 +2268,25 @@ workstreams:
     </div>
   </div>
 
+  <!-- T22: super_admin work-assignment matrix (area → primary/backup admin) -->
+  <div class="modal-overlay" id="assignmentsOverlay">
+    <div class="modal" style="max-width:660px">
+      <div class="modal-head">
+        <h3>Work assignments</h3>
+        <button class="btn ghost small" id="assignmentsClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="results-meta" style="margin-bottom:10px">
+          Assign each area to an admin. New work in that area auto-creates a task for the <b>primary</b> (a <b>backup</b> also sees the area's tasks on their Home). Only super_admins can edit. Leave unassigned to fall back to the super_admin.
+        </div>
+        <div class="wa-list" id="assignmentsList"></div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn primary" id="assignmentsDone">Done</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Supabase client -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <!-- PDF.js for the T5c watermarked curriculum viewer is loaded

@@ -38,6 +38,7 @@
     adminWorkSessions: [],  // T19: office/admin time clock (manager_or_above).
                             // self sees own; admins see all. one open per user.
     adminWorkCaps: [],      // T19: per-person weekly minute caps (super_admin-set).
+    workAssignments: [],    // T22: area→primary/backup admin routing matrix.
     matchCandidates: [],    // unresolved student_match_candidates rows (admin-visible)
     teacherInvitations: [],
     subRequests: [],        // sub_requests rows (RLS-filtered: open visible to all,
@@ -660,7 +661,7 @@
       "liability_waivers", "liability_waiver_signatures",
       "payment_methods",
       "teacher_tags", "teacher_tag_assignments",
-      "admin_work_sessions", "admin_work_caps",
+      "admin_work_sessions", "admin_work_caps", "work_assignments",
       "events", "event_staff",
       "inventory_items", "inventory_assignments",
       "student_intake_requests",
@@ -878,7 +879,7 @@
   async function reloadAll() {
     showLoader(true);
     try {
-      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches, att, clk, subs, subClm, schs, canc, cur, curA, tpd, tdocs, waivers, wSigs, pms, prof, evs, evStaff, invItems, invAssigns, intakes, parPromo, leadsRes, tasksRes, decisionsRes, weightLedgerRes, tTags, tTagAssigns, awsRes, awcRes] = await Promise.all([
+      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches, att, clk, subs, subClm, schs, canc, cur, curA, tpd, tdocs, waivers, wSigs, pms, prof, evs, evStaff, invItems, invAssigns, intakes, parPromo, leadsRes, tasksRes, decisionsRes, weightLedgerRes, tTags, tTagAssigns, awsRes, awcRes, waRes] = await Promise.all([
         sb.from("categories").select("*").order("sort_order", { ascending: true }),
         sb.from("templates").select("*").order("created_at", { ascending: true }),
         sb.from("classes").select("*").order("name", { ascending: true }),
@@ -920,7 +921,8 @@
         sb.from("teacher_tags").select("*").order("sort_order", { ascending: true }),
         sb.from("teacher_tag_assignments").select("*"),
         sb.from("admin_work_sessions").select("*").order("clocked_in_at", { ascending: false }),
-        sb.from("admin_work_caps").select("*")
+        sb.from("admin_work_caps").select("*"),
+        sb.from("work_assignments").select("*")
       ]);
       for (const r of [cats, tpls, cls, igs, tch, ct, ci, stu, enr]) if (r.error) throw r.error;
       // Non-admin roles may not have SELECT access to teacher_invitations /
@@ -1019,6 +1021,8 @@
       // covers the window before the t19 migrations are applied.
       state.adminWorkSessions      = (awsRes && !awsRes.error) ? awsRes.data : [];
       state.adminWorkCaps          = (awcRes && !awcRes.error) ? awcRes.data : [];
+      // T22: work-assignment routing matrix (area→primary/backup).
+      state.workAssignments        = (waRes && !waRes.error) ? waRes.data : [];
     } catch (e) {
       console.error(e);
       showToast("Failed to load: " + e.message, "error");
@@ -1074,9 +1078,76 @@
         <p class="settings-card-desc">Connect Facebook &amp; Instagram so lead-ad submissions and messages flow into the console. Waiting on Meta's business verification.</p>
         <button class="btn small" type="button" disabled>Not yet available</button>
       </div>
+      <div class="settings-card">
+        <div class="settings-card-head">
+          <span class="settings-card-title">🧭 Work assignments</span>
+          <span class="settings-pill ${state.workAssignments.some((w) => w.primary_profile_id) ? "on" : "off"}">${state.workAssignments.filter((w) => w.primary_profile_id).length}/${WORK_AREAS.length} assigned</span>
+        </div>
+        <p class="settings-card-desc">Route each area of work to a specific admin. New leads, at-risk students, sub requests, and teacher onboarding auto-create a task for that area's owner.</p>
+        <button class="btn primary small" id="settingsAssignmentsBtn" type="button">Manage assignments</button>
+      </div>
     `;
     const mcBtn = document.getElementById("settingsMailchimpBtn");
     if (mcBtn) mcBtn.onclick = openMailchimpModal;
+    const waBtn = document.getElementById("settingsAssignmentsBtn");
+    if (waBtn) waBtn.onclick = openAssignmentsModal;
+  }
+
+  /* ═══════════════ T22: Work-assignment matrix ═══════════════ */
+  const WORK_AREAS = [
+    { area: "leads",        label: "Leads",                  project: "DK: Leads" },
+    { area: "retention",    label: "Retention / at-risk",    project: "DK: Retention" },
+    { area: "sub_coverage", label: "Sub coverage",           project: "DK: Sub coverage" },
+    { area: "onboarding",   label: "Onboarding & compliance", project: "DK: Onboarding" },
+  ];
+  // Project labels for areas a profile owns (primary OR backup) — used so a
+  // backup also sees the area's tasks on their Home "Tasks for you" card.
+  function projectsForProfile(profileId) {
+    const set = new Set();
+    for (const a of WORK_AREAS) {
+      const w = state.workAssignments.find((x) => x.area === a.area);
+      if (w && (w.primary_profile_id === profileId || w.backup_profile_id === profileId)) set.add(a.project);
+    }
+    return set;
+  }
+  function eligibleAssigneeProfiles() {
+    return (state.profiles || [])
+      .filter((p) => ["super_admin", "admin", "manager"].includes(p.role))
+      .sort((a, b) => (a.full_name || a.email || "").localeCompare(b.full_name || b.email || ""));
+  }
+  function openAssignmentsModal() {
+    if (!isSuperAdmin()) { showToast("Super_admins only", "error"); return; }
+    renderAssignmentsList();
+    $("#assignmentsOverlay").classList.add("open");
+  }
+  function closeAssignmentsModal() { $("#assignmentsOverlay").classList.remove("open"); }
+  function renderAssignmentsList() {
+    const wrap = $("#assignmentsList");
+    if (!wrap) return;
+    const people = eligibleAssigneeProfiles();
+    const opts = (sel) => `<option value="">— Unassigned —</option>` +
+      people.map((p) => `<option value="${escapeHtml(p.id)}"${sel === p.id ? " selected" : ""}>${escapeHtml(p.full_name || p.email || p.id)}</option>`).join("");
+    wrap.innerHTML = WORK_AREAS.map((a) => {
+      const row = state.workAssignments.find((w) => w.area === a.area) || {};
+      return `
+        <div class="wa-row" data-area="${a.area}">
+          <div class="wa-area">${escapeHtml(a.label)}</div>
+          <label class="wa-field">Primary<select class="wa-primary">${opts(row.primary_profile_id)}</select></label>
+          <label class="wa-field">Backup<select class="wa-backup">${opts(row.backup_profile_id)}</select></label>
+        </div>`;
+    }).join("");
+    $$('#assignmentsList .wa-row').forEach((rowEl) => {
+      const area = rowEl.dataset.area;
+      const save = async (patch) => {
+        const resp = await sb.from("work_assignments").update({ ...patch, updated_by: myUserId() }).eq("area", area);
+        if (resp.error) { showToast(resp.error.message, "error"); return; }
+        await reloadAll();
+        renderAssignmentsList();
+        showToast("Assignment updated", "success");
+      };
+      rowEl.querySelector(".wa-primary").onchange = (e) => save({ primary_profile_id: e.target.value || null });
+      rowEl.querySelector(".wa-backup").onchange = (e) => save({ backup_profile_id: e.target.value || null });
+    });
   }
 
   /* ═════════════ HOME (Bento) ═════════════ */
@@ -1784,8 +1855,12 @@
   function renderTeacherTasksCard(me) {
     const profileId = state.profile && state.profile.id;
     if (!profileId) return "";
+    // Owned tasks, plus tasks in any work area this person is primary OR
+    // backup for (T22) — so a backup sees their area's queue too.
+    const myProjects = projectsForProfile(profileId);
     const mine = (state.tasks || []).filter(
-      (t) => t.owner_profile_id === profileId && t.status !== "archived",
+      (t) => t.status !== "archived" &&
+        (t.owner_profile_id === profileId || (t.project_name && myProjects.has(t.project_name))),
     );
     if (mine.length === 0) return "";
 
@@ -13849,6 +13924,10 @@ Drama Kids`;
     $("#capManagerClose").onclick = closeCapManager;
     $("#capManagerDone").onclick  = closeCapManager;
     $("#capManagerOverlay").onclick = (e) => { if (e.target.id === "capManagerOverlay") closeCapManager(); };
+    // T22: work-assignment matrix modal
+    $("#assignmentsClose").onclick = closeAssignmentsModal;
+    $("#assignmentsDone").onclick  = closeAssignmentsModal;
+    $("#assignmentsOverlay").onclick = (e) => { if (e.target.id === "assignmentsOverlay") closeAssignmentsModal(); };
 
     // Month-view rows-per-cell depends on the viewport breakpoint, so re-render
     // the schedule when the window crosses it (debounced) to keep the
