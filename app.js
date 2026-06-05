@@ -326,6 +326,9 @@
     { id: "reports",  label: "Reports", reportZone: true, children: [
         { report: "attendance",    label: "Attendance" },
         { report: "teacher_hours", label: "Teacher hours" },
+        { report: "payroll",       label: "Payroll export" },
+        { report: "retention",     label: "Retention / at-risk" },
+        { report: "class_health",  label: "Class health" },
         { report: "par_funnel",    label: "PAR funnel" },
         { report: "off_plate",     label: "Off your plate" },
     ] },
@@ -364,7 +367,17 @@
       btn.dataset.zone = z.id;
       btn.setAttribute("role", "tab");
       const grouped = !!z.children;
-      btn.innerHTML = escapeHtml(z.label) + (grouped ? " <span class='caret' aria-hidden='true'>▾</span>" : "");
+      // Tasks zone shows a badge with the count of your open routed work, red
+      // when any of it is overdue.
+      let badge = "";
+      if (z.id === "tasks") {
+        const active = myActiveTasks();
+        if (active.length) {
+          const overdue = active.some((t) => t.due_at && new Date(t.due_at).getTime() < Date.now());
+          badge = ` <span class="zone-badge${overdue ? " overdue" : ""}" title="${active.length} open task${active.length === 1 ? "" : "s"} for you">${active.length}</span>`;
+        }
+      }
+      btn.innerHTML = escapeHtml(z.label) + badge + (grouped ? " <span class='caret' aria-hidden='true'>▾</span>" : "");
       btn.onclick = () => {
         if (z.tab) { go(z.tab); return; }
         const remembered = zoneLastTab[z.id];
@@ -1051,6 +1064,7 @@
     renderUsersTab();
     renderSettingsTab();
     renderAdminClock();   // T19: top-bar work-clock widget
+    renderZoneBar();      // refresh the Tasks badge as data changes
   }
 
   // Settings tab — integrations hub. Mailchimp lives here now (moved out of
@@ -1114,6 +1128,20 @@
     return (state.profiles || [])
       .filter((p) => ["super_admin", "admin", "manager"].includes(p.role))
       .sort((a, b) => (a.full_name || a.email || "").localeCompare(b.full_name || b.email || ""));
+  }
+  // Open/in-progress tasks the signed-in user owns OR is primary/backup for via
+  // the work-assignment matrix. Drives the Tasks nav badge + Home overdue signal.
+  function myActiveTasks() {
+    const pid = state.profile && state.profile.id;
+    if (!pid) return [];
+    const myProjects = projectsForProfile(pid);
+    return (state.tasks || []).filter((t) =>
+      (t.status === "open" || t.status === "in_progress") &&
+      (t.owner_profile_id === pid || (t.project_name && myProjects.has(t.project_name))));
+  }
+  function myOverdueTasks() {
+    const now = Date.now();
+    return myActiveTasks().filter((t) => t.due_at && new Date(t.due_at).getTime() < now);
   }
   function openAssignmentsModal() {
     if (!isSuperAdmin()) { showToast("Super_admins only", "error"); return; }
@@ -2708,6 +2736,17 @@
         hint: "Teachers tab → Refresh PAR links",
         go: "teachers",
       });
+    }
+    // Your own overdue routed tasks — actionable, links to the Tasks tab.
+    if (canSeeTab("tasks")) {
+      const overdue = myOverdueTasks();
+      if (overdue.length > 0) {
+        issues.push({
+          label: `${overdue.length} of your task${overdue.length === 1 ? "" : "s"} overdue`,
+          hint: "Open Tasks to catch up",
+          go: "tasks",
+        });
+      }
     }
     // Retention + class-health signals — only for roles that can open Reports.
     // Computed over a rolling 30-day window, independent of the report's

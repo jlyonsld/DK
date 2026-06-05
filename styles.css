@@ -484,6 +484,21 @@ header {
 .zone:hover { color: var(--accent); }
 .zone.active { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
 .zone .caret { font-size: 9px; opacity: .55; transform: translateY(1px); }
+.zone-badge {
+  display: inline-block;
+  min-width: 16px;
+  padding: 0 5px;
+  margin-left: 2px;
+  border-radius: 9px;
+  background: var(--accent, #2d2d2d);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  vertical-align: middle;
+}
+.zone-badge.overdue { background: #dc2626; }
 
 .subzones {
   display: flex;
