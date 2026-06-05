@@ -22,3 +22,18 @@ yarn-error.log*
 .env
 .env.local
 .env.*.local
+*.env
+
+# Secrets / local-only config — keep real secret values out of git.
+# Convention: commit a redacted file, keep the real one as *.local.* (ignored).
+*.local.gs
+*-local.gs
+*.secret
+*.secret.*
+secrets.*
+config.local.*
+
+# Supabase CLI local artifacts
+.branches/
+.temp/
+supabase/.temp/
