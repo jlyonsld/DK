@@ -110,7 +110,7 @@
     // Tasks tab state — status filter ∈ {open, in_progress, done, archived, all},
     // project filter is project_name string ("" = all), query is free-text.
     // editingId tracks which task the editor modal is on.
-    taskState: { filter: "open", project: "", query: "", editingId: null, sending: new Set() },
+    taskState: { filter: "open", project: "", owner: "", query: "", editingId: null, sending: new Set() },
     // T17a-4: engagement-doc decisions + weight_ledger entries. Both
     // local-only (no PAR push). YAML importer writes them alongside
     // tasks; Decisions render in the Tasks tab as their own card group;
@@ -9735,10 +9735,14 @@
   function tasksMatchingFilters() {
     const filter = state.taskState.filter || "open";
     const project = state.taskState.project || "";
+    const owner = state.taskState.owner || "";
+    const myId = state.profile && state.profile.id;
     const q = (state.taskState.query || "").toLowerCase();
     return (state.tasks || []).filter((t) => {
       if (filter !== "all" && t.status !== filter) return false;
       if (project && (t.project_name || "") !== project) return false;
+      if (owner === "me") { if (t.owner_profile_id !== myId) return false; }
+      else if (owner && t.owner_profile_id !== owner) return false;
       if (!q) return true;
       const hay = [
         t.title, t.description, t.assignee_label, t.project_name,
@@ -9787,6 +9791,14 @@
       `<option value="">All projects</option>`,
       ...projects.map((p) =>
         `<option value="${escapeHtml(p)}"${p === state.taskState.project ? " selected" : ""}>${escapeHtml(p)}</option>`),
+    ].join("");
+
+    // Owner ("Assigned to") filter — Anyone / Me / each admin-or-above.
+    const ownerOptions = [
+      `<option value="">Anyone</option>`,
+      `<option value="me"${state.taskState.owner === "me" ? " selected" : ""}>Me</option>`,
+      ...eligibleAssigneeProfiles().map((p) =>
+        `<option value="${escapeHtml(p.id)}"${p.id === state.taskState.owner ? " selected" : ""}>${escapeHtml(p.full_name || p.email || p.id)}</option>`),
     ].join("");
 
     const rows = tasksMatchingFilters();
@@ -9853,6 +9865,7 @@
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <input class="search" id="task_search" type="search" placeholder="Search title, owner, project…" value="${escapeHtml(state.taskState.query || "")}" style="width:220px" />
           <select id="task_project_filter" class="select-inline" title="Filter by project">${projectOptions}</select>
+          <select id="task_owner_filter" class="select-inline" title="Filter by who it's assigned to">${ownerOptions}</select>
           ${canManage ? `<button class="btn small" id="task_import_btn">📥 Import engagement doc</button>` : ""}
           ${canManage ? `<button class="btn small primary" id="task_new_btn">＋ New task</button>` : ""}
         </div>
@@ -9868,6 +9881,8 @@
     if (search) search.oninput = (e) => { state.taskState.query = e.target.value; renderTasksTab(); };
     const projectSel = panel.querySelector("#task_project_filter");
     if (projectSel) projectSel.onchange = (e) => { state.taskState.project = e.target.value; renderTasksTab(); };
+    const ownerSel = panel.querySelector("#task_owner_filter");
+    if (ownerSel) ownerSel.onchange = (e) => { state.taskState.owner = e.target.value; renderTasksTab(); };
     const newBtn = panel.querySelector("#task_new_btn");
     if (newBtn) newBtn.onclick = () => openTaskEditor(null);
     const importBtn = panel.querySelector("#task_import_btn");
@@ -9903,7 +9918,8 @@
     const pMeta = TASK_PRIORITY_META[t.priority] || TASK_PRIORITY_META.medium;
     const ownerName = profileNameById(t.owner_profile_id) || t.assignee_label || "";
     const due = t.due_at ? new Date(t.due_at) : null;
-    const dueLabel = due ? `📅 ${escapeHtml(isoDate(due))}` : "";
+    const overdue = due && due < new Date() && (t.status === "open" || t.status === "in_progress");
+    const dueLabel = due ? `📅 ${overdue ? "Overdue · " : ""}${escapeHtml(isoDate(due))}` : "";
     const sending = state.taskState.sending && state.taskState.sending.has(t.id);
 
     const sendBtn = t.par_task_id
@@ -9935,7 +9951,7 @@
         <div class="task-card-meta">
           <span class="task-pri-chip ${pMeta.chip}" title="Priority">${escapeHtml(pMeta.label)}</span>
           ${ownerName ? `<span class="task-owner">👤 ${escapeHtml(ownerName)}</span>` : ""}
-          ${dueLabel ? `<span class="task-due">${dueLabel}</span>` : ""}
+          ${dueLabel ? `<span class="task-due${overdue ? " overdue" : ""}">${dueLabel}</span>` : ""}
         </div>
         <div class="task-card-actions">${actions}</div>
       </div>
