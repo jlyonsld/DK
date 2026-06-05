@@ -2634,6 +2634,33 @@
         go: "teachers",
       });
     }
+    // Retention + class-health signals — only for roles that can open Reports.
+    // Computed over a rolling 30-day window, independent of the report's
+    // current date filter, and link straight to the relevant report.
+    if (canSeeTab("reports")) {
+      const today = new Date();
+      const start = new Date(today); start.setDate(start.getDate() - 29);
+      const { atRisk } = buildRetentionData(isoDate(start), isoDate(today));
+      if (atRisk.length > 0) {
+        issues.push({
+          label: `${atRisk.length} student${atRisk.length === 1 ? "" : "s"} at risk`,
+          hint: "Open the Retention report to follow up",
+          report: "retention",
+        });
+      }
+      const underfilled = state.classes.filter((c) =>
+        includeTestClass(c) && c.active !== false &&
+        typeof c.max_size === "number" && c.max_size > 0 &&
+        (state.enrollments.filter((e) => e.class_id === c.id && e.status === "active").length / c.max_size) < UNDERFILL_THRESHOLD
+      );
+      if (underfilled.length > 0) {
+        issues.push({
+          label: `${underfilled.length} under-filled class${underfilled.length === 1 ? "" : "es"}`,
+          hint: "Open Class health — likely marketing targets",
+          report: "class_health",
+        });
+      }
+    }
 
     if (issues.length === 0) {
       return `
@@ -2642,7 +2669,7 @@
       `;
     }
     const items = issues.map((i) => `
-      <div class="bento-attention-item" data-go-tab="${escapeHtml(i.go)}">
+      <div class="bento-attention-item" ${i.report ? `data-go-report="${escapeHtml(i.report)}"` : `data-go-tab="${escapeHtml(i.go)}"`}>
         <div class="label">${escapeHtml(i.label)}</div>
         <div class="hint">${escapeHtml(i.hint)}</div>
       </div>
@@ -2990,6 +3017,10 @@
     // Clicking an attention card jumps to the relevant tab
     $$("[data-go-tab]", $("#bentoGrid")).forEach((el) => {
       el.onclick = () => go(el.dataset.goTab);
+    });
+    // …or straight to a specific report (retention / class health)
+    $$("[data-go-report]", $("#bentoGrid")).forEach((el) => {
+      el.onclick = () => { state.rptState.active = el.dataset.goReport; go("reports"); renderReportsTab(); };
     });
     // Quick actions
     $$("[data-qa]", $("#bentoGrid")).forEach((btn) => {
@@ -10215,6 +10246,7 @@
     { id: "teacher_hours", label: "Teacher hours", render: renderTeacherHoursReport },
     { id: "payroll", label: "Payroll export", render: renderPayrollReport },
     { id: "retention", label: "Retention / at-risk", render: renderRetentionReport },
+    { id: "class_health", label: "Class health", render: renderClassHealthReport },
     { id: "par_funnel", label: "PAR funnel", render: renderParFunnelReport },
     { id: "off_plate", label: "Off your plate", render: renderOffPlateReport },
   ];
@@ -11121,6 +11153,153 @@ Drama Kids`;
     await reloadAll();
     renderAll();
     showToast(`Created ${created} follow-up task${created === 1 ? "" : "s"}`, "success");
+  }
+
+  /* ── Class health / enrollment ──────────────────────────────
+   * Read-only. Per active class: current active enrollment vs capacity
+   * (max_size), fill %, JR openings/waitlist, and new/dropped/net in the
+   * selected range. Surfaces under-filled classes (marketing targets) and
+   * full / waitlisted classes (open a new section). Capacity + openings +
+   * waitlist come from Jackrabbit; enrolled is our own active-enrollment count.
+   */
+  const UNDERFILL_THRESHOLD = 0.5;
+
+  function buildClassHealth(start, end) {
+    return state.classes
+      .filter((c) => includeTestClass(c) && c.active !== false)
+      .map((c) => {
+        const enr = state.enrollments.filter((e) => e.class_id === c.id);
+        const active = enr.filter((e) => e.status === "active").length;
+        const added = enr.filter((e) => e.enrolled_at && isoDate(new Date(e.enrolled_at)) >= start && isoDate(new Date(e.enrolled_at)) <= end).length;
+        const dropped = enr.filter((e) => e.status !== "active" && e.dropped_at && isoDate(new Date(e.dropped_at)) >= start && isoDate(new Date(e.dropped_at)) <= end).length;
+        const cap = (typeof c.max_size === "number" && c.max_size > 0) ? c.max_size : null;
+        const fill = cap ? active / cap : null;
+        const waitlist = typeof c.waitlist_count === "number" ? c.waitlist_count : 0;
+        return {
+          id: c.id, name: c.name || "—", type: c.type || "",
+          school: c.school_id ? (state.schools.find((s) => s.id === c.school_id)?.name || "") : "",
+          active, cap, fill,
+          openings: typeof c.openings === "number" ? c.openings : null,
+          waitlist, added, dropped, net: added - dropped,
+          underfilled: cap != null && fill < UNDERFILL_THRESHOLD,
+          full: cap != null && active >= cap,
+        };
+      })
+      // Worst fill first (known-capacity ascending), then unknown-capacity, then name.
+      .sort((a, b) => {
+        if (a.fill == null && b.fill == null) return a.name.localeCompare(b.name);
+        if (a.fill == null) return 1;
+        if (b.fill == null) return -1;
+        return a.fill - b.fill;
+      });
+  }
+
+  function renderClassHealthReport(host) {
+    const s = state.rptState;
+    const rows = buildClassHealth(s.start, s.end);
+    const presetBtn = (label, days) => `<button data-rpt-preset="${days}" class="btn small">${escapeHtml(label)}</button>`;
+    const withCap = rows.filter((r) => r.cap != null);
+    const avgFill = withCap.length ? Math.round(withCap.reduce((a, r) => a + r.fill, 0) / withCap.length * 100) : null;
+    const underN = rows.filter((r) => r.underfilled).length;
+    const totWait = rows.reduce((a, r) => a + r.waitlist, 0);
+    const totOpen = rows.reduce((a, r) => a + (r.openings || 0), 0);
+    const pct = (f) => f == null ? "—" : Math.round(f * 100) + "%";
+    const fillColor = (r) => r.cap == null ? "" : r.underfilled ? "color:#b91c1c;font-weight:600" : (r.full ? "color:#047857;font-weight:600" : "");
+
+    host.innerHTML = `
+      <div style="display:flex;gap:8px;align-items:end;flex-wrap:wrap;padding:12px 0 16px;border-bottom:1px solid var(--border-subtle,#eee)">
+        <div class="field" style="flex:0 0 160px"><label>From</label><input type="date" id="rpt_start" value="${escapeHtml(s.start)}" /></div>
+        <div class="field" style="flex:0 0 160px"><label>To</label><input type="date" id="rpt_end" value="${escapeHtml(s.end)}" /></div>
+        <div style="display:flex;gap:4px">${presetBtn("Last 30d", 30)}${presetBtn("Last 60d", 60)}${presetBtn("Last 90d", 90)}</div>
+        <div style="flex:1"></div>
+        <button class="btn small" id="rpt_export_health_csv">Export CSV</button>
+      </div>
+
+      <div style="margin-top:16px">
+        <div class="section-title">Summary <span style="font-weight:400;color:var(--ink-dim);text-transform:none;letter-spacing:0">(new/dropped over ${escapeHtml(s.start)} → ${escapeHtml(s.end)})</span></div>
+        <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;padding:12px 0">
+          ${[
+            ["Active classes", rows.length, ""],
+            ["Avg fill", avgFill == null ? "—" : avgFill + "%", ""],
+            ["Under-filled", underN, underN > 0 ? "#b91c1c" : ""],
+            ["Open seats", totOpen, ""],
+            ["Waitlisted", totWait, totWait > 0 ? "#047857" : ""],
+          ].map(([k, v, col]) => `
+            <div style="padding:10px 12px;background:var(--surface-alt,#f5f4ef);border-radius:8px">
+              <div style="font-size:11px;color:var(--ink-dim);text-transform:uppercase;letter-spacing:.5px">${escapeHtml(k)}</div>
+              <div style="font-size:22px;font-weight:600;margin-top:2px;${col ? `color:${col}` : ""}">${v}</div>
+            </div>`).join("")}
+        </div>
+      </div>
+
+      <div style="margin-top:16px">
+        <div class="section-title">By class <span style="font-weight:400;color:var(--ink-dim);text-transform:none;letter-spacing:0">(lowest fill first · under ${Math.round(UNDERFILL_THRESHOLD * 100)}% flagged)</span></div>
+        ${rows.length === 0 ? '<div style="padding:12px 0;color:var(--ink-dim);font-size:12.5px">No active classes.</div>' : `
+          <table style="width:100%;border-collapse:collapse;font-size:12.5px">
+            <thead>
+              <tr style="text-align:left;color:var(--ink-dim);border-bottom:1px solid var(--border)">
+                <th style="padding:6px 8px;font-weight:600">Class</th>
+                <th style="padding:6px 8px;font-weight:600;text-align:right">Enrolled</th>
+                <th style="padding:6px 8px;font-weight:600;text-align:right">Capacity</th>
+                <th style="padding:6px 8px;font-weight:600;text-align:right">Fill</th>
+                <th style="padding:6px 8px;font-weight:600;text-align:right">Open</th>
+                <th style="padding:6px 8px;font-weight:600;text-align:right">Waitlist</th>
+                <th style="padding:6px 8px;font-weight:600;text-align:right">New</th>
+                <th style="padding:6px 8px;font-weight:600;text-align:right">Dropped</th>
+                <th style="padding:6px 8px;font-weight:600;text-align:right">Net</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows.map((r) => `
+                <tr style="border-bottom:1px solid var(--border-subtle,#eee);cursor:pointer" data-open-class="${escapeHtml(r.id)}" title="Open class">
+                  <td style="padding:6px 8px">${escapeHtml(r.name)}${r.underfilled ? ' <span class="type-badge" style="background:rgba(239,68,68,.12);color:#b91c1c">under-filled</span>' : ""}${r.full ? ' <span class="type-badge" style="background:rgba(16,185,129,.14);color:#047857">full</span>' : ""}${r.school ? `<div style="font-size:11px;color:var(--ink-dim)">${escapeHtml(r.school)}</div>` : ""}</td>
+                  <td style="padding:6px 8px;text-align:right">${r.active}</td>
+                  <td style="padding:6px 8px;text-align:right">${r.cap == null ? "—" : r.cap}</td>
+                  <td style="padding:6px 8px;text-align:right;${fillColor(r)}">${pct(r.fill)}</td>
+                  <td style="padding:6px 8px;text-align:right">${r.openings == null ? "—" : r.openings}</td>
+                  <td style="padding:6px 8px;text-align:right;${r.waitlist > 0 ? "color:#047857;font-weight:600" : ""}">${r.waitlist || "—"}</td>
+                  <td style="padding:6px 8px;text-align:right">${r.added || "—"}</td>
+                  <td style="padding:6px 8px;text-align:right;${r.dropped > 0 ? "color:#b91c1c" : ""}">${r.dropped || "—"}</td>
+                  <td style="padding:6px 8px;text-align:right;${r.net < 0 ? "color:#b91c1c;font-weight:600" : (r.net > 0 ? "color:#047857" : "")}">${r.net > 0 ? "+" : ""}${r.net}</td>
+                </tr>`).join("")}
+            </tbody>
+          </table>`}
+      </div>
+    `;
+
+    $("#rpt_start").onchange = (e) => { state.rptState.start = e.target.value; renderReportsTab(); };
+    $("#rpt_end").onchange   = (e) => { state.rptState.end   = e.target.value; renderReportsTab(); };
+    host.querySelectorAll("[data-rpt-preset]").forEach((b) => {
+      b.onclick = () => {
+        const days = parseInt(b.dataset.rptPreset, 10);
+        const today = new Date();
+        const start = new Date(today); start.setDate(start.getDate() - (days - 1));
+        state.rptState.start = isoDate(start);
+        state.rptState.end = isoDate(today);
+        renderReportsTab();
+      };
+    });
+    host.querySelectorAll("[data-open-class]").forEach((tr) => {
+      tr.onclick = () => { state.cState.openClassId = tr.dataset.openClass; go("classes"); };
+    });
+    $("#rpt_export_health_csv").onclick = () => downloadClassHealthCsv(rows, s.start, s.end);
+  }
+
+  function downloadClassHealthCsv(rows, start, end) {
+    const esc = (v) => { const s = String(v == null ? "" : v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+    const header = ["Class", "School", "Type", "Enrolled", "Capacity", "FillPct", "Open", "Waitlist", "New", "Dropped", "Net", "PeriodStart", "PeriodEnd"].join(",");
+    const body = rows.map((r) => [
+      r.name, r.school, r.type, r.active, r.cap == null ? "" : r.cap,
+      r.fill == null ? "" : Math.round(r.fill * 100), r.openings == null ? "" : r.openings,
+      r.waitlist, r.added, r.dropped, r.net, start, end,
+    ].map(esc).join(",")).join("\n");
+    const csv = header + "\n" + body + "\n";
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `class-health-${start}-to-${end}.csv`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   }
 
   /* ── T7b: PAR funnel report ─────────────────────────────────
