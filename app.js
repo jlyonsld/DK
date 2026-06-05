@@ -11090,9 +11090,11 @@
   }
   function hasOpenRetentionTask(row) {
     const title = retentionTaskTitle(row).toLowerCase();
-    return (state.tasks || []).some((t) =>
-      (t.title || "").toLowerCase() === title &&
-      !["done", "archived"].includes((t.status || "").toLowerCase()));
+    const ref = row.enrollmentId ? "retention:" + row.enrollmentId : null;
+    return (state.tasks || []).some((t) => {
+      if (["done", "archived"].includes((t.status || "").toLowerCase())) return false;
+      return (t.title || "").toLowerCase() === title || (ref && t.external_ref === ref);
+    });
   }
 
   async function createRetentionTask(row, opts) {
@@ -11115,6 +11117,9 @@
       status: "open",
       owner_profile_id: myUserId(),
       assignee_label: p.name || null,
+      // Shared de-dupe key with the weekly auto-job (phase_t21) so manual and
+      // scheduled follow-ups never double up for the same enrollment.
+      external_ref: row.enrollmentId ? "retention:" + row.enrollmentId : null,
     });
     if (resp.error) { if (!opts?.silent) showToast(resp.error.message, "error"); return { error: resp.error }; }
     return { created: true };
