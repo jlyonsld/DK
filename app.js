@@ -331,6 +331,7 @@
         { report: "class_health",  label: "Class health" },
         { report: "par_funnel",    label: "PAR funnel" },
         { report: "off_plate",     label: "Off your plate" },
+        { report: "margins",       label: "Margins", adminOnly: true },
     ] },
     { id: "settings", label: "Settings", tab: "settings",
       desc: "Integrations and configuration." },
@@ -414,6 +415,7 @@
     (z.children || []).forEach((c) => {
       if (c.tab && !canSeeTab(c.tab)) return;
       if (c.report && !canSeeTab("reports")) return;
+      if (c.report && c.adminOnly && !isAdminOrAbove()) return;
       if (c.action) {
         if (c.superOnly && !isSuperAdmin()) return;
         if (c.perm && !hasPerm(c.perm)) return;
@@ -10371,6 +10373,150 @@
    *   2. Implement the render fn — it receives state.rptState and the
    *      #reportContent DOM node.
    */
+  /* ─────────────── Margins report ───────────────
+   * Reads the database-side economics views (class_economics, studio_economics)
+   * so the math lives in SQL, not the UI. Admin+ only. Read-only except for the
+   * studio overhead inputs in dk_config, which save inline and re-render live.
+   */
+  function fmtUSD(n, dp) {
+    if (n === null || n === undefined || n === "" || isNaN(Number(n))) return "—";
+    return "$" + Number(n).toLocaleString("en-US", {
+      minimumFractionDigits: dp || 0, maximumFractionDigits: dp || 0,
+    });
+  }
+  function fmtPct1(n) {
+    if (n === null || n === undefined || n === "" || isNaN(Number(n))) return "—";
+    return Number(n).toFixed(1) + "%";
+  }
+  // Stored as a 0–1 fraction; shown to the user as a percentage.
+  function fracToPctInput(n) {
+    if (n === null || n === undefined || n === "" || isNaN(Number(n))) return "0";
+    return String(+(Number(n) * 100).toFixed(2));
+  }
+
+  async function renderMarginsReport(host) {
+    if (!isAdminOrAbove()) {
+      host.innerHTML = `<div class="empty" style="padding:32px;text-align:center">Margins are visible to admins only.</div>`;
+      return;
+    }
+    host.innerHTML = `<div class="muted" style="padding:32px;text-align:center">Loading margins…</div>`;
+
+    const [clsRes, studioRes] = await Promise.all([
+      sb.from("class_economics").select("*"),
+      sb.from("studio_economics").select("*").maybeSingle(),
+    ]);
+    if (clsRes.error || studioRes.error) {
+      const msg = (clsRes.error || studioRes.error).message;
+      host.innerHTML = `<div class="empty" style="padding:32px;text-align:center">Couldn't load margins: ${escapeHtml(msg)}</div>`;
+      return;
+    }
+
+    const rows = (clsRes.data || [])
+      .filter((r) => !r.is_test && r.active)
+      .sort((a, b) => Number(b.contribution_margin_monthly || 0) - Number(a.contribution_margin_monthly || 0));
+    const s = studioRes.data || {};
+    const cfg = state.dkConfig || {};
+
+    // Data-quality nudges so the headline % isn't read as gospel.
+    const noTeacher = rows.filter((r) => Number(r.gross_revenue_monthly || 0) > 0 && Number(r.teacher_cost_monthly || 0) === 0).length;
+    const noRevenue = rows.filter((r) => Number(r.gross_revenue_monthly || 0) === 0).length;
+    const overheadUnset = (Number(s.royalty_monthly || 0) + Number(s.ad_fund_monthly || 0)
+      + Number(s.processing_monthly || 0) + Number(s.fixed_overhead_monthly || 0)) === 0;
+
+    const card = (label, val, sub, accent) => `
+      <div style="border:1px solid var(--border-subtle,#eee);border-radius:10px;padding:14px 16px;background:var(--surface,#fff)">
+        <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.04em">${escapeHtml(label)}</div>
+        <div style="font-size:24px;font-weight:700;margin-top:4px;${accent ? "color:" + accent : ""}">${val}</div>
+        ${sub ? `<div class="muted" style="font-size:12px;margin-top:2px">${sub}</div>` : ""}
+      </div>`;
+
+    const netColor = Number(s.net_margin_monthly || 0) >= 0 ? "#1a7f37" : "#c1121f";
+
+    const classRowsHtml = rows.map((r) => {
+      const pct = r.contribution_margin_pct;
+      const pctColor = pct == null ? "var(--muted,#888)" : Number(pct) >= 50 ? "#1a7f37" : Number(pct) >= 25 ? "#a36a00" : "#c1121f";
+      const flags = [];
+      if (Number(r.gross_revenue_monthly || 0) > 0 && Number(r.teacher_cost_monthly || 0) === 0) flags.push("no teacher assigned");
+      if (Number(r.gross_revenue_monthly || 0) === 0) flags.push("no revenue set");
+      return `
+        <tr>
+          <td>${escapeHtml(r.name || "—")}${flags.length ? `<div class="muted" style="font-size:11px;color:#a36a00">⚠ ${flags.join(" · ")}</div>` : ""}</td>
+          <td><span class="status-pill">${escapeHtml(r.type || "—")}</span></td>
+          <td style="text-align:right">${r.active_enrollments ?? 0}</td>
+          <td style="text-align:right">${fmtUSD(r.gross_revenue_monthly)}</td>
+          <td style="text-align:right">${fmtUSD(r.teacher_cost_monthly)}</td>
+          <td style="text-align:right">${fmtUSD(r.location_cost_monthly)}</td>
+          <td style="text-align:right;font-weight:600">${fmtUSD(r.contribution_margin_monthly)}</td>
+          <td style="text-align:right;color:${pctColor};font-weight:600">${fmtPct1(pct)}</td>
+        </tr>`;
+    }).join("");
+
+    host.innerHTML = `
+      <div style="padding:8px 0 4px">
+        <div class="section-title">Studio — monthly run rate</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;padding:12px 0">
+          ${card("Gross revenue", fmtUSD(s.gross_revenue_monthly))}
+          ${card("Teacher cost", fmtUSD(s.teacher_cost_monthly))}
+          ${card("Location cost", fmtUSD(s.location_cost_monthly))}
+          ${card("Contribution", fmtUSD(s.total_contribution_monthly), "before franchise & fixed overhead")}
+          ${card("Royalty + ad fund", fmtUSD(Number(s.royalty_monthly || 0) + Number(s.ad_fund_monthly || 0)))}
+          ${card("Net margin", fmtUSD(s.net_margin_monthly), fmtPct1(s.net_margin_pct) + " of gross", netColor)}
+        </div>
+
+        ${overheadUnset ? `<div style="background:#fff8e1;border:1px solid #f0d98a;border-radius:8px;padding:10px 12px;font-size:13px;margin:4px 0 12px">
+          ⚠ Overhead isn't set yet, so <b>net margin currently equals contribution</b>. Enter the royalty / ad-fund percentages below (QuickBooks will reveal these) to get a true net.
+        </div>` : ""}
+        ${(noTeacher || noRevenue) ? `<div class="muted" style="font-size:12px;margin:0 0 12px">
+          ${noTeacher ? `${noTeacher} class${noTeacher === 1 ? "" : "es"} have no teacher assigned (labor reads $0). ` : ""}${noRevenue ? `${noRevenue} class${noRevenue === 1 ? "" : "es"} have no revenue set (contracted — needs a contract fee).` : ""}
+        </div>` : ""}
+
+        <details style="margin:4px 0 16px;border:1px solid var(--border-subtle,#eee);border-radius:10px;padding:12px 14px">
+          <summary style="cursor:pointer;font-weight:600">Overhead inputs (studio-wide)</summary>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-top:12px">
+            <div class="field"><label>Royalty %</label><input type="number" step="0.1" id="mg_royalty" value="${fracToPctInput(cfg.royalty_pct)}" /></div>
+            <div class="field"><label>Ad fund %</label><input type="number" step="0.1" id="mg_adfund" value="${fracToPctInput(cfg.ad_fund_pct)}" /></div>
+            <div class="field"><label>Processing %</label><input type="number" step="0.1" id="mg_proc" value="${fracToPctInput(cfg.payment_processing_pct)}" /></div>
+            <div class="field"><label>Fixed monthly overhead ($)</label><input type="number" step="1" id="mg_fixed" value="${cfg.monthly_fixed_overhead != null ? Number(cfg.monthly_fixed_overhead) : 0}" /></div>
+          </div>
+          <div style="margin-top:12px"><button class="btn primary small" id="mg_save">Save overhead</button></div>
+        </details>
+
+        <div class="section-title">Per class — monthly contribution</div>
+        <div style="overflow-x:auto;margin-top:8px">
+          <table class="data-table" style="width:100%;border-collapse:collapse">
+            <thead><tr>
+              <th style="text-align:left">Class</th><th style="text-align:left">Type</th>
+              <th style="text-align:right">Enr.</th><th style="text-align:right">Revenue</th>
+              <th style="text-align:right">Teacher</th><th style="text-align:right">Location</th>
+              <th style="text-align:right">Contribution</th><th style="text-align:right">Margin</th>
+            </tr></thead>
+            <tbody>${classRowsHtml || `<tr><td colspan="8" class="muted" style="padding:16px;text-align:center">No active classes.</td></tr>`}</tbody>
+          </table>
+        </div>
+        <div class="muted" style="font-size:12px;margin-top:10px">
+          Monthly run-rate. Recurring classes assume ~4.33 sessions/month; camp tuition is treated as the per-camp total until set otherwise. Revenue & costs come live from the database economics views.
+        </div>
+      </div>`;
+
+    const saveBtn = $("#mg_save", host);
+    if (saveBtn) saveBtn.onclick = async () => {
+      const toFrac = (id) => Math.max(0, (parseFloat(($("#" + id, host) || {}).value) || 0) / 100);
+      const patch = {
+        royalty_pct: toFrac("mg_royalty"),
+        ad_fund_pct: toFrac("mg_adfund"),
+        payment_processing_pct: toFrac("mg_proc"),
+        monthly_fixed_overhead: Math.max(0, parseFloat(($("#mg_fixed", host) || {}).value) || 0),
+      };
+      saveBtn.disabled = true;
+      const resp = await sb.from("dk_config").update(patch).eq("id", 1);
+      saveBtn.disabled = false;
+      if (resp.error) { showToast("Save failed: " + resp.error.message, "error"); return; }
+      state.dkConfig = Object.assign({}, state.dkConfig, patch);
+      showToast("Overhead updated", "success");
+      renderMarginsReport(host); // live re-render with new net margin
+    };
+  }
+
   const REPORTS = [
     { id: "attendance", label: "Attendance", render: renderAttendanceReport },
     { id: "teacher_hours", label: "Teacher hours", render: renderTeacherHoursReport },
@@ -10379,7 +10525,13 @@
     { id: "class_health", label: "Class health", render: renderClassHealthReport },
     { id: "par_funnel", label: "PAR funnel", render: renderParFunnelReport },
     { id: "off_plate", label: "Off your plate", render: renderOffPlateReport },
+    { id: "margins", label: "Margins", adminOnly: true, render: renderMarginsReport },
   ];
+
+  // Reports a given user may see. Financials (margins) are admin+ only.
+  function visibleReports() {
+    return REPORTS.filter((r) => !r.adminOnly || isAdminOrAbove());
+  }
 
   function ensureReportDateDefaults() {
     if (state.rptState.start && state.rptState.end) return;
@@ -10399,7 +10551,7 @@
     // Sub-nav
     const subNav = $("#reportSubNav");
     if (subNav) {
-      subNav.innerHTML = REPORTS.map((r) => {
+      subNav.innerHTML = visibleReports().map((r) => {
         const active = r.id === state.rptState.active;
         return `<button data-report="${escapeHtml(r.id)}" class="btn small"
           style="${active ? "background:var(--accent,#2d2d2d);color:#fff;border-color:var(--accent,#2d2d2d)" : ""}">${escapeHtml(r.label)}</button>`;
@@ -10414,7 +10566,8 @@
 
     const content = $("#reportContent");
     if (!content) return;
-    const active = REPORTS.find((r) => r.id === state.rptState.active) || REPORTS[0];
+    const allowed = visibleReports();
+    const active = allowed.find((r) => r.id === state.rptState.active) || allowed[0];
     active.render(content);
   }
 
