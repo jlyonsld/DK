@@ -20,7 +20,7 @@
 }
 
 .dkc-head { display: flex; align-items: center; gap: 16px; }
-.dkc-logo { width: 58px; height: 58px; object-fit: contain; border-radius: 8px; flex: 0 0 auto; }
+.dkc-logo { height: 58px; width: auto; max-width: 180px; object-fit: contain; flex: 0 0 auto; }
 .dkc-head-text { min-width: 0; }
 .dkc-class-name { font-size: 22px; font-weight: 800; letter-spacing: -.01em; }
 .dkc-age {

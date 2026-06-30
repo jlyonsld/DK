@@ -335,11 +335,16 @@
 
     // ── Header (first page) ──
     let cursorY = M;
+    let logoW = 0;
     if (logo) {
-      const lw = 54, lh = logo.h ? (logo.h / logo.w) * lw : 54;
-      try { doc.addImage(logo.dataUrl, "PNG", M, cursorY, lw, lh); } catch (e) {}
+      // Fit within a box, preserving aspect ratio — works for square OR wide
+      // (landscape) logos like the Drama Kids wordmark.
+      const maxH = 50, maxW = 160;
+      let lw = maxW, lh = logo.h ? (logo.h / logo.w) * lw : maxH;
+      if (lh > maxH) { lh = maxH; lw = logo.w ? (logo.w / logo.h) * lh : maxW; }
+      try { doc.addImage(logo.dataUrl, "PNG", M, cursorY, lw, lh); logoW = lw; } catch (e) {}
     }
-    const tx = M + (logo ? 66 : 0);
+    const tx = M + (logoW ? logoW + 14 : 0);
     doc.setTextColor(primary[0], primary[1], primary[2]);
     doc.setFont("helvetica", "bold"); doc.setFontSize(18);
     doc.text(cls.name || "Class", tx, cursorY + 16);
