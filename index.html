@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>PAR DK · Response Console</title>
   <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="calendar.css" />
   <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
   <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16.png" />
   <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
@@ -224,6 +225,13 @@
           </div>
           <div class="sync-status" id="syncStatus"></div>
           <div class="data-table" id="classTable"></div>
+        </div>
+
+        <div class="tab-panel" data-tab="calendars" style="display:none">
+          <!-- Phase T24: per-class semester calendars (Schedule Manager).
+               Toolbar, editor, and live preview are rendered by
+               renderCalendarsTab() in app.js into #calendarsRoot. -->
+          <div id="calendarsRoot"></div>
         </div>
 
         <div class="tab-panel" data-tab="schools" style="display:none">
@@ -1874,6 +1882,10 @@ workstreams:
           <span class="mobile-tools-ico" aria-hidden="true">🎭</span>
           <span>Classes</span>
         </button>
+        <button class="mobile-tools-item" data-tab="calendars" type="button">
+          <span class="mobile-tools-ico" aria-hidden="true">📅</span>
+          <span>Calendars</span>
+        </button>
         <button class="mobile-tools-item" data-tab="schools" type="button">
           <span class="mobile-tools-ico" aria-hidden="true">🏫</span>
           <span>Schools</span>
@@ -2287,6 +2299,118 @@ workstreams:
     </div>
   </div>
 
+  <!-- T24: Semester editor modal -->
+  <div class="modal-overlay" id="semesterModalOverlay">
+    <div class="modal" style="max-width:460px">
+      <div class="modal-head">
+        <h3 id="semesterModalTitle">New semester</h3>
+        <button class="btn ghost small" id="semesterModalClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="field">
+          <label>Name</label>
+          <input type="text" id="sem_name" placeholder="e.g. 2025 Fall" />
+        </div>
+        <div class="field">
+          <label>Season</label>
+          <select id="sem_term">
+            <option value="fall">Fall</option>
+            <option value="winter_spring">Winter / Spring</option>
+            <option value="summer">Summer</option>
+            <option value="custom">Custom</option>
+          </select>
+        </div>
+        <div class="field-row">
+          <div class="field"><label>Starts on</label><input type="date" id="sem_start" /></div>
+          <div class="field"><label>Ends on</label><input type="date" id="sem_end" /></div>
+        </div>
+        <div class="field">
+          <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer">
+            <input type="checkbox" id="sem_published" /> Published <span class="field-sub">(parents can view &amp; download)</span>
+          </label>
+        </div>
+        <div class="field">
+          <label>Notes <span class="field-sub">(internal)</span></label>
+          <input type="text" id="sem_notes" />
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn danger small" id="deleteSemesterBtn" style="margin-right:auto;display:none">Delete</button>
+        <button class="btn" id="cancelSemesterBtn">Cancel</button>
+        <button class="btn primary" id="saveSemesterBtn">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- T24: Parent pointers editor modal -->
+  <div class="modal-overlay" id="pointersModalOverlay">
+    <div class="modal" style="max-width:620px">
+      <div class="modal-head">
+        <h3>Parent pointers</h3>
+        <button class="btn ghost small" id="pointersModalClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="field-row" style="align-items:center">
+          <div class="field" style="flex:0 0 200px">
+            <label>Editing</label>
+            <select id="pointersScopeSel">
+              <option value="class">This class</option>
+              <option value="default">Studio default</option>
+            </select>
+          </div>
+          <div class="field" style="align-self:end">
+            <div class="field-sub" id="pointersModalSub"></div>
+          </div>
+        </div>
+        <div id="pointersList"></div>
+        <div style="display:flex;gap:8px;margin-top:10px">
+          <button class="btn small" id="addPointerBtn">＋ Add section</button>
+          <button class="btn ghost small" id="copyDefaultPointersBtn">⎘ Copy studio defaults</button>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" id="cancelPointersBtn">Cancel</button>
+        <button class="btn primary" id="savePointersBtn">Save pointers</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- T24: Studio branding editor modal -->
+  <div class="modal-overlay" id="brandingModalOverlay">
+    <div class="modal" style="max-width:560px">
+      <div class="modal-head">
+        <h3>Studio branding</h3>
+        <button class="btn ghost small" id="brandingModalClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <p class="field-sub" style="margin:0 0 12px">Used on the parent-facing class calendars and the downloadable PDF.</p>
+        <div class="field-row">
+          <div class="field"><label>Studio name</label><input type="text" id="br_studio_name" placeholder="Drama Kids of …" /></div>
+          <div class="field"><label>Owner name</label><input type="text" id="br_owner_name" /></div>
+        </div>
+        <div class="field-row">
+          <div class="field"><label>Phone</label><input type="text" id="br_phone" /></div>
+          <div class="field"><label>Email</label><input type="text" id="br_email" /></div>
+        </div>
+        <div class="field"><label>Website</label><input type="text" id="br_website" placeholder="https://…" /></div>
+        <div class="field-row">
+          <div class="field"><label>Facebook</label><input type="text" id="br_facebook" placeholder="@handle or URL" /></div>
+          <div class="field"><label>Instagram</label><input type="text" id="br_instagram" placeholder="@handle" /></div>
+        </div>
+        <div class="field"><label>Studio address <span class="field-sub">(shown when a class has no school)</span></label><input type="text" id="br_address" /></div>
+        <div class="field"><label>Logo URL <span class="field-sub">(blank = app logo)</span></label><input type="text" id="br_logo_url" placeholder="/logo.png" /></div>
+        <div class="field-row">
+          <div class="field"><label>Header color</label><input type="color" id="br_primary" value="#0b1638" /></div>
+          <div class="field"><label>Meeting-day color</label><input type="color" id="br_accent" value="#d12027" /></div>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" id="cancelBrandingBtn">Cancel</button>
+        <button class="btn primary" id="saveBrandingBtn">Save branding</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Supabase client -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <!-- PDF.js for the T5c watermarked curriculum viewer is loaded
@@ -2295,6 +2419,9 @@ workstreams:
        initial page weight stays small for the 99% of sessions that
        never open a PDF. -->
   <script src="config.js"></script>
+  <!-- T24: shared semester-calendar engine (preview + branded PDF). jsPDF is
+       lazy-loaded inside calendar-core.js only when a PDF is generated. -->
+  <script src="calendar-core.js"></script>
   <script src="app.js"></script>
 
   <script>

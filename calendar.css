@@ -1,0 +1,100 @@
+/* calendar.css — light "printed paper" styles for the per-class semester
+ * calendar preview. Shared by the admin console (app.js renders
+ * DKCalendar.renderPreviewHTML into a panel) and the public parent page
+ * (class-calendar.html). All rules are scoped under `.dkc-paper` so they
+ * never bleed into the dark app theme. Brand colors come from CSS vars set
+ * inline on `.dkc-paper` (--dkc-primary navy, --dkc-accent red).
+ */
+.dkc-paper {
+  --dkc-primary: #0b1638;
+  --dkc-accent: #d12027;
+  background: #ffffff;
+  color: var(--dkc-primary);
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 28px 30px 24px;
+  border-radius: 12px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, .12);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  line-height: 1.45;
+}
+
+.dkc-head { display: flex; align-items: center; gap: 16px; }
+.dkc-logo { width: 58px; height: 58px; object-fit: contain; border-radius: 8px; flex: 0 0 auto; }
+.dkc-head-text { min-width: 0; }
+.dkc-class-name { font-size: 22px; font-weight: 800; letter-spacing: -.01em; }
+.dkc-age {
+  font-size: 12px; font-weight: 600; color: #fff; background: var(--dkc-accent);
+  border-radius: 999px; padding: 2px 9px; margin-left: 8px; vertical-align: middle;
+}
+.dkc-sched { font-size: 14px; color: #333; margin-top: 3px; font-weight: 500; }
+.dkc-addr { font-size: 12px; color: #777; margin-top: 2px; }
+
+.dkc-season {
+  text-align: center; color: var(--dkc-accent);
+  font-size: 24px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase;
+  margin: 18px 0 8px;
+}
+.dkc-legend {
+  display: flex; align-items: center; gap: 8px; justify-content: center;
+  font-size: 13px; color: #444; margin-bottom: 18px;
+}
+.dkc-legend-dot {
+  width: 14px; height: 14px; border-radius: 50%;
+  border: 2px solid var(--dkc-accent); display: inline-block;
+}
+.dkc-legend-dot.dkc-legend-makeup { background: var(--dkc-accent); margin-left: 14px; }
+
+.dkc-months {
+  display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px 26px;
+}
+.dkc-month { break-inside: avoid; }
+.dkc-month-title {
+  text-align: center; font-weight: 700; font-size: 14px;
+  color: var(--dkc-primary); margin-bottom: 6px;
+}
+.dkc-grid { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.dkc-grid th {
+  font-size: 10px; font-weight: 600; color: #9aa0ad; padding: 2px 0; text-align: center;
+}
+.dkc-grid td {
+  text-align: center; height: 30px; padding: 1px;
+  border: 1px solid #eef0f3; font-size: 12px; color: #3a3f4b;
+}
+.dkc-grid td.dkc-empty { border-color: transparent; }
+.dkc-grid td.dkc-meet span {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; border-radius: 50%;
+  border: 1.6px solid var(--dkc-accent); color: var(--dkc-accent); font-weight: 700;
+}
+.dkc-grid td.dkc-meet.dkc-makeup span {
+  background: var(--dkc-accent); color: #fff;
+}
+.dkc-empty-note {
+  grid-column: 1 / -1; text-align: center; color: #999; font-size: 13px;
+  padding: 28px; border: 1px dashed #ddd; border-radius: 8px;
+}
+
+.dkc-pointers { margin-top: 24px; border-top: 2px solid #eef0f3; padding-top: 16px; break-before: page; }
+.dkc-pointers-title {
+  text-align: center; color: var(--dkc-primary); font-size: 18px; font-weight: 800;
+  margin-bottom: 14px;
+}
+.dkc-pointers-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px 26px; }
+.dkc-pointer { break-inside: avoid; }
+.dkc-pointer-h { font-weight: 700; font-size: 13px; color: var(--dkc-primary); margin-bottom: 2px; }
+.dkc-pointer-b { font-size: 12px; color: #555; }
+
+.dkc-foot {
+  margin-top: 22px; border-top: 1px solid #eef0f3; padding-top: 12px; text-align: center;
+}
+.dkc-foot-studio { font-weight: 700; font-size: 13px; color: var(--dkc-primary); }
+.dkc-foot-contact { font-size: 12px; color: #666; margin-top: 2px; }
+.dkc-foot-social { font-size: 12px; color: #888; margin-top: 2px; }
+
+@media (max-width: 640px) {
+  .dkc-paper { padding: 18px 14px; }
+  .dkc-months, .dkc-pointers-grid { grid-template-columns: 1fr; }
+  .dkc-class-name { font-size: 19px; }
+  .dkc-season { font-size: 20px; }
+}

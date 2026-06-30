@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Class Calendar · Drama Kids</title>
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+  <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16.png" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <meta name="theme-color" content="#0b1638" />
+  <link rel="stylesheet" href="/calendar.css" />
+  <style>
+    :root { --bg: #eef0f4; --ink: #1a1f2e; --ink-dim: #6b7384; --accent: #d12027; --navy: #0b1638; }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg); color: var(--ink); min-height: 100vh;
+    }
+    .page { max-width: 920px; margin: 0 auto; padding: 20px 14px 56px; }
+    .topbar {
+      display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between;
+      margin-bottom: 16px;
+    }
+    .topbar-left { display: flex; align-items: center; gap: 10px; }
+    .topbar-left img { width: 34px; height: 34px; object-fit: contain; }
+    .topbar-left b { font-size: 15px; color: var(--navy); }
+    .controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    select, button {
+      font: inherit; border-radius: 9px; border: 1px solid #cfd3dc; background: #fff;
+      padding: 8px 12px; color: var(--ink); cursor: pointer;
+    }
+    button.primary { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 600; }
+    button.primary:disabled { opacity: .6; cursor: default; }
+    .state { text-align: center; padding: 64px 20px; color: var(--ink-dim); }
+    .state h2 { color: var(--navy); margin-bottom: 6px; }
+    .err { color: var(--accent); }
+    @media print {
+      body { background: #fff; }
+      .topbar, .controls { display: none !important; }
+      .dkc-paper { box-shadow: none; max-width: none; padding: 0; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="topbar">
+      <div class="topbar-left">
+        <img src="/logo.png" alt="" onerror="this.style.display='none'" />
+        <b id="studioName">Drama Kids</b>
+      </div>
+      <div class="controls" id="controls" style="display:none">
+        <label class="visually-hidden" for="semesterSelect">Semester</label>
+        <select id="semesterSelect" aria-label="Choose a semester"></select>
+        <button class="primary" id="downloadBtn" type="button">⬇ Download PDF</button>
+      </div>
+    </div>
+
+    <div id="content">
+      <div class="state"><h2>Loading…</h2><p>Fetching your class calendar.</p></div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="/config.js"></script>
+  <script src="/calendar-core.js"></script>
+  <script>
+    (function () {
+      const cfg = window.DK_CONFIG || {};
+      const sb = window.supabase.createClient(cfg.supabaseUrl, cfg.supabaseKey);
+      const params = new URLSearchParams(location.search);
+      const classId = params.get("class") || params.get("class_id");
+      const initialSemester = params.get("semester") || params.get("semester_id") || null;
+
+      const content = document.getElementById("content");
+      const controls = document.getElementById("controls");
+      const semSelect = document.getElementById("semesterSelect");
+      const dlBtn = document.getElementById("downloadBtn");
+
+      let currentModel = null;
+
+      function showState(html) { content.innerHTML = `<div class="state">${html}</div>`; controls.style.display = "none"; }
+
+      async function fetchCalendar(semesterId) {
+        const { data, error } = await sb.rpc("get_class_calendar", {
+          p_class_id: classId,
+          p_semester_id: semesterId || null,
+        });
+        if (error) throw error;
+        return data;
+      }
+
+      function renderModel(model) {
+        currentModel = model;
+        content.innerHTML = window.DKCalendar.renderPreviewHTML(model);
+        // Populate the semester selector from available_semesters.
+        const avail = model.available_semesters || [];
+        if (avail.length > 1) {
+          semSelect.innerHTML = avail.map((s) =>
+            `<option value="${s.id}"${s.id === (model.semester && model.semester.id) ? " selected" : ""}>${escapeAttr(s.name)}</option>`).join("");
+          semSelect.style.display = "";
+        } else {
+          semSelect.style.display = "none";
+        }
+        controls.style.display = "flex";
+      }
+
+      function escapeAttr(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[c])); }
+
+      async function load(semesterId) {
+        showState("<h2>Loading…</h2><p>Fetching your class calendar.</p>");
+        try {
+          const data = await fetchCalendar(semesterId);
+          if (!data || data.error) {
+            const studio = (data && data.branding && data.branding.studio_name) || "Drama Kids";
+            document.getElementById("studioName").textContent = studio;
+            if (data && data.error === "no_published_calendar") {
+              // Offer the selector if other semesters exist for this class.
+              const avail = (data && data.available_semesters) || [];
+              if (avail.length) {
+                showState(`<h2>Pick a semester</h2><p>Choose a published calendar below.</p>`);
+                semSelect.innerHTML = avail.map((s) => `<option value="${s.id}">${escapeAttr(s.name)}</option>`).join("");
+                semSelect.style.display = "";
+                controls.style.display = "flex";
+                dlBtn.style.display = "none";
+                load(avail[0].id);
+                return;
+              }
+              showState(`<h2>No calendar published yet</h2><p class="err">This class doesn't have a published calendar for this semester. Please check back soon.</p>`);
+              return;
+            }
+            showState(`<h2>Calendar unavailable</h2><p class="err">${escapeAttr((data && data.error) || "Not found")}</p>`);
+            return;
+          }
+          dlBtn.style.display = "";
+          if (data.branding && data.branding.studio_name) document.getElementById("studioName").textContent = data.branding.studio_name;
+          document.title = `${(data.class && data.class.name) || "Class"} · Calendar`;
+          renderModel(data);
+        } catch (e) {
+          showState(`<h2>Something went wrong</h2><p class="err">${escapeAttr(e.message || e)}</p>`);
+        }
+      }
+
+      semSelect.addEventListener("change", () => load(semSelect.value));
+      dlBtn.addEventListener("click", async () => {
+        if (!currentModel) return;
+        dlBtn.disabled = true; const orig = dlBtn.textContent; dlBtn.textContent = "Building…";
+        try { await window.DKCalendar.generatePDF(currentModel); }
+        catch (e) { alert("Couldn't generate the PDF: " + (e.message || e)); }
+        finally { dlBtn.disabled = false; dlBtn.textContent = orig; }
+      });
+
+      if (!classId) {
+        showState(`<h2>Missing class</h2><p>This link needs a class. Ask your studio for the calendar link they sent you.</p>`);
+      } else {
+        load(initialSemester);
+      }
+    })();
+  </script>
+</body>
+</html>

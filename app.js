@@ -117,6 +117,19 @@
     // weight_ledger_entries merge into the "Off your plate" report.
     decisions: [],
     weightLedger: [],
+    // T24: per-class semester calendars. semesters = term definitions;
+    // classMeetingPatterns = recurring weekly pattern per (class, semester);
+    // scheduleExceptions = no-class / makeup dates; parentPointers = policy
+    // sections (class_id null = studio default). SELECT open to any signed-in
+    // user; writes gated on edit_classes. Parents read via the
+    // get_class_calendar RPC (class-calendar.html), never these arrays.
+    semesters: [],
+    classMeetingPatterns: [],
+    scheduleExceptions: [],
+    parentPointers: [],
+    // Calendars (Schedule Manager) tab state: which semester + class are
+    // selected, and which sub-view (manage editor vs. preview-only).
+    calState: { semesterId: null, classId: null, schoolFilter: "all" },
     dkConfig: null,
     latestSyncLog: null,
     // T18: `status` filter ∈ {all, draft, published, archived}. Defaults to
@@ -275,11 +288,11 @@
   // Which tabs each role is allowed to see. (Role Management tab doesn't
   // exist in T1 — it lands in T6.)
   const ROLE_TAB_VISIBILITY = {
-    super_admin: new Set(["home","schedule","templates","classes","schools","teachers","subrequests","events","inventory","leads","tasks","curriculum","reports","users","settings"]),
-    admin:       new Set(["home","schedule","templates","classes","schools","teachers","subrequests","events","inventory","leads","tasks","curriculum","reports","users"]),
-    manager:     new Set(["home","schedule","templates","classes","schools","teachers","subrequests","events","inventory","leads","tasks","curriculum"]),
-    teacher:     new Set(["home","schedule","subrequests","events","inventory"]),
-    viewer:      new Set(["home","schedule","templates","classes","schools","teachers","subrequests","events","inventory"])
+    super_admin: new Set(["home","schedule","templates","classes","calendars","schools","teachers","subrequests","events","inventory","leads","tasks","curriculum","reports","users","settings"]),
+    admin:       new Set(["home","schedule","templates","classes","calendars","schools","teachers","subrequests","events","inventory","leads","tasks","curriculum","reports","users"]),
+    manager:     new Set(["home","schedule","templates","classes","calendars","schools","teachers","subrequests","events","inventory","leads","tasks","curriculum"]),
+    teacher:     new Set(["home","schedule","calendars","subrequests","events","inventory"]),
+    viewer:      new Set(["home","schedule","templates","classes","calendars","schools","teachers","subrequests","events","inventory"])
   };
   function canSeeTab(tab) {
     const role = currentRole();
@@ -305,6 +318,7 @@
       desc: "Day · Week · Month — your classes and closures." },
     { id: "programs", label: "Programs", children: [
         { tab: "classes",    label: "Classes" },
+        { tab: "calendars",  label: "Calendars" },
         { tab: "schools",    label: "Schools" },
         { tab: "events",     label: "Events" },
         { tab: "curriculum", label: "Curriculum" },
@@ -685,7 +699,8 @@
       "leads",
       "tasks",
       "decisions",
-      "weight_ledger_entries"
+      "weight_ledger_entries",
+      "semesters", "class_meeting_patterns", "schedule_exceptions", "parent_pointers"
     ];
     realtimeChannel = sb.channel("dk-realtime");
     tablesToWatch.forEach((table) => {
@@ -894,7 +909,7 @@
   async function reloadAll() {
     showLoader(true);
     try {
-      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches, att, clk, subs, subClm, schs, canc, cur, curA, tpd, tdocs, waivers, wSigs, pms, prof, evs, evStaff, invItems, invAssigns, intakes, parPromo, leadsRes, tasksRes, decisionsRes, weightLedgerRes, tTags, tTagAssigns, awsRes, awcRes, waRes] = await Promise.all([
+      const [cats, tpls, cls, igs, tch, ct, ci, stu, enr, invites, cfg, closures, syncLog, matches, att, clk, subs, subClm, schs, canc, cur, curA, tpd, tdocs, waivers, wSigs, pms, prof, evs, evStaff, invItems, invAssigns, intakes, parPromo, leadsRes, tasksRes, decisionsRes, weightLedgerRes, tTags, tTagAssigns, awsRes, awcRes, waRes, semRes, cmpRes, sxRes, ppRes] = await Promise.all([
         sb.from("categories").select("*").order("sort_order", { ascending: true }),
         sb.from("templates").select("*").order("created_at", { ascending: true }),
         sb.from("classes").select("*").order("name", { ascending: true }),
@@ -937,7 +952,11 @@
         sb.from("teacher_tag_assignments").select("*"),
         sb.from("admin_work_sessions").select("*").order("clocked_in_at", { ascending: false }),
         sb.from("admin_work_caps").select("*"),
-        sb.from("work_assignments").select("*")
+        sb.from("work_assignments").select("*"),
+        sb.from("semesters").select("*").order("start_date", { ascending: false }),
+        sb.from("class_meeting_patterns").select("*"),
+        sb.from("schedule_exceptions").select("*").order("date", { ascending: true }),
+        sb.from("parent_pointers").select("*").order("sort_order", { ascending: true })
       ]);
       for (const r of [cats, tpls, cls, igs, tch, ct, ci, stu, enr]) if (r.error) throw r.error;
       // Non-admin roles may not have SELECT access to teacher_invitations /
@@ -1038,6 +1057,13 @@
       state.adminWorkCaps          = (awcRes && !awcRes.error) ? awcRes.data : [];
       // T22: work-assignment routing matrix (area→primary/backup).
       state.workAssignments        = (waRes && !waRes.error) ? waRes.data : [];
+      // T24: per-class semester calendars. SELECT open to any signed-in user;
+      // empty fallback covers the window before phase_t24_semester_calendars.sql
+      // is applied in any local-dev branch.
+      state.semesters            = (semRes && !semRes.error) ? semRes.data : [];
+      state.classMeetingPatterns = (cmpRes && !cmpRes.error) ? cmpRes.data : [];
+      state.scheduleExceptions   = (sxRes && !sxRes.error) ? sxRes.data : [];
+      state.parentPointers       = (ppRes && !ppRes.error) ? ppRes.data : [];
     } catch (e) {
       console.error(e);
       showToast("Failed to load: " + e.message, "error");
@@ -1062,6 +1088,7 @@
     renderLeadsTab();
     renderTasksTab();
     renderCurriculumTab();
+    renderCalendarsTab();
     renderReportsTab();
     renderUsersTab();
     renderSettingsTab();
@@ -1102,11 +1129,537 @@
         <p class="settings-card-desc">Route each area of work to a specific admin. New leads, at-risk students, sub requests, and teacher onboarding auto-create a task for that area's owner.</p>
         <button class="btn primary small" id="settingsAssignmentsBtn" type="button">Manage assignments</button>
       </div>
+      <div class="settings-card">
+        <div class="settings-card-head">
+          <span class="settings-card-title">🎨 Studio branding</span>
+          <span class="settings-pill ${(state.dkConfig && (state.dkConfig.studio_name || state.dkConfig.studio_phone)) ? "on" : "off"}">${(state.dkConfig && (state.dkConfig.studio_name || state.dkConfig.studio_phone)) ? "Set" : "Not set"}</span>
+        </div>
+        <p class="settings-card-desc">Studio name, owner, contact info, social handles, and brand colors used on the parent-facing class calendars and the downloadable PDF.</p>
+        <button class="btn primary small" id="settingsBrandingBtn" type="button">Edit branding</button>
+      </div>
     `;
     const mcBtn = document.getElementById("settingsMailchimpBtn");
     if (mcBtn) mcBtn.onclick = openMailchimpModal;
     const waBtn = document.getElementById("settingsAssignmentsBtn");
     if (waBtn) waBtn.onclick = openAssignmentsModal;
+    const brBtn = document.getElementById("settingsBrandingBtn");
+    if (brBtn) brBtn.onclick = openBrandingModal;
+  }
+
+  /* ═══════════════════════════════════════════════════════════════════════
+   * T24 — Per-class semester calendars (Schedule Manager + parent view + PDF)
+   *
+   * The Calendars tab is the admin "Schedule Manager": pick a semester + a
+   * class, set the recurring meeting pattern, mark holidays / makeups, edit
+   * parent pointers, preview the printed calendar live, publish it, copy the
+   * parent link, and download the branded PDF. The same DKCalendar engine
+   * (calendar-core.js) renders the preview AND the PDF here and on the public
+   * class-calendar.html parent page, so the two can never drift.
+   * ═══════════════════════════════════════════════════════════════════════ */
+
+  const SEMESTER_TERMS = [
+    { value: "fall",          label: "Fall" },
+    { value: "winter_spring", label: "Winter / Spring" },
+    { value: "summer",        label: "Summer" },
+    { value: "custom",        label: "Custom" },
+  ];
+
+  // Branding object pulled from dk_config (with sender_* fallbacks). The
+  // DKCalendar engine fills in visual defaults (navy / red / logo) for blanks.
+  function calBrandingFromConfig() {
+    const c = state.dkConfig || {};
+    return {
+      studio_name:   c.studio_name || c.sender_name || "",
+      owner_name:    c.studio_owner_name || "",
+      phone:         c.studio_phone || "",
+      email:         c.studio_email || c.sender_email || "",
+      website:       c.studio_website || "",
+      facebook:      c.studio_facebook || "",
+      instagram:     c.studio_instagram || "",
+      address:       c.studio_address || "",
+      primary_color: c.brand_primary_color || "",
+      accent_color:  c.brand_accent_color || "",
+      logo_url:      c.logo_url || "",
+    };
+  }
+
+  // Build the normalized DKCalendar model for a class+semester from the loaded
+  // tables. Mirrors the get_class_calendar RPC's JSON shape exactly.
+  function buildCalendarModel(classId, semesterId) {
+    const cls = state.classes.find((c) => c.id === classId);
+    const sem = state.semesters.find((s) => s.id === semesterId);
+    if (!cls || !sem) return null;
+    const school = cls.school_id ? state.schools.find((s) => s.id === cls.school_id) : null;
+    const patterns = state.classMeetingPatterns
+      .filter((p) => p.class_id === classId && p.semester_id === semesterId)
+      .map((p) => ({ weekday: p.weekday, start_time: p.start_time, end_time: p.end_time, location_name: p.location_name, room: p.room, teacher_name: p.teacher_name }));
+    const exceptions = state.scheduleExceptions
+      .filter((x) => x.semester_id === semesterId && (!x.class_id || x.class_id === classId))
+      .map((x) => ({ date: x.date, kind: x.kind, label: x.label }));
+    let pointers = state.parentPointers.filter((p) => p.class_id === classId);
+    if (!pointers.length) pointers = state.parentPointers.filter((p) => !p.class_id);
+    pointers = pointers.slice()
+      .sort((a, b) => (a.sort_order - b.sort_order) || ((a.created_at || "") < (b.created_at || "") ? -1 : 1))
+      .map((p) => ({ section_title: p.section_title, body: p.body }));
+    return {
+      class: { name: cls.name, days: cls.days, times: cls.times, day_time: cls.day_time, location: cls.location, age_range: cls.age_range },
+      school: school ? { name: school.name, address_line1: school.address_line1, address_line2: school.address_line2, city: school.city, state: school.state, postal_code: school.postal_code } : null,
+      semester: { id: sem.id, name: sem.name, term: sem.term, start_date: sem.start_date, end_date: sem.end_date },
+      patterns, exceptions, pointers,
+      branding: calBrandingFromConfig(),
+    };
+  }
+
+  // Classes the current role may pick in the Calendars dropdown. Teachers are
+  // scoped to their own assignments; everyone else sees all non-test classes.
+  function calSelectableClasses() {
+    let list = state.classes.filter((c) => includeTestClass(c) && c.active !== false);
+    if (isRole("teacher")) {
+      const me = mySignedInTeacher();
+      const mine = new Set(state.classTeachers.filter((ct) => me && ct.teacher_id === me.id).map((ct) => ct.class_id));
+      list = list.filter((c) => mine.has(c.id));
+    }
+    return list.slice().sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+  }
+
+  function renderCalendarsTab() {
+    const root = document.getElementById("calendarsRoot");
+    if (!root) return;
+    if (!canSeeTab("calendars")) { root.innerHTML = ""; return; }
+
+    const canEdit = hasPerm("edit_classes");
+    const semesters = state.semesters.slice();
+    const classes = calSelectableClasses();
+
+    // Resolve current selections, defaulting sensibly.
+    if (!state.calState.semesterId || !semesters.find((s) => s.id === state.calState.semesterId)) {
+      state.calState.semesterId = semesters[0] ? semesters[0].id : null;
+    }
+    if (!state.calState.classId || !classes.find((c) => c.id === state.calState.classId)) {
+      state.calState.classId = classes[0] ? classes[0].id : null;
+    }
+    const semId = state.calState.semesterId;
+    const classId = state.calState.classId;
+    const sem = semesters.find((s) => s.id === semId) || null;
+
+    if (!semesters.length) {
+      root.innerHTML = `
+        <div class="cal-empty">
+          <h3>No semesters yet</h3>
+          <p>A semester defines a term's start &amp; end (e.g. “2025 Fall”). Create one to start building class calendars.</p>
+          ${canEdit ? `<button class="btn primary" id="calNewSemesterEmpty" type="button">＋ New semester</button>` : `<p class="muted">Ask an admin to set up a semester.</p>`}
+        </div>`;
+      const b = document.getElementById("calNewSemesterEmpty");
+      if (b) b.onclick = () => openSemesterModal(null);
+      return;
+    }
+
+    const semOpts = semesters.map((s) =>
+      `<option value="${escapeHtml(s.id)}"${s.id === semId ? " selected" : ""}>${escapeHtml(s.name)}${s.is_published ? "" : " (draft)"}</option>`).join("");
+    const classOpts = classes.length
+      ? classes.map((c) => `<option value="${escapeHtml(c.id)}"${c.id === classId ? " selected" : ""}>${escapeHtml(c.name)}</option>`).join("")
+      : `<option value="">No classes available</option>`;
+
+    const published = !!(sem && sem.is_published);
+    const model = (classId && semId) ? buildCalendarModel(classId, semId) : null;
+
+    root.innerHTML = `
+      <div class="cal-toolbar">
+        <div class="cal-tb-group">
+          <label class="cal-tb-label">Semester</label>
+          <select id="calSemesterSel" class="cal-select">${semOpts}</select>
+          ${canEdit ? `
+            <button class="btn ghost small" id="calEditSemester" title="Edit this semester">✎</button>
+            <button class="btn ghost small" id="calNewSemester" title="New semester">＋</button>` : ""}
+        </div>
+        <div class="cal-tb-group">
+          <label class="cal-tb-label">Class</label>
+          <select id="calClassSel" class="cal-select">${classOpts}</select>
+        </div>
+        <div class="cal-tb-group cal-tb-right">
+          <span class="cal-pub-pill ${published ? "is-published" : "is-draft"}">${published ? "● Published" : "○ Draft"}</span>
+          ${canEdit ? `<button class="btn small" id="calTogglePublish">${published ? "Unpublish" : "Publish"}</button>` : ""}
+          <button class="btn ghost small" id="calCopyLink" title="Copy the parent calendar link">🔗 Parent link</button>
+          ${canEdit ? `<button class="btn ghost small" id="calEditPointers" title="Edit parent pointers / policies">📝 Pointers</button>` : ""}
+          ${canEdit ? `<button class="btn ghost small" id="calEditBranding" title="Edit studio branding">🎨 Branding</button>` : ""}
+          <button class="btn primary small" id="calDownloadPdf" ${model ? "" : "disabled"}>⬇ PDF</button>
+        </div>
+      </div>
+      <div class="cal-layout">
+        ${canEdit ? `<div class="cal-editor" id="calEditPanel"></div>` : ""}
+        <div class="cal-preview-wrap">
+          <div class="cal-preview" id="calPreview">${
+            model ? window.DKCalendar.renderPreviewHTML(model)
+                  : `<div class="cal-empty"><p>Select a class to preview its calendar.</p></div>`
+          }</div>
+        </div>
+      </div>`;
+
+    // Wire toolbar
+    const semSel = document.getElementById("calSemesterSel");
+    if (semSel) semSel.onchange = (e) => { state.calState.semesterId = e.target.value; renderCalendarsTab(); };
+    const classSel = document.getElementById("calClassSel");
+    if (classSel) classSel.onchange = (e) => { state.calState.classId = e.target.value; renderCalendarsTab(); };
+    const editSem = document.getElementById("calEditSemester");
+    if (editSem) editSem.onclick = () => openSemesterModal(semId);
+    const newSem = document.getElementById("calNewSemester");
+    if (newSem) newSem.onclick = () => openSemesterModal(null);
+    const togglePub = document.getElementById("calTogglePublish");
+    if (togglePub) togglePub.onclick = () => toggleSemesterPublish(semId);
+    const copyLink = document.getElementById("calCopyLink");
+    if (copyLink) copyLink.onclick = () => copyParentCalendarLink(classId, semId);
+    const editPts = document.getElementById("calEditPointers");
+    if (editPts) editPts.onclick = () => openPointersModal(classId);
+    const editBr = document.getElementById("calEditBranding");
+    if (editBr) editBr.onclick = openBrandingModal;
+    const dl = document.getElementById("calDownloadPdf");
+    if (dl) dl.onclick = async () => {
+      const m = buildCalendarModel(classId, semId);
+      if (!m) return;
+      dl.disabled = true; const o = dl.textContent; dl.textContent = "Building…";
+      try { await window.DKCalendar.generatePDF(m); }
+      catch (err) { showToast("PDF failed: " + (err.message || err), "error"); }
+      finally { dl.disabled = false; dl.textContent = o; }
+    };
+
+    if (canEdit && classId && semId) renderCalEditor(classId, semId);
+  }
+
+  function renderCalEditor(classId, semId) {
+    const panel = document.getElementById("calEditPanel");
+    if (!panel) return;
+    const patterns = state.classMeetingPatterns.filter((p) => p.class_id === classId && p.semester_id === semId);
+    const checkedDays = new Set(patterns.map((p) => p.weekday));
+    const p0 = patterns[0] || {};
+    const exceptions = state.scheduleExceptions
+      .filter((x) => x.semester_id === semId && (!x.class_id || x.class_id === classId))
+      .slice().sort((a, b) => (a.date < b.date ? -1 : 1));
+    const cls = state.classes.find((c) => c.id === classId);
+    const hasCustomPointers = state.parentPointers.some((p) => p.class_id === classId);
+
+    const dayBtns = window.DKCalendar.WEEKDAY_LONG.map((d, i) =>
+      `<label class="cal-day"><input type="checkbox" class="cal-weekday" value="${i}"${checkedDays.has(i) ? " checked" : ""}/><span>${d.slice(0, 3)}</span></label>`).join("");
+
+    const excRows = exceptions.length ? exceptions.map((x) => `
+      <div class="cal-exc-row">
+        <span class="cal-exc-date">${escapeHtml(x.date)}</span>
+        <span class="cal-exc-kind cal-exc-${escapeHtml(x.kind)}">${x.kind === "makeup" ? "Makeup" : "No class"}</span>
+        <span class="cal-exc-label">${escapeHtml(x.label || "")}${x.class_id ? "" : ' <em class="muted">(all classes)</em>'}</span>
+        <button class="btn ghost small cal-exc-del" data-exc="${escapeHtml(x.id)}" title="Remove">✕</button>
+      </div>`).join("") : `<div class="muted" style="padding:6px 0;font-size:13px">No holidays or makeups yet.</div>`;
+
+    panel.innerHTML = `
+      <div class="cal-ed-section">
+        <div class="cal-ed-title">Meeting pattern</div>
+        <div class="cal-days">${dayBtns}</div>
+        <div class="cal-field-row">
+          <div class="field"><label>Start time</label><input type="time" id="calPatStart" value="${escapeHtml((p0.start_time || "").slice(0, 5))}" /></div>
+          <div class="field"><label>End time</label><input type="time" id="calPatEnd" value="${escapeHtml((p0.end_time || "").slice(0, 5))}" /></div>
+        </div>
+        <div class="field"><label>Location override <span class="field-sub">(blank = ${escapeHtml(classLocationLabel(cls) || "class location")})</span></label><input type="text" id="calPatLoc" value="${escapeHtml(p0.location_name || "")}" placeholder="e.g. Cario Cafeteria" /></div>
+        <div class="cal-field-row">
+          <div class="field"><label>Room</label><input type="text" id="calPatRoom" value="${escapeHtml(p0.room || "")}" /></div>
+          <div class="field"><label>Teacher (label)</label><input type="text" id="calPatTeacher" value="${escapeHtml(p0.teacher_name || "")}" /></div>
+        </div>
+        <button class="btn primary small" id="calSavePattern">Save schedule</button>
+      </div>
+
+      <div class="cal-ed-section">
+        <div class="cal-ed-title">Holidays &amp; makeups</div>
+        <div class="cal-exc-list">${excRows}</div>
+        <div class="cal-exc-add">
+          <input type="date" id="calExcDate" />
+          <select id="calExcKind"><option value="no_class">No class</option><option value="makeup">Makeup</option></select>
+          <input type="text" id="calExcLabel" placeholder="Label (optional)" />
+          <select id="calExcScope" title="Apply to just this class or every class this semester">
+            <option value="class">This class</option>
+            <option value="all">All classes</option>
+          </select>
+          <button class="btn small" id="calAddExc">Add</button>
+        </div>
+      </div>
+
+      <div class="cal-ed-section">
+        <div class="cal-ed-title">Parent pointers</div>
+        <p class="muted" style="font-size:13px;margin:2px 0 8px">${hasCustomPointers ? "Using custom pointers for this class." : "Using the studio default pointers."}</p>
+        <button class="btn small" id="calOpenPointers">📝 Edit pointers</button>
+      </div>`;
+
+    document.getElementById("calSavePattern").onclick = () => saveMeetingPattern(classId, semId);
+    document.getElementById("calAddExc").onclick = () => addScheduleException(classId, semId);
+    document.getElementById("calOpenPointers").onclick = () => openPointersModal(classId);
+    panel.querySelectorAll(".cal-exc-del").forEach((b) => {
+      b.onclick = () => deleteScheduleException(b.dataset.exc);
+    });
+  }
+
+  async function saveMeetingPattern(classId, semId) {
+    const days = Array.from(document.querySelectorAll("#calEditPanel .cal-weekday:checked")).map((el) => +el.value);
+    const start = (document.getElementById("calPatStart").value || "").trim() || null;
+    const end = (document.getElementById("calPatEnd").value || "").trim() || null;
+    const loc = (document.getElementById("calPatLoc").value || "").trim() || null;
+    const room = (document.getElementById("calPatRoom").value || "").trim() || null;
+    const teacher = (document.getElementById("calPatTeacher").value || "").trim() || null;
+    const btn = document.getElementById("calSavePattern");
+    if (btn) btn.disabled = true;
+    let resp = await sb.from("class_meeting_patterns").delete().eq("class_id", classId).eq("semester_id", semId);
+    if (resp.error) { showToast(resp.error.message, "error"); if (btn) btn.disabled = false; return; }
+    if (days.length) {
+      const rows = days.map((w) => ({ class_id: classId, semester_id: semId, weekday: w, start_time: start, end_time: end, location_name: loc, room, teacher_name: teacher }));
+      resp = await sb.from("class_meeting_patterns").insert(rows);
+      if (resp.error) { showToast(resp.error.message, "error"); if (btn) btn.disabled = false; return; }
+    }
+    await reloadAll(); renderAll();
+    showToast("Schedule saved", "success");
+  }
+
+  async function addScheduleException(classId, semId) {
+    const date = document.getElementById("calExcDate").value;
+    if (!date) { showToast("Pick a date", "error"); return; }
+    const kind = document.getElementById("calExcKind").value;
+    const label = (document.getElementById("calExcLabel").value || "").trim() || null;
+    const scope = document.getElementById("calExcScope").value;
+    const row = { semester_id: semId, class_id: scope === "all" ? null : classId, date, kind, label };
+    const resp = await sb.from("schedule_exceptions").insert(row);
+    if (resp.error) { showToast(resp.error.message, "error"); return; }
+    await reloadAll(); renderAll();
+    showToast("Added", "success");
+  }
+
+  async function deleteScheduleException(id) {
+    const resp = await sb.from("schedule_exceptions").delete().eq("id", id);
+    if (resp.error) { showToast(resp.error.message, "error"); return; }
+    await reloadAll(); renderAll();
+  }
+
+  async function toggleSemesterPublish(semId) {
+    const sem = state.semesters.find((s) => s.id === semId);
+    if (!sem) return;
+    const next = !sem.is_published;
+    const patch = { is_published: next, published_at: next ? new Date().toISOString() : null, published_by: next ? (state.profile && state.profile.id) || null : null };
+    const resp = await sb.from("semesters").update(patch).eq("id", semId);
+    if (resp.error) { showToast(resp.error.message, "error"); return; }
+    await reloadAll(); renderAll();
+    showToast(next ? "Published — parents can now view this calendar." : "Unpublished.", "success");
+  }
+
+  function copyParentCalendarLink(classId, semId) {
+    if (!classId || !semId) { showToast("Select a class first", "error"); return; }
+    const sem = state.semesters.find((s) => s.id === semId);
+    const url = `${location.origin}/class-calendar.html?class=${encodeURIComponent(classId)}&semester=${encodeURIComponent(semId)}`;
+    const after = () => showToast(sem && sem.is_published ? "Parent link copied" : "Link copied — publish the semester so parents can open it", "success");
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(url).then(after, () => { window.prompt("Copy the parent link:", url); });
+    } else {
+      window.prompt("Copy the parent link:", url);
+    }
+  }
+
+  /* ─── Semester editor modal ─── */
+  function openSemesterModal(semId) {
+    if (!hasPerm("edit_classes")) { showToast("You can't edit semesters", "error"); return; }
+    const sem = semId ? state.semesters.find((s) => s.id === semId) : null;
+    state._editingSemesterId = sem ? sem.id : null;
+    document.getElementById("semesterModalTitle").textContent = sem ? "Edit semester" : "New semester";
+    document.getElementById("sem_name").value = sem ? sem.name : "";
+    document.getElementById("sem_term").value = sem ? sem.term : "fall";
+    document.getElementById("sem_start").value = sem ? (sem.start_date || "").slice(0, 10) : "";
+    document.getElementById("sem_end").value = sem ? (sem.end_date || "").slice(0, 10) : "";
+    document.getElementById("sem_published").checked = sem ? !!sem.is_published : false;
+    document.getElementById("sem_notes").value = sem ? (sem.notes || "") : "";
+    document.getElementById("deleteSemesterBtn").style.display = sem ? "" : "none";
+    document.getElementById("semesterModalOverlay").classList.add("open");
+  }
+  function closeSemesterModal() { document.getElementById("semesterModalOverlay").classList.remove("open"); }
+
+  async function saveSemester() {
+    const name = (document.getElementById("sem_name").value || "").trim();
+    const start = document.getElementById("sem_start").value;
+    const end = document.getElementById("sem_end").value;
+    if (!name) { showToast("Name is required", "error"); return; }
+    if (!start || !end) { showToast("Start and end dates are required", "error"); return; }
+    if (end < start) { showToast("End date must be after start date", "error"); return; }
+    const published = document.getElementById("sem_published").checked;
+    const patch = {
+      name, term: document.getElementById("sem_term").value,
+      start_date: start, end_date: end,
+      is_published: published,
+      published_at: published ? new Date().toISOString() : null,
+      published_by: published ? (state.profile && state.profile.id) || null : null,
+      notes: (document.getElementById("sem_notes").value || "").trim() || null,
+    };
+    const btn = document.getElementById("saveSemesterBtn");
+    btn.disabled = true;
+    let resp, newId = state._editingSemesterId;
+    if (state._editingSemesterId) {
+      resp = await sb.from("semesters").update(patch).eq("id", state._editingSemesterId);
+    } else {
+      patch.created_by = myUserId();
+      resp = await sb.from("semesters").insert(patch).select("id").single();
+      if (!resp.error && resp.data) newId = resp.data.id;
+    }
+    btn.disabled = false;
+    if (resp.error) { showToast(resp.error.message, "error"); return; }
+    if (newId) state.calState.semesterId = newId;
+    closeSemesterModal();
+    await reloadAll(); renderAll();
+    showToast("Semester saved", "success");
+  }
+
+  async function deleteSemester() {
+    const id = state._editingSemesterId;
+    if (!id) return;
+    if (!window.confirm("Delete this semester? Its meeting patterns and exceptions will be removed. Parent pointers are kept.")) return;
+    const resp = await sb.from("semesters").delete().eq("id", id);
+    if (resp.error) { showToast(resp.error.message, "error"); return; }
+    state.calState.semesterId = null;
+    closeSemesterModal();
+    await reloadAll(); renderAll();
+    showToast("Semester deleted", "success");
+  }
+
+  /* ─── Parent pointers editor modal ───
+   * Edits either this class's custom pointers or the studio default set.
+   * Works against an in-memory draft so rows can be added/removed/reordered
+   * before a single Save (delete-all-for-scope + insert).
+   */
+  function openPointersModal(classId) {
+    if (!hasPerm("edit_classes")) { showToast("You can't edit pointers", "error"); return; }
+    state._pointersClassId = classId || null;
+    state._pointersScope = state.parentPointers.some((p) => p.class_id === classId) ? "class" : "default";
+    loadPointersDraft();
+    renderPointersModal();
+    document.getElementById("pointersModalOverlay").classList.add("open");
+  }
+  function closePointersModal() { document.getElementById("pointersModalOverlay").classList.remove("open"); }
+
+  function loadPointersDraft() {
+    const scope = state._pointersScope;
+    const classId = state._pointersClassId;
+    const rows = (scope === "class"
+      ? state.parentPointers.filter((p) => p.class_id === classId)
+      : state.parentPointers.filter((p) => !p.class_id))
+      .slice().sort((a, b) => (a.sort_order - b.sort_order));
+    state._pointersDraft = rows.map((r) => ({ section_title: r.section_title, body: r.body }));
+  }
+
+  function renderPointersModal() {
+    const cls = state.classes.find((c) => c.id === state._pointersClassId);
+    const sub = document.getElementById("pointersModalSub");
+    if (sub) sub.textContent = state._pointersScope === "class"
+      ? `Custom pointers for ${cls ? cls.name : "this class"}`
+      : "Studio default pointers (apply to every class without custom pointers)";
+    const scopeSel = document.getElementById("pointersScopeSel");
+    if (scopeSel) scopeSel.value = state._pointersScope;
+    const list = document.getElementById("pointersList");
+    if (!list) return;
+    const draft = state._pointersDraft || [];
+    list.innerHTML = draft.length ? draft.map((p, i) => `
+      <div class="cal-pp-row" data-i="${i}">
+        <input type="text" class="cal-pp-title" value="${escapeHtml(p.section_title)}" placeholder="Section title" />
+        <textarea class="cal-pp-body" rows="2" placeholder="Policy text…">${escapeHtml(p.body)}</textarea>
+        <div class="cal-pp-actions">
+          <button class="btn ghost small cal-pp-up" ${i === 0 ? "disabled" : ""} title="Move up">↑</button>
+          <button class="btn ghost small cal-pp-down" ${i === draft.length - 1 ? "disabled" : ""} title="Move down">↓</button>
+          <button class="btn ghost small cal-pp-del" title="Remove">✕</button>
+        </div>
+      </div>`).join("") : `<div class="muted" style="padding:8px 0">No pointers. Add one, or copy the studio defaults.</div>`;
+
+    // Bind editing (commit to draft on input so reorders/saves keep text)
+    const commit = () => {
+      list.querySelectorAll(".cal-pp-row").forEach((row) => {
+        const i = +row.dataset.i;
+        state._pointersDraft[i] = {
+          section_title: row.querySelector(".cal-pp-title").value,
+          body: row.querySelector(".cal-pp-body").value,
+        };
+      });
+    };
+    list.querySelectorAll(".cal-pp-title, .cal-pp-body").forEach((el) => { el.oninput = commit; });
+    list.querySelectorAll(".cal-pp-del").forEach((b) => b.onclick = () => { commit(); const i = +b.closest(".cal-pp-row").dataset.i; state._pointersDraft.splice(i, 1); renderPointersModal(); });
+    list.querySelectorAll(".cal-pp-up").forEach((b) => b.onclick = () => { commit(); const i = +b.closest(".cal-pp-row").dataset.i; if (i > 0) { const d = state._pointersDraft; [d[i - 1], d[i]] = [d[i], d[i - 1]]; } renderPointersModal(); });
+    list.querySelectorAll(".cal-pp-down").forEach((b) => b.onclick = () => { commit(); const i = +b.closest(".cal-pp-row").dataset.i; const d = state._pointersDraft; if (i < d.length - 1) { [d[i + 1], d[i]] = [d[i], d[i + 1]]; } renderPointersModal(); });
+  }
+
+  function commitPointersDraftFromDOM() {
+    const list = document.getElementById("pointersList");
+    if (!list) return;
+    list.querySelectorAll(".cal-pp-row").forEach((row) => {
+      const i = +row.dataset.i;
+      state._pointersDraft[i] = {
+        section_title: row.querySelector(".cal-pp-title").value,
+        body: row.querySelector(".cal-pp-body").value,
+      };
+    });
+  }
+
+  async function savePointers() {
+    commitPointersDraftFromDOM();
+    const scope = state._pointersScope;
+    const classId = state._pointersClassId;
+    const targetClassId = scope === "class" ? classId : null;
+    const rows = (state._pointersDraft || [])
+      .filter((p) => (p.section_title || "").trim())
+      .map((p, i) => ({ class_id: targetClassId, section_title: p.section_title.trim(), body: (p.body || "").trim(), sort_order: i + 1 }));
+    const btn = document.getElementById("savePointersBtn");
+    btn.disabled = true;
+    let del = sb.from("parent_pointers").delete();
+    del = targetClassId ? del.eq("class_id", targetClassId) : del.is("class_id", null);
+    let resp = await del;
+    if (resp.error) { showToast(resp.error.message, "error"); btn.disabled = false; return; }
+    if (rows.length) {
+      resp = await sb.from("parent_pointers").insert(rows);
+      if (resp.error) { showToast(resp.error.message, "error"); btn.disabled = false; return; }
+    }
+    btn.disabled = false;
+    closePointersModal();
+    await reloadAll(); renderAll();
+    showToast("Parent pointers saved", "success");
+  }
+
+  /* ─── Branding editor modal ─── */
+  function openBrandingModal() {
+    if (!isAdminOrAbove()) { showToast("Admins only", "error"); return; }
+    const c = state.dkConfig || {};
+    document.getElementById("br_studio_name").value = c.studio_name || c.sender_name || "";
+    document.getElementById("br_owner_name").value = c.studio_owner_name || "";
+    document.getElementById("br_phone").value = c.studio_phone || "";
+    document.getElementById("br_email").value = c.studio_email || c.sender_email || "";
+    document.getElementById("br_website").value = c.studio_website || "";
+    document.getElementById("br_facebook").value = c.studio_facebook || "";
+    document.getElementById("br_instagram").value = c.studio_instagram || "";
+    document.getElementById("br_address").value = c.studio_address || "";
+    document.getElementById("br_logo_url").value = c.logo_url || "";
+    document.getElementById("br_primary").value = c.brand_primary_color || "#0b1638";
+    document.getElementById("br_accent").value = c.brand_accent_color || "#d12027";
+    document.getElementById("brandingModalOverlay").classList.add("open");
+  }
+  function closeBrandingModal() { document.getElementById("brandingModalOverlay").classList.remove("open"); }
+
+  async function saveBranding() {
+    const val = (id) => (document.getElementById(id).value || "").trim() || null;
+    const patch = {
+      studio_name: val("br_studio_name"),
+      studio_owner_name: val("br_owner_name"),
+      studio_phone: val("br_phone"),
+      studio_email: val("br_email"),
+      studio_website: val("br_website"),
+      studio_facebook: val("br_facebook"),
+      studio_instagram: val("br_instagram"),
+      studio_address: val("br_address"),
+      logo_url: val("br_logo_url"),
+      brand_primary_color: document.getElementById("br_primary").value || null,
+      brand_accent_color: document.getElementById("br_accent").value || null,
+    };
+    const btn = document.getElementById("saveBrandingBtn");
+    btn.disabled = true;
+    const resp = await sb.from("dk_config").update(patch).eq("id", 1);
+    btn.disabled = false;
+    if (resp.error) { showToast(resp.error.message, "error"); return; }
+    state.dkConfig = Object.assign({}, state.dkConfig, patch);
+    closeBrandingModal();
+    renderAll();
+    showToast("Branding saved", "success");
   }
 
   /* ═══════════════ T22: Work-assignment matrix ═══════════════ */
@@ -5225,6 +5778,21 @@
           openInventoryAssignModal({ kind: "class", classId: cls.id, sessionDate: nextSession });
         };
         actionRow.appendChild(btn);
+      }
+
+      // T24: jump to the Calendars tab with this class pre-selected (semester
+      // calendar / parent PDF). Visible to any role that can see the tab.
+      if (canSeeTab("calendars")) {
+        const calBtn = document.createElement("button");
+        calBtn.className = "btn small ghost";
+        calBtn.textContent = "📅 Calendar";
+        calBtn.title = `Open the semester calendar for ${cls.name}`;
+        calBtn.onclick = (e) => {
+          e.stopPropagation();
+          state.calState.classId = cls.id;
+          go("calendars");
+        };
+        actionRow.appendChild(calBtn);
       }
 
       if (actionRow.children.length > 0) {
@@ -14136,6 +14704,31 @@ Drama Kids`;
     $("#assignmentsClose").onclick = closeAssignmentsModal;
     $("#assignmentsDone").onclick  = closeAssignmentsModal;
     $("#assignmentsOverlay").onclick = (e) => { if (e.target.id === "assignmentsOverlay") closeAssignmentsModal(); };
+
+    // T24: semester / pointers / branding modals
+    const bind = (id, fn) => { const el = $("#" + id); if (el) el.onclick = fn; };
+    bind("semesterModalClose", closeSemesterModal);
+    bind("cancelSemesterBtn", closeSemesterModal);
+    bind("saveSemesterBtn", saveSemester);
+    bind("deleteSemesterBtn", deleteSemester);
+    $("#semesterModalOverlay").onclick = (e) => { if (e.target.id === "semesterModalOverlay") closeSemesterModal(); };
+    bind("pointersModalClose", closePointersModal);
+    bind("cancelPointersBtn", closePointersModal);
+    bind("savePointersBtn", savePointers);
+    bind("addPointerBtn", () => { commitPointersDraftFromDOM(); (state._pointersDraft = state._pointersDraft || []).push({ section_title: "", body: "" }); renderPointersModal(); });
+    bind("copyDefaultPointersBtn", () => {
+      commitPointersDraftFromDOM();
+      const defaults = state.parentPointers.filter((p) => !p.class_id).slice().sort((a, b) => a.sort_order - b.sort_order);
+      state._pointersDraft = (state._pointersDraft || []).concat(defaults.map((d) => ({ section_title: d.section_title, body: d.body })));
+      renderPointersModal();
+    });
+    const ppScope = $("#pointersScopeSel");
+    if (ppScope) ppScope.onchange = (e) => { commitPointersDraftFromDOM(); state._pointersScope = e.target.value; loadPointersDraft(); renderPointersModal(); };
+    $("#pointersModalOverlay").onclick = (e) => { if (e.target.id === "pointersModalOverlay") closePointersModal(); };
+    bind("brandingModalClose", closeBrandingModal);
+    bind("cancelBrandingBtn", closeBrandingModal);
+    bind("saveBrandingBtn", saveBranding);
+    $("#brandingModalOverlay").onclick = (e) => { if (e.target.id === "brandingModalOverlay") closeBrandingModal(); };
 
     // Month-view rows-per-cell depends on the viewport breakpoint, so re-render
     // the schedule when the window crosses it (debounced) to keep the
