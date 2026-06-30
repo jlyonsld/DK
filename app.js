@@ -1190,9 +1190,19 @@
     const sem = state.semesters.find((s) => s.id === semesterId);
     if (!cls || !sem) return null;
     const school = cls.school_id ? state.schools.find((s) => s.id === cls.school_id) : null;
-    const patterns = state.classMeetingPatterns
+    let patterns = state.classMeetingPatterns
       .filter((p) => p.class_id === classId && p.semester_id === semesterId)
       .map((p) => ({ weekday: p.weekday, start_time: p.start_time, end_time: p.end_time, location_name: p.location_name, room: p.room, teacher_name: p.teacher_name }));
+    // If no pattern has been saved for this class+semester yet, derive one from
+    // the class's existing schedule so the preview populates immediately. (The
+    // editor banner nudges the admin to Save it; the parent RPC uses saved rows
+    // only, so publishing still requires an explicit Save.)
+    let derivedPattern = false;
+    if (!patterns.length) {
+      const cls2 = state.classes.find((c) => c.id === classId);
+      const derived = deriveCalendarPatternFromClass(cls2);
+      if (derived.length) { patterns = derived; derivedPattern = true; }
+    }
     const exceptions = state.scheduleExceptions
       .filter((x) => x.semester_id === semesterId && (!x.class_id || x.class_id === classId))
       .map((x) => ({ date: x.date, kind: x.kind, label: x.label }));
@@ -1207,7 +1217,55 @@
       semester: { id: sem.id, name: sem.name, term: sem.term, start_date: sem.start_date, end_date: sem.end_date },
       patterns, exceptions, pointers,
       branding: calBrandingFromConfig(),
+      derivedPattern,
     };
+  }
+
+  // Parse a class's day/time strings into calendar pattern rows so picking an
+  // existing class instantly populates the calendar (no re-typing). Reads the
+  // same fields the schedule helpers use: cls.days / cls.day_time for weekdays,
+  // cls.times / cls.day_time for the time range, and the class's school /
+  // location for the location label.
+  function parseTimeRangeForCal(raw) {
+    if (!raw) return null;
+    const s = String(raw).toLowerCase().replace(/\./g, "");
+    const to24 = (h, mm, mer) => { if (mer === "pm" && h < 12) h += 12; if (mer === "am" && h === 12) h = 0; return { h, m: mm }; };
+    // 1. range with BOTH meridians: "11:30 am - 1:00 pm"
+    let m = s.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*[-–—]\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)/);
+    if (m) return { start: to24(+m[1], m[2] ? +m[2] : 0, m[3]), end: to24(+m[4], m[5] ? +m[5] : 0, m[6]) };
+    // 2. range with one trailing meridian shared by both ends: "3:00–3:45 PM"
+    m = s.match(/(\d{1,2})(?::(\d{2}))?\s*[-–—]\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)/);
+    if (m) {
+      const sh = +m[1], sm = m[2] ? +m[2] : 0, eh = +m[3], em = m[4] ? +m[4] : 0, mer = m[5];
+      let sMer = mer; if (mer === "pm" && sh <= 11 && (sh > eh || eh === 12)) sMer = "am";
+      return { start: to24(sh, sm, sMer), end: to24(eh, em, mer) };
+    }
+    // 3. single time with meridian
+    m = s.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)/);
+    if (m) return { start: to24(+m[1], m[2] ? +m[2] : 0, m[3]), end: null };
+    // 4. 24-hour range / single
+    m = s.match(/\b([01]?\d|2[0-3]):([0-5]\d)\s*[-–—]\s*([01]?\d|2[0-3]):([0-5]\d)/);
+    if (m) return { start: { h: +m[1], m: +m[2] }, end: { h: +m[3], m: +m[4] } };
+    m = s.match(/\b([01]?\d|2[0-3]):([0-5]\d)\b/);
+    if (m) return { start: { h: +m[1], m: +m[2] }, end: null };
+    return null;
+  }
+
+  function deriveCalendarPatternFromClass(cls) {
+    if (!cls) return [];
+    const src = String(cls.days || cls.day_time || "").toLowerCase();
+    const weekdays = [];
+    for (let i = 0; i < 7; i++) {
+      const long = DOW_LONG[i].toLowerCase();
+      const short = DOW_SHORT[i].toLowerCase();
+      if (src.includes(long) || new RegExp("\\b" + short + "\\b").test(src)) weekdays.push(i);
+    }
+    const range = parseTimeRangeForCal(cls.times || cls.day_time);
+    const hhmm = (t) => (t ? String(t.h).padStart(2, "0") + ":" + String(t.m).padStart(2, "0") + ":00" : null);
+    const start = range ? hhmm(range.start) : null;
+    const end = range && range.end ? hhmm(range.end) : null;
+    const loc = classLocationLabel(cls) || null;
+    return weekdays.map((w) => ({ weekday: w, start_time: start, end_time: end, location_name: loc, room: null, teacher_name: null }));
   }
 
   // Classes the current role may pick in the Calendars dropdown. Teachers are
@@ -1328,17 +1386,25 @@
   function renderCalEditor(classId, semId) {
     const panel = document.getElementById("calEditPanel");
     if (!panel) return;
-    const patterns = state.classMeetingPatterns.filter((p) => p.class_id === classId && p.semester_id === semId);
+    const cls = state.classes.find((c) => c.id === classId);
+    const savedPatterns = state.classMeetingPatterns.filter((p) => p.class_id === classId && p.semester_id === semId);
+    // When nothing is saved yet, pre-fill the editor from the class's existing
+    // schedule so the admin just reviews + Saves instead of re-typing.
+    const usingDerived = savedPatterns.length === 0;
+    const patterns = usingDerived ? deriveCalendarPatternFromClass(cls) : savedPatterns;
     const checkedDays = new Set(patterns.map((p) => p.weekday));
     const p0 = patterns[0] || {};
     const exceptions = state.scheduleExceptions
       .filter((x) => x.semester_id === semId && (!x.class_id || x.class_id === classId))
       .slice().sort((a, b) => (a.date < b.date ? -1 : 1));
-    const cls = state.classes.find((c) => c.id === classId);
     const hasCustomPointers = state.parentPointers.some((p) => p.class_id === classId);
 
     const dayBtns = window.DKCalendar.WEEKDAY_LONG.map((d, i) =>
       `<label class="cal-day"><input type="checkbox" class="cal-weekday" value="${i}"${checkedDays.has(i) ? " checked" : ""}/><span>${d.slice(0, 3)}</span></label>`).join("");
+
+    const derivedBanner = (usingDerived && patterns.length)
+      ? `<div class="cal-prefill-banner">↻ Auto-filled from <b>${escapeHtml(cls ? cls.name : "this class")}</b>'s schedule. Review and <b>Save schedule</b> to apply (parents see it once you publish).</div>`
+      : "";
 
     const excRows = exceptions.length ? exceptions.map((x) => `
       <div class="cal-exc-row">
@@ -1351,6 +1417,7 @@
     panel.innerHTML = `
       <div class="cal-ed-section">
         <div class="cal-ed-title">Meeting pattern</div>
+        ${derivedBanner}
         <div class="cal-days">${dayBtns}</div>
         <div class="cal-field-row">
           <div class="field"><label>Start time</label><input type="time" id="calPatStart" value="${escapeHtml((p0.start_time || "").slice(0, 5))}" /></div>
@@ -1361,7 +1428,10 @@
           <div class="field"><label>Room</label><input type="text" id="calPatRoom" value="${escapeHtml(p0.room || "")}" /></div>
           <div class="field"><label>Teacher (label)</label><input type="text" id="calPatTeacher" value="${escapeHtml(p0.teacher_name || "")}" /></div>
         </div>
-        <button class="btn primary small" id="calSavePattern">Save schedule</button>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <button class="btn primary small" id="calSavePattern">Save schedule</button>
+          <button class="btn ghost small" id="calPrefill" title="Fill the days &amp; time from this class's existing schedule">↻ Prefill from class</button>
+        </div>
       </div>
 
       <div class="cal-ed-section">
@@ -1386,6 +1456,8 @@
       </div>`;
 
     document.getElementById("calSavePattern").onclick = () => saveMeetingPattern(classId, semId);
+    const prefillBtn = document.getElementById("calPrefill");
+    if (prefillBtn) prefillBtn.onclick = () => prefillCalendarFromClass(classId);
     document.getElementById("calAddExc").onclick = () => addScheduleException(classId, semId);
     document.getElementById("calOpenPointers").onclick = () => openPointersModal(classId);
     panel.querySelectorAll(".cal-exc-del").forEach((b) => {
@@ -1411,6 +1483,21 @@
     }
     await reloadAll(); renderAll();
     showToast("Schedule saved", "success");
+  }
+
+  // Fill the editor inputs (not the DB) from the class's existing schedule, so
+  // the admin can review and Save. Used by the "↻ Prefill from class" button.
+  function prefillCalendarFromClass(classId) {
+    const cls = state.classes.find((c) => c.id === classId);
+    const derived = deriveCalendarPatternFromClass(cls);
+    const days = new Set(derived.map((p) => p.weekday));
+    document.querySelectorAll("#calEditPanel .cal-weekday").forEach((el) => { el.checked = days.has(+el.value); });
+    const p0 = derived[0] || {};
+    const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+    setVal("calPatStart", (p0.start_time || "").slice(0, 5));
+    setVal("calPatEnd", (p0.end_time || "").slice(0, 5));
+    setVal("calPatLoc", p0.location_name || "");
+    showToast(derived.length ? "Filled from class schedule — review and Save" : "No day/time found on this class to import", derived.length ? "success" : "error");
   }
 
   async function addScheduleException(classId, semId) {

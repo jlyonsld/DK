@@ -5263,3 +5263,9 @@ footer code {
   .cal-editor { position: static; }
   .cal-tb-right { margin-left: 0; width: 100%; }
 }
+
+.cal-prefill-banner {
+  background: var(--accent-soft); border: 1px solid var(--accent-border);
+  color: var(--accent-ink); border-radius: 8px; padding: 8px 10px;
+  font-size: 12px; line-height: 1.4; margin-bottom: 10px;
+}
