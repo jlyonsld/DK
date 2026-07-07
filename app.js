@@ -1280,6 +1280,28 @@
     return list.slice().sort((a, b) => (a.name || "").localeCompare(b.name || ""));
   }
 
+  // Persist the selected calendar + class on this device so a reload returns
+  // to the same view (restored once per session; user changes overwrite it).
+  let _calStateRestored = false;
+  function restoreCalStateOnce() {
+    if (_calStateRestored) return;
+    _calStateRestored = true;
+    try {
+      const saved = JSON.parse(localStorage.getItem("dk_calState") || "null");
+      if (saved && typeof saved === "object") {
+        if (!state.calState.semesterId && saved.semesterId) state.calState.semesterId = saved.semesterId;
+        if (!state.calState.classId && saved.classId) state.calState.classId = saved.classId;
+      }
+    } catch (_) { /* localStorage unavailable — ignore */ }
+  }
+  function saveCalState() {
+    try {
+      localStorage.setItem("dk_calState", JSON.stringify({
+        semesterId: state.calState.semesterId, classId: state.calState.classId,
+      }));
+    } catch (_) { /* ignore */ }
+  }
+
   function renderCalendarsTab() {
     const root = document.getElementById("calendarsRoot");
     if (!root) return;
@@ -1289,12 +1311,24 @@
     const semesters = state.semesters.slice();
     const classes = calSelectableClasses();
 
+    // Restore the last-viewed calendar + class from this browser (once) so a
+    // reload returns to where you were instead of resetting to the top.
+    restoreCalStateOnce();
+
     // Resolve current selections, defaulting sensibly.
     if (!state.calState.semesterId || !semesters.find((s) => s.id === state.calState.semesterId)) {
       state.calState.semesterId = semesters[0] ? semesters[0].id : null;
     }
     if (!state.calState.classId || !classes.find((c) => c.id === state.calState.classId)) {
-      state.calState.classId = classes[0] ? classes[0].id : null;
+      // Prefer the class with the most calendar work for the selected calendar
+      // so a reload lands on the edited calendar — not an empty one. Classes
+      // with schedule exceptions (no-class days) win over ones with only a
+      // saved meeting pattern, which win over an untouched class.
+      const semSel = state.calState.semesterId;
+      const hasExc = (cid) => state.scheduleExceptions.some((x) => x.semester_id === semSel && x.class_id === cid);
+      const hasPat = (cid) => state.classMeetingPatterns.some((p) => p.class_id === cid && p.semester_id === semSel);
+      const best = classes.find((c) => hasExc(c.id)) || classes.find((c) => hasPat(c.id)) || classes[0];
+      state.calState.classId = (best || {}).id || null;
     }
     const semId = state.calState.semesterId;
     const classId = state.calState.classId;
@@ -1355,9 +1389,9 @@
 
     // Wire toolbar
     const semSel = document.getElementById("calSemesterSel");
-    if (semSel) semSel.onchange = async (e) => { await flushCalAutoSave(); state.calState.semesterId = e.target.value; renderCalendarsTab(); };
+    if (semSel) semSel.onchange = async (e) => { await flushCalAutoSave(); state.calState.semesterId = e.target.value; saveCalState(); renderCalendarsTab(); };
     const classSel = document.getElementById("calClassSel");
-    if (classSel) classSel.onchange = async (e) => { await flushCalAutoSave(); state.calState.classId = e.target.value; renderCalendarsTab(); };
+    if (classSel) classSel.onchange = async (e) => { await flushCalAutoSave(); state.calState.classId = e.target.value; saveCalState(); renderCalendarsTab(); };
     const editSem = document.getElementById("calEditSemester");
     if (editSem) editSem.onclick = () => openSemesterModal(semId);
     const newSem = document.getElementById("calNewSemester");
