@@ -10703,6 +10703,7 @@
           <input class="search" id="task_search" type="search" placeholder="Search title, owner, project…" value="${escapeHtml(state.taskState.query || "")}" style="width:220px" />
           <select id="task_project_filter" class="select-inline" title="Filter by project">${projectOptions}</select>
           <select id="task_owner_filter" class="select-inline" title="Filter by who it's assigned to">${ownerOptions}</select>
+          ${canManage ? `<label class="task-autopar" title="Automatically push tasks assigned to you to PAR"><input type="checkbox" id="task_auto_par" ${autoParEnabled() ? "checked" : ""} /> Auto-send my tasks to PAR</label>` : ""}
           ${canManage ? `<button class="btn small" id="task_import_btn">📥 Import engagement doc</button>` : ""}
           ${canManage ? `<button class="btn small primary" id="task_new_btn">＋ New task</button>` : ""}
         </div>
@@ -10724,6 +10725,14 @@
     if (newBtn) newBtn.onclick = () => openTaskEditor(null);
     const importBtn = panel.querySelector("#task_import_btn");
     if (importBtn) importBtn.onclick = () => openTaskImporter();
+    const autoParCb = panel.querySelector("#task_auto_par");
+    if (autoParCb) autoParCb.onchange = (e) => {
+      setAutoParEnabled(e.target.checked);
+      if (e.target.checked) {
+        showToast("Auto-sending your tasks to PAR…", "info");
+        autoSendMyTasksToPar(true);
+      }
+    };
 
     panel.querySelectorAll("[data-task-action]").forEach((b) => {
       const id = b.dataset.taskId;
@@ -10748,6 +10757,10 @@
         saveDecisionOutcome(id, inp.value);
       };
     });
+
+    // If auto-send is on, push any of my not-yet-federated tasks (fire-and-
+    // forget; guarded + idempotent so it never loops or double-sends).
+    autoSendMyTasksToPar();
   }
 
   function taskCardHtml(t, canManage) {
@@ -11026,6 +11039,56 @@
     showToast("Sent to PAR", "success");
     await reloadAll();
     renderAll();
+  }
+
+  /* ── Auto-send my tasks to PAR ──────────────────────────────
+   * Personal, per-device preference. When on, any task owned by the signed-in
+   * user that isn't on PAR yet is pushed automatically. Runs from this console
+   * (the PAR federation Edge Function requires the user's own JWT, so it can't
+   * run server-side while you're offline). Idempotent + guarded so it can't
+   * loop or double-send. */
+  let _autoParInFlight = false;
+  let _autoParLastRun = 0;
+  function autoParEnabled() {
+    try { return localStorage.getItem("dk_autoParMine") === "1"; } catch (_) { return false; }
+  }
+  function setAutoParEnabled(on) {
+    try { localStorage.setItem("dk_autoParMine", on ? "1" : "0"); } catch (_) {}
+  }
+  async function autoSendMyTasksToPar(force) {
+    if (_autoParInFlight) return;
+    if (!autoParEnabled() || !hasPerm("manage_tasks")) return;
+    // Throttle: renderTasksTab runs often; don't re-sweep more than ~every 15s
+    // (a toggle-on passes force=true for an immediate first run).
+    if (!force && Date.now() - _autoParLastRun < 15000) return;
+    _autoParLastRun = Date.now();
+    const myId = state.profile && state.profile.id;
+    if (!myId) return;
+    const pending = (state.tasks || []).filter((t) =>
+      t.owner_profile_id === myId && !t.par_task_id &&
+      t.status !== "done" && t.status !== "archived");
+    if (!pending.length) return;
+    _autoParInFlight = true;
+    let sent = 0;
+    try {
+      for (const t of pending) {
+        const body = {
+          task_id: t.id, title: t.title, description: t.description,
+          assignee_label: t.assignee_label || profileNameById(t.owner_profile_id),
+          due_at: t.due_at, priority: t.priority, project_name: t.project_name,
+        };
+        const resp = await sb.functions.invoke("dk-create-par-task", { body });
+        if (resp.error) break;   // stop on first error (e.g. par_not_wired) — no spam
+        sent++;
+      }
+    } finally {
+      _autoParInFlight = false;
+    }
+    if (sent) {
+      await reloadAll();
+      renderAll();
+      showToast(`Auto-sent ${sent} task${sent === 1 ? "" : "s"} to PAR`, "success");
+    }
   }
 
   /* ── YAML importer ── */
