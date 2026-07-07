@@ -1377,7 +1377,8 @@
           <select id="calSemesterSel" class="cal-select">${semOpts}</select>
           ${canEdit ? `
             <button class="btn ghost small" id="calEditSemester" title="Edit this calendar">✎</button>
-            <button class="btn ghost small" id="calNewSemester" title="New calendar">＋</button>` : ""}
+            <button class="btn ghost small" id="calNewSemester" title="New calendar">＋</button>
+            <button class="btn ghost small" id="calDuplicate" title="Duplicate this calendar (same holidays & schedules) under a new name">⧉ Duplicate</button>` : ""}
         </div>
         <div class="cal-tb-group">
           <label class="cal-tb-label">Class</label>
@@ -1405,13 +1406,29 @@
 
     // Wire toolbar
     const semSel = document.getElementById("calSemesterSel");
-    if (semSel) semSel.onchange = async (e) => { await flushCalAutoSave(); state.calState.semesterId = e.target.value; saveCalState(); renderCalendarsTab(); };
+    if (semSel) semSel.onchange = async (e) => {
+      await flushCalAutoSave();
+      const newSem = e.target.value;
+      state.calState.semesterId = newSem;
+      // Follow the calendar with the class: if the current class has no
+      // schedule or holidays in the newly-selected calendar, re-pick the best
+      // class for it (null → the default logic in renderCalendarsTab chooses).
+      const cid = state.calState.classId;
+      const classHasData = cid && (
+        state.classMeetingPatterns.some((p) => p.class_id === cid && p.semester_id === newSem) ||
+        state.scheduleExceptions.some((x) => x.semester_id === newSem && x.class_id === cid));
+      if (!classHasData) state.calState.classId = null;
+      saveCalState();
+      renderCalendarsTab();
+    };
     const classSel = document.getElementById("calClassSel");
     if (classSel) classSel.onchange = async (e) => { await flushCalAutoSave(); state.calState.classId = e.target.value; saveCalState(); renderCalendarsTab(); };
     const editSem = document.getElementById("calEditSemester");
     if (editSem) editSem.onclick = () => openSemesterModal(semId);
     const newSem = document.getElementById("calNewSemester");
     if (newSem) newSem.onclick = () => openSemesterModal(null);
+    const dupSem = document.getElementById("calDuplicate");
+    if (dupSem) dupSem.onclick = () => duplicateSemester(semId);
     const togglePub = document.getElementById("calTogglePublish");
     if (togglePub) togglePub.onclick = () => toggleSemesterPublish(semId);
     const copyLink = document.getElementById("calCopyLink");
@@ -1699,6 +1716,57 @@
     document.getElementById("semesterModalOverlay").classList.add("open");
   }
   function closeSemesterModal() { document.getElementById("semesterModalOverlay").classList.remove("open"); }
+
+  // Clone a calendar: a new (unpublished) semester with the same term/dates,
+  // plus copies of its holidays (schedule_exceptions) and per-class schedules
+  // (class_meeting_patterns). Parent pointers are class-scoped (not tied to a
+  // semester), so they already apply to the copy — nothing to duplicate there.
+  async function duplicateSemester(srcId) {
+    if (!hasPerm("edit_classes")) { showToast("You can't edit calendars", "error"); return; }
+    const src = srcId && state.semesters.find((s) => s.id === srcId);
+    if (!src) { showToast("Pick a calendar to duplicate first", "error"); return; }
+    const suggested = "Copy of " + (src.name || "Calendar");
+    const name = window.prompt("Name for the duplicated calendar:", suggested);
+    if (name === null) return; // cancelled
+    const trimmed = name.trim() || suggested;
+    showLoader(true);
+    try {
+      const ins = await sb.from("semesters").insert({
+        name: trimmed, term: src.term, start_date: src.start_date, end_date: src.end_date,
+        is_published: false, notes: src.notes || null, created_by: myUserId(),
+      }).select("id").single();
+      if (ins.error) throw ins.error;
+      const newId = ins.data.id;
+
+      const excs = state.scheduleExceptions
+        .filter((x) => x.semester_id === srcId)
+        .map((x) => ({ semester_id: newId, class_id: x.class_id, date: x.date, kind: x.kind, label: x.label }));
+      if (excs.length) {
+        const r = await sb.from("schedule_exceptions").insert(excs);
+        if (r.error) throw r.error;
+      }
+
+      const pats = state.classMeetingPatterns
+        .filter((p) => p.semester_id === srcId)
+        .map((p) => ({ class_id: p.class_id, semester_id: newId, weekday: p.weekday,
+          start_time: p.start_time, end_time: p.end_time, location_name: p.location_name,
+          room: p.room, teacher_name: p.teacher_name }));
+      if (pats.length) {
+        const r = await sb.from("class_meeting_patterns").insert(pats);
+        if (r.error) throw r.error;
+      }
+
+      state.calState.semesterId = newId;
+      saveCalState();
+      await reloadAll();
+      renderAll();
+      showToast(`Duplicated — ${excs.length} holiday${excs.length === 1 ? "" : "s"} and ${pats.length} schedule${pats.length === 1 ? "" : "s"} copied. Rename or edit as needed.`, "success");
+    } catch (e) {
+      showToast("Duplicate failed: " + (e.message || e), "error");
+    } finally {
+      showLoader(false);
+    }
+  }
 
   async function saveSemester() {
     const name = (document.getElementById("sem_name").value || "").trim();
