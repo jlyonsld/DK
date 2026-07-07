@@ -235,7 +235,7 @@
     const ageBit = cls.age_range ? `<span class="dkc-age">Ages ${esc(cls.age_range)}</span>` : "";
     const monthsHTML = months.length
       ? months.map((m) => monthGridHTML(m.year, m.month, sets, brand)).join("")
-      : `<div class="dkc-empty-note">This semester has no meeting pattern yet — add one in the Schedule Manager.</div>`;
+      : `<div class="dkc-empty-note">This calendar has no meeting pattern yet — add one in the Schedule Manager.</div>`;
 
     return `
       <div class="dkc-paper" style="--dkc-primary:${esc(brand.primary_color)};--dkc-accent:${esc(brand.accent_color)}">
@@ -247,7 +247,6 @@
             ${addr ? `<div class="dkc-addr">${esc(addr)}</div>` : ""}
           </div>
         </div>
-        <div class="dkc-season">${esc(seasonTitle(model))}</div>
         <div class="dkc-legend"><span class="dkc-legend-dot"></span> Class Meets
           ${sets.makeup.size ? `<span class="dkc-legend-dot dkc-legend-makeup"></span> Makeup Class` : ""}
         </div>
@@ -357,11 +356,9 @@
     if (addr) doc.text(addr, tx, cursorY + 47);
     cursorY += 64;
 
-    // Season title
-    doc.setTextColor(accent[0], accent[1], accent[2]);
-    doc.setFont("helvetica", "bold"); doc.setFontSize(20);
-    doc.text(seasonTitle(model).toUpperCase(), PW / 2, cursorY + 6, { align: "center" });
-    cursorY += 22;
+    // (Season / calendar-name title intentionally omitted — the class name is
+    // the header; keeps the printed calendar clean.)
+    cursorY += 6;
 
     // Legend
     doc.setDrawColor(accent[0], accent[1], accent[2]); doc.setLineWidth(1.4);

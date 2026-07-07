@@ -1159,7 +1159,7 @@
 
   const SEMESTER_TERMS = [
     { value: "fall",          label: "Fall" },
-    { value: "winter_spring", label: "Winter / Spring" },
+    { value: "winter_spring", label: "Spring" },
     { value: "summer",        label: "Summer" },
     { value: "custom",        label: "Custom" },
   ];
@@ -1303,9 +1303,9 @@
     if (!semesters.length) {
       root.innerHTML = `
         <div class="cal-empty">
-          <h3>No semesters yet</h3>
-          <p>A semester defines a term's start &amp; end (e.g. “2025 Fall”). Create one to start building class calendars.</p>
-          ${canEdit ? `<button class="btn primary" id="calNewSemesterEmpty" type="button">＋ New semester</button>` : `<p class="muted">Ask an admin to set up a semester.</p>`}
+          <h3>No calendars yet</h3>
+          <p>A calendar defines a term's start &amp; end (e.g. “2025 Fall”). Create one to start building class calendars.</p>
+          ${canEdit ? `<button class="btn primary" id="calNewSemesterEmpty" type="button">＋ New calendar</button>` : `<p class="muted">Ask an admin to set up a calendar.</p>`}
         </div>`;
       const b = document.getElementById("calNewSemesterEmpty");
       if (b) b.onclick = () => openSemesterModal(null);
@@ -1324,11 +1324,11 @@
     root.innerHTML = `
       <div class="cal-toolbar">
         <div class="cal-tb-group">
-          <label class="cal-tb-label">Semester</label>
+          <label class="cal-tb-label">Calendar</label>
           <select id="calSemesterSel" class="cal-select">${semOpts}</select>
           ${canEdit ? `
-            <button class="btn ghost small" id="calEditSemester" title="Edit this semester">✎</button>
-            <button class="btn ghost small" id="calNewSemester" title="New semester">＋</button>` : ""}
+            <button class="btn ghost small" id="calEditSemester" title="Edit this calendar">✎</button>
+            <button class="btn ghost small" id="calNewSemester" title="New calendar">＋</button>` : ""}
         </div>
         <div class="cal-tb-group">
           <label class="cal-tb-label">Class</label>
@@ -1441,7 +1441,7 @@
           <input type="date" id="calExcDate" />
           <select id="calExcKind"><option value="no_class">No class</option><option value="makeup">Makeup</option></select>
           <input type="text" id="calExcLabel" placeholder="Label (optional)" />
-          <select id="calExcScope" title="Apply to just this class or every class this semester">
+          <select id="calExcScope" title="Apply to just this class or every class this calendar">
             <option value="class">This class</option>
             <option value="all">All classes</option>
           </select>
@@ -1534,7 +1534,7 @@
     if (!classId || !semId) { showToast("Select a class first", "error"); return; }
     const sem = state.semesters.find((s) => s.id === semId);
     const url = `${location.origin}/class-calendar.html?class=${encodeURIComponent(classId)}&semester=${encodeURIComponent(semId)}`;
-    const after = () => showToast(sem && sem.is_published ? "Parent link copied" : "Link copied — publish the semester so parents can open it", "success");
+    const after = () => showToast(sem && sem.is_published ? "Parent link copied" : "Link copied — publish the calendar so parents can open it", "success");
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(url).then(after, () => { window.prompt("Copy the parent link:", url); });
     } else {
@@ -1544,10 +1544,10 @@
 
   /* ─── Semester editor modal ─── */
   function openSemesterModal(semId) {
-    if (!hasPerm("edit_classes")) { showToast("You can't edit semesters", "error"); return; }
+    if (!hasPerm("edit_classes")) { showToast("You can't edit calendars", "error"); return; }
     const sem = semId ? state.semesters.find((s) => s.id === semId) : null;
     state._editingSemesterId = sem ? sem.id : null;
-    document.getElementById("semesterModalTitle").textContent = sem ? "Edit semester" : "New semester";
+    document.getElementById("semesterModalTitle").textContent = sem ? "Edit calendar" : "New calendar";
     document.getElementById("sem_name").value = sem ? sem.name : "";
     document.getElementById("sem_term").value = sem ? sem.term : "fall";
     document.getElementById("sem_start").value = sem ? (sem.start_date || "").slice(0, 10) : "";
@@ -1590,19 +1590,19 @@
     if (newId) state.calState.semesterId = newId;
     closeSemesterModal();
     await reloadAll(); renderAll();
-    showToast("Semester saved", "success");
+    showToast("Calendar saved", "success");
   }
 
   async function deleteSemester() {
     const id = state._editingSemesterId;
     if (!id) return;
-    if (!window.confirm("Delete this semester? Its meeting patterns and exceptions will be removed. Parent pointers are kept.")) return;
+    if (!window.confirm("Delete this calendar? Its meeting patterns and exceptions will be removed. Parent pointers are kept.")) return;
     const resp = await sb.from("semesters").delete().eq("id", id);
     if (resp.error) { showToast(resp.error.message, "error"); return; }
     state.calState.semesterId = null;
     closeSemesterModal();
     await reloadAll(); renderAll();
-    showToast("Semester deleted", "success");
+    showToast("Calendar deleted", "success");
   }
 
   /* ─── Parent pointers editor modal ───
@@ -5873,7 +5873,7 @@
         const calBtn = document.createElement("button");
         calBtn.className = "btn small ghost";
         calBtn.textContent = "📅 Calendar";
-        calBtn.title = `Open the semester calendar for ${cls.name}`;
+        calBtn.title = `Open the calendar for ${cls.name}`;
         calBtn.onclick = (e) => {
           e.stopPropagation();
           state.calState.classId = cls.id;
