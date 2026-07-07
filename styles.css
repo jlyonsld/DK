@@ -3800,6 +3800,10 @@ footer code {
   .cap-row .cap-input, .cap-row .cap-unit { grid-column: 1 / -1; justify-self: start; }
 }
 
+/* Calendar editor auto-save status */
+.cal-save-status { font-size: 12px; font-weight: 600; white-space: nowrap; }
+.cal-autosave-note { font-size: 11px; color: var(--ink-mute, #9b978c); margin-top: 4px; }
+
 /* ── T22: Work-assignment matrix ─────────────────── */
 .wa-list { display: flex; flex-direction: column; gap: 8px; }
 .wa-row {

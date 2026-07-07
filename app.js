@@ -1355,9 +1355,9 @@
 
     // Wire toolbar
     const semSel = document.getElementById("calSemesterSel");
-    if (semSel) semSel.onchange = (e) => { state.calState.semesterId = e.target.value; renderCalendarsTab(); };
+    if (semSel) semSel.onchange = async (e) => { await flushCalAutoSave(); state.calState.semesterId = e.target.value; renderCalendarsTab(); };
     const classSel = document.getElementById("calClassSel");
-    if (classSel) classSel.onchange = (e) => { state.calState.classId = e.target.value; renderCalendarsTab(); };
+    if (classSel) classSel.onchange = async (e) => { await flushCalAutoSave(); state.calState.classId = e.target.value; renderCalendarsTab(); };
     const editSem = document.getElementById("calEditSemester");
     if (editSem) editSem.onclick = () => openSemesterModal(semId);
     const newSem = document.getElementById("calNewSemester");
@@ -1431,7 +1431,9 @@
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <button class="btn primary small" id="calSavePattern">Save schedule</button>
           <button class="btn ghost small" id="calPrefill" title="Fill the days &amp; time from this class's existing schedule">↻ Prefill from class</button>
+          <span id="calSaveStatus" class="cal-save-status" aria-live="polite"></span>
         </div>
+        <div class="cal-autosave-note">Changes save automatically.</div>
       </div>
 
       <div class="cal-ed-section">
@@ -1463,6 +1465,83 @@
     panel.querySelectorAll(".cal-exc-del").forEach((b) => {
       b.onclick = () => deleteScheduleException(b.dataset.exc);
     });
+
+    // Auto-save: any edit to the meeting-pattern inputs persists automatically
+    // (debounced), so a schedule is never lost by forgetting to click Save.
+    panel.querySelectorAll(".cal-weekday, #calPatStart, #calPatEnd, #calPatLoc, #calPatRoom, #calPatTeacher")
+      .forEach((el) => {
+        const h = () => scheduleCalAutoSave(classId, semId);
+        el.addEventListener("input", h);
+        el.addEventListener("change", h);
+      });
+    calEditorDirty = false;
+    setCalSaveStatus("idle");
+  }
+
+  /* ── Calendar editor auto-save + dirty tracking ──────────────
+   * The meeting pattern saves automatically (debounced) as you edit it, and a
+   * beforeunload guard (wired in wireEvents) warns if you'd leave mid-edit
+   * before the debounce flushes. Only the preview re-renders on auto-save, so
+   * the editor keeps focus. */
+  let calEditorDirty = false;
+  let calAutoSaveTimer = null;
+  let calAutoSaveCtx = null;
+
+  function setCalSaveStatus(kind) {
+    const el = document.getElementById("calSaveStatus");
+    if (!el) return;
+    const map = {
+      saving: { t: "Saving…", c: "var(--ink-dim)" },
+      saved:  { t: "✓ Saved", c: "var(--emerald-500, #10b981)" },
+      error:  { t: "⚠ Save failed — retrying on next edit", c: "#dc2626" },
+      idle:   { t: "", c: "" },
+    };
+    const m = map[kind] || map.idle;
+    el.textContent = m.t;
+    el.style.color = m.c;
+  }
+
+  function scheduleCalAutoSave(classId, semId) {
+    calEditorDirty = true;
+    calAutoSaveCtx = { classId, semId };
+    setCalSaveStatus("saving");
+    clearTimeout(calAutoSaveTimer);
+    calAutoSaveTimer = setTimeout(() => autoSaveMeetingPattern(classId, semId), 700);
+  }
+
+  // Flush a pending auto-save immediately (before switching class/semester or
+  // leaving) so nothing is dropped inside the debounce window.
+  async function flushCalAutoSave() {
+    if (calAutoSaveTimer) { clearTimeout(calAutoSaveTimer); calAutoSaveTimer = null; }
+    if (calEditorDirty && calAutoSaveCtx) {
+      await autoSaveMeetingPattern(calAutoSaveCtx.classId, calAutoSaveCtx.semId, { quiet: true });
+    }
+  }
+
+  async function autoSaveMeetingPattern(classId, semId, opts) {
+    const panel = document.getElementById("calEditPanel");
+    if (!panel) return;
+    const days = Array.from(panel.querySelectorAll(".cal-weekday:checked")).map((el) => +el.value);
+    const val = (id) => { const el = document.getElementById(id); return el ? ((el.value || "").trim() || null) : null; };
+    const start = val("calPatStart"), end = val("calPatEnd");
+    const loc = val("calPatLoc"), room = val("calPatRoom"), teacher = val("calPatTeacher");
+    const del = await sb.from("class_meeting_patterns").delete().eq("class_id", classId).eq("semester_id", semId);
+    if (del.error) { setCalSaveStatus("error"); return; }
+    let newRows = [];
+    if (days.length) {
+      const rows = days.map((w) => ({ class_id: classId, semester_id: semId, weekday: w, start_time: start, end_time: end, location_name: loc, room, teacher_name: teacher }));
+      const ins = await sb.from("class_meeting_patterns").insert(rows).select();
+      if (ins.error) { setCalSaveStatus("error"); return; }
+      newRows = ins.data || rows;
+    }
+    // Update local state + refresh only the preview so the editor keeps focus.
+    state.classMeetingPatterns = state.classMeetingPatterns
+      .filter((p) => !(p.class_id === classId && p.semester_id === semId))
+      .concat(newRows);
+    const prev = document.getElementById("calPreview");
+    if (prev && window.DKCalendar) prev.innerHTML = window.DKCalendar.renderPreviewHTML(buildCalendarModel(classId, semId));
+    calEditorDirty = false;
+    if (!opts || !opts.quiet) setCalSaveStatus("saved");
   }
 
   async function saveMeetingPattern(classId, semId) {
@@ -1481,6 +1560,8 @@
       resp = await sb.from("class_meeting_patterns").insert(rows);
       if (resp.error) { showToast(resp.error.message, "error"); if (btn) btn.disabled = false; return; }
     }
+    calEditorDirty = false;
+    if (calAutoSaveTimer) { clearTimeout(calAutoSaveTimer); calAutoSaveTimer = null; }
     await reloadAll(); renderAll();
     showToast("Schedule saved", "success");
   }
@@ -14826,6 +14907,12 @@ Drama Kids`;
       schedResizeTimer = setTimeout(() => {
         if (state.sState && state.sState.mode === "month") renderScheduleTab();
       }, 200);
+    });
+
+    // Unsaved-changes guard: warn before leaving if a calendar schedule edit
+    // hasn't flushed yet (auto-save normally clears this within ~1s).
+    window.addEventListener("beforeunload", (e) => {
+      if (calEditorDirty) { e.preventDefault(); e.returnValue = ""; }
     });
 
     // Teacher modal
