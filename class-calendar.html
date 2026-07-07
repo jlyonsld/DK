@@ -52,6 +52,7 @@
       <div class="controls" id="controls" style="display:none">
         <label class="visually-hidden" for="semesterSelect">Calendar</label>
         <select id="semesterSelect" aria-label="Choose a calendar"></select>
+        <button id="langBtn" type="button" aria-label="Cambiar a español">Español</button>
         <button class="primary" id="downloadBtn" type="button">⬇ Download PDF</button>
       </div>
     </div>
@@ -76,10 +77,32 @@
       const controls = document.getElementById("controls");
       const semSelect = document.getElementById("semesterSelect");
       const dlBtn = document.getElementById("downloadBtn");
+      const langBtn = document.getElementById("langBtn");
 
       let currentModel = null;
+      let lang = "en";
+      try { lang = localStorage.getItem("dkc_lang") === "es" ? "es" : "en"; } catch (_) {}
+
+      // Family-facing UI strings for the two languages.
+      const UI = {
+        en: { pdf: "⬇ Download PDF", toggle: "Español", building: "Building…" },
+        es: { pdf: "⬇ Descargar PDF", toggle: "English", building: "Generando…" },
+      };
+      function applyLangLabels() {
+        dlBtn.textContent = UI[lang].pdf;
+        langBtn.textContent = UI[lang].toggle;
+        langBtn.setAttribute("aria-label", lang === "en" ? "Cambiar a español" : "Switch to English");
+        document.documentElement.lang = lang;
+      }
 
       function showState(html) { content.innerHTML = `<div class="state">${html}</div>`; controls.style.display = "none"; }
+
+      // Localize the raw model into the active language, then paint the calendar.
+      async function paintCurrent() {
+        if (!currentModel) return;
+        const localized = await window.DKCalendar.localizeModel(currentModel, lang);
+        content.innerHTML = window.DKCalendar.renderPreviewHTML(localized);
+      }
 
       async function fetchCalendar(semesterId) {
         const { data, error } = await sb.rpc("get_class_calendar", {
@@ -92,7 +115,6 @@
 
       function renderModel(model) {
         currentModel = model;
-        content.innerHTML = window.DKCalendar.renderPreviewHTML(model);
         // Populate the semester selector from available_semesters.
         const avail = model.available_semesters || [];
         if (avail.length > 1) {
@@ -103,6 +125,8 @@
           semSelect.style.display = "none";
         }
         controls.style.display = "flex";
+        applyLangLabels();
+        paintCurrent();
       }
 
       function escapeAttr(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[c])); }
@@ -142,10 +166,17 @@
       }
 
       semSelect.addEventListener("change", () => load(semSelect.value));
+      langBtn.addEventListener("click", async () => {
+        lang = lang === "es" ? "en" : "es";
+        try { localStorage.setItem("dkc_lang", lang); } catch (_) {}
+        applyLangLabels();
+        langBtn.disabled = true;
+        try { await paintCurrent(); } finally { langBtn.disabled = false; }
+      });
       dlBtn.addEventListener("click", async () => {
         if (!currentModel) return;
-        dlBtn.disabled = true; const orig = dlBtn.textContent; dlBtn.textContent = "Building…";
-        try { await window.DKCalendar.generatePDF(currentModel); }
+        dlBtn.disabled = true; const orig = dlBtn.textContent; dlBtn.textContent = UI[lang].building;
+        try { await window.DKCalendar.generatePDF(currentModel, { lang }); }
         catch (e) { alert("Couldn't generate the PDF: " + (e.message || e)); }
         finally { dlBtn.disabled = false; dlBtn.textContent = orig; }
       });

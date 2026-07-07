@@ -55,6 +55,92 @@
     fall: "Fall", winter_spring: "Winter/Spring", summer: "Summer", custom: ""
   };
 
+  /* ─── i18n: fixed labels + Spanish calendar terms ─── */
+  const I18N = {
+    en: {
+      monthLong: MONTH_LONG,
+      weekdayInit: WEEKDAY_INIT,
+      weekdayPlural: WEEKDAY_PLURAL,
+      classMeets: "Class Meets",
+      makeupClass: "Makeup Class",
+      parentPointers: "Parent Pointers",
+      ages: "Ages",
+      noPattern: "This calendar has no meeting pattern yet — add one in the Schedule Manager.",
+    },
+    es: {
+      monthLong: ["enero","febrero","marzo","abril","mayo","junio",
+                  "julio","agosto","septiembre","octubre","noviembre","diciembre"],
+      // Spanish calendar column initials (X = miércoles to avoid the M clash).
+      weekdayInit: ["D","L","M","X","J","V","S"],
+      weekdayPlural: ["domingos","lunes","martes","miércoles","jueves","viernes","sábados"],
+      classMeets: "Días de clase",
+      makeupClass: "Clase de recuperación",
+      parentPointers: "Notas para padres",
+      ages: "Edades",
+      noPattern: "Este calendario aún no tiene un horario — agrégalo en el administrador de horarios.",
+    },
+  };
+  function t(model) { return I18N[(model && model.lang) || "en"] || I18N.en; }
+  function capFirst(s) { s = String(s || ""); return s ? s.charAt(0).toUpperCase() + s.slice(1) : s; }
+
+  /* ─── machine translation (used only for Sharon-typed pointer text) ─────
+   * Free MyMemory endpoint (no key). Results are cached in localStorage so a
+   * given string is fetched at most once per device; long text is chunked to
+   * stay under the per-request limit; any failure falls back to the English
+   * original so the calendar always renders. */
+  const _trMem = {};
+  function _chunk(text, max) {
+    const parts = [];
+    let s = String(text);
+    while (s.length > max) {
+      let cut = s.lastIndexOf(". ", max);
+      if (cut < max * 0.5) cut = s.lastIndexOf(" ", max);
+      if (cut < max * 0.5) cut = max;
+      parts.push(s.slice(0, cut + 1));
+      s = s.slice(cut + 1);
+    }
+    if (s) parts.push(s);
+    return parts;
+  }
+  async function translateText(text, lang) {
+    if (!text || !String(text).trim() || !lang || lang === "en") return text;
+    const key = lang + "::" + text;
+    if (_trMem[key] != null) return _trMem[key];
+    try { const ls = localStorage.getItem("dkc_tr:" + key); if (ls != null) { _trMem[key] = ls; return ls; } } catch (_) {}
+    try {
+      const chunks = _chunk(text, 450);
+      const outs = [];
+      for (const c of chunks) {
+        const url = "https://api.mymemory.translated.net/get?q=" + encodeURIComponent(c) + "&langpair=en|" + encodeURIComponent(lang);
+        const r = await fetch(url);
+        const j = await r.json();
+        const tr = j && j.responseData && j.responseData.translatedText;
+        outs.push(tr && !/MYMEMORY WARNING|QUERY LENGTH/i.test(tr) ? tr : c);
+      }
+      const out = outs.join("");
+      _trMem[key] = out;
+      try { localStorage.setItem("dkc_tr:" + key, out); } catch (_) {}
+      return out;
+    } catch (e) { return text; }
+  }
+
+  // Async: return a copy of the model with pointer text machine-translated into
+  // `lang` and the lang flag set (fixed labels are handled at render time from
+  // the dictionary above). Class name / proper nouns are left untouched.
+  async function localizeModel(model, lang) {
+    if (!model) return model;
+    if (!lang || lang === "en") return Object.assign({}, model, { lang: "en" });
+    const pts = model.pointers || [];
+    const outPts = [];
+    for (const p of pts) {
+      outPts.push({
+        section_title: await translateText(p.section_title, lang),
+        body: await translateText(p.body, lang),
+      });
+    }
+    return Object.assign({}, model, { pointers: outPts, lang });
+  }
+
   /* ─── date helpers (all timezone-safe: build local dates from ISO) ─── */
   function parseISO(iso) {
     if (!iso) return null;
@@ -113,7 +199,7 @@
     let timePart = "";
     let locPart = locationName(model);
     if (patterns.length) {
-      dayPart = patterns.map((p) => WEEKDAY_PLURAL[p.weekday]).join(" & ");
+      dayPart = patterns.map((p) => t(model).weekdayPlural[p.weekday]).join(" & ");
       const p0 = patterns[0];
       if (p0.start_time) {
         timePart = fmtTime(p0.start_time) + (p0.end_time ? ` - ${fmtTime(p0.end_time)}` : "");
@@ -185,7 +271,8 @@
   }
 
   /* ════════════════════ HTML preview ════════════════════ */
-  function monthGridHTML(year, month, sets, brand) {
+  function monthGridHTML(year, month, sets, brand, tt) {
+    tt = tt || I18N.en;
     const first = new Date(year, month, 1);
     const startPad = first.getDay();
     const daysIn = new Date(year, month + 1, 0).getDate();
@@ -201,9 +288,9 @@
     }
     return `
       <div class="dkc-month">
-        <div class="dkc-month-title">${esc(MONTH_LONG[month])} ${year}</div>
+        <div class="dkc-month-title">${esc(capFirst(tt.monthLong[month]))} ${year}</div>
         <table class="dkc-grid"><thead><tr>
-          ${WEEKDAY_INIT.map((w) => `<th>${w}</th>`).join("")}
+          ${tt.weekdayInit.map((w) => `<th>${w}</th>`).join("")}
         </tr></thead><tbody><tr>${cells}</tr></tbody></table>
       </div>`;
   }
@@ -213,7 +300,7 @@
     if (!pts.length) return "";
     return `
       <div class="dkc-pointers">
-        <div class="dkc-pointers-title">Parent Pointers</div>
+        <div class="dkc-pointers-title">${esc(t(model).parentPointers)}</div>
         <div class="dkc-pointers-grid">
           ${pts.map((p) => `
             <div class="dkc-pointer">
@@ -232,10 +319,11 @@
     const cls = model.class || {};
     const sched = scheduleLine(model);
     const addr = fullAddress(model);
-    const ageBit = cls.age_range ? `<span class="dkc-age">Ages ${esc(cls.age_range)}</span>` : "";
+    const tt = t(model);
+    const ageBit = cls.age_range ? `<span class="dkc-age">${esc(tt.ages)} ${esc(cls.age_range)}</span>` : "";
     const monthsHTML = months.length
-      ? months.map((m) => monthGridHTML(m.year, m.month, sets, brand)).join("")
-      : `<div class="dkc-empty-note">This calendar has no meeting pattern yet — add one in the Schedule Manager.</div>`;
+      ? months.map((m) => monthGridHTML(m.year, m.month, sets, brand, tt)).join("")
+      : `<div class="dkc-empty-note">${esc(tt.noPattern)}</div>`;
 
     return `
       <div class="dkc-paper" style="--dkc-primary:${esc(brand.primary_color)};--dkc-accent:${esc(brand.accent_color)}">
@@ -247,8 +335,8 @@
             ${addr ? `<div class="dkc-addr">${esc(addr)}</div>` : ""}
           </div>
         </div>
-        <div class="dkc-legend"><span class="dkc-legend-dot"></span> Class Meets
-          ${sets.makeup.size ? `<span class="dkc-legend-dot dkc-legend-makeup"></span> Makeup Class` : ""}
+        <div class="dkc-legend"><span class="dkc-legend-dot"></span> ${esc(tt.classMeets)}
+          ${sets.makeup.size ? `<span class="dkc-legend-dot dkc-legend-makeup"></span> ${esc(tt.makeupClass)}` : ""}
         </div>
         <div class="dkc-months">${monthsHTML}</div>
         ${pointersHTML(model)}
@@ -301,6 +389,12 @@
   // Parent Pointers start on a fresh page at the end.
   async function generatePDF(model, opts) {
     opts = opts || {};
+    // Translate content into the requested language (pointers machine-translated,
+    // labels from the dictionary) before laying out the PDF.
+    if (opts.lang && opts.lang !== "en" && (!model || model.lang !== opts.lang)) {
+      model = await localizeModel(model, opts.lang);
+    }
+    const tt = t(model);
     const jsPDF = await loadJsPDF();
     const brand = resolveBranding(model.branding);
     const sets = computeMeetingSets(model);
@@ -365,11 +459,11 @@
     doc.circle(M + 6, cursorY + 4, 5, "S");
     doc.setFont("helvetica", "normal"); doc.setFontSize(10);
     doc.setTextColor(60, 60, 60);
-    doc.text("Class Meets", M + 18, cursorY + 7);
+    doc.text(tt.classMeets, M + 18, cursorY + 7);
     if (sets.makeup.size) {
       doc.setFillColor(accent[0], accent[1], accent[2]);
       doc.circle(M + 110, cursorY + 4, 5, "F");
-      doc.text("Makeup Class", M + 122, cursorY + 7);
+      doc.text(tt.makeupClass, M + 122, cursorY + 7);
     }
     cursorY += 24;
 
@@ -384,11 +478,11 @@
     const drawMonth = (x, y, year, month) => {
       doc.setTextColor(primary[0], primary[1], primary[2]);
       doc.setFont("helvetica", "bold"); doc.setFontSize(11);
-      doc.text(`${MONTH_LONG[month]} ${year}`, x + colW / 2, y + 10, { align: "center" });
+      doc.text(`${capFirst(tt.monthLong[month])} ${year}`, x + colW / 2, y + 10, { align: "center" });
       // weekday header
       doc.setFontSize(7.5); doc.setTextColor(120, 120, 120);
       for (let i = 0; i < 7; i++) {
-        doc.text(WEEKDAY_INIT[i], x + cellW * i + cellW / 2, y + 24, { align: "center" });
+        doc.text(tt.weekdayInit[i], x + cellW * i + cellW / 2, y + 24, { align: "center" });
       }
       // day cells
       const gridTop = y + 30;
@@ -442,7 +536,7 @@
       let py = M;
       doc.setTextColor(primary[0], primary[1], primary[2]);
       doc.setFont("helvetica", "bold"); doc.setFontSize(18);
-      doc.text("Parent Pointers", PW / 2, py + 10, { align: "center" });
+      doc.text(tt.parentPointers, PW / 2, py + 10, { align: "center" });
       py += 22;
       doc.setDrawColor(accent[0], accent[1], accent[2]); doc.setLineWidth(1.2);
       doc.line(PW / 2 - 40, py, PW / 2 + 40, py);
@@ -489,6 +583,7 @@
     resolveBranding, seasonTitle, scheduleLine, locationName, fullAddress,
     computeMeetingSets, monthsBetween,
     renderPreviewHTML, monthGridHTML, pointersHTML,
-    generatePDF
+    generatePDF,
+    localizeModel, translateText, I18N
   };
 })();

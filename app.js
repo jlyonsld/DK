@@ -1291,6 +1291,7 @@
       if (saved && typeof saved === "object") {
         if (!state.calState.semesterId && saved.semesterId) state.calState.semesterId = saved.semesterId;
         if (!state.calState.classId && saved.classId) state.calState.classId = saved.classId;
+        if (!state.calState.lang && saved.lang) state.calState.lang = saved.lang;
       }
     } catch (_) { /* localStorage unavailable — ignore */ }
   }
@@ -1298,8 +1299,22 @@
     try {
       localStorage.setItem("dk_calState", JSON.stringify({
         semesterId: state.calState.semesterId, classId: state.calState.classId,
+        lang: state.calState.lang || "en",
       }));
     } catch (_) { /* ignore */ }
+  }
+
+  // Swap the admin calendar preview to Spanish (async: machine-translates the
+  // pointer text, localizes the fixed labels) when ES is selected. English is
+  // already rendered synchronously, so this just replaces it when needed.
+  function applyCalPreviewLang(classId, semId) {
+    if ((state.calState.lang || "en") !== "es") return;
+    const m = (classId && semId) ? buildCalendarModel(classId, semId) : null;
+    if (!m || !window.DKCalendar) return;
+    window.DKCalendar.localizeModel(m, "es").then((lm) => {
+      const el = document.getElementById("calPreview");
+      if (el) el.innerHTML = window.DKCalendar.renderPreviewHTML(lm);
+    }).catch(() => {});
   }
 
   function renderCalendarsTab() {
@@ -1374,6 +1389,7 @@
           <button class="btn ghost small" id="calCopyLink" title="Copy the parent calendar link">🔗 Parent link</button>
           ${canEdit ? `<button class="btn ghost small" id="calEditPointers" title="Edit parent pointers / policies">📝 Pointers</button>` : ""}
           ${canEdit ? `<button class="btn ghost small" id="calEditBranding" title="Edit studio branding">🎨 Branding</button>` : ""}
+          <button class="btn ghost small" id="calLangToggle" title="Preview the family calendar in English or Spanish">🌐 ${(state.calState.lang === "es") ? "English" : "Español"}</button>
           <button class="btn primary small" id="calDownloadPdf" ${model ? "" : "disabled"}>⬇ PDF</button>
         </div>
       </div>
@@ -1409,10 +1425,19 @@
       const m = buildCalendarModel(classId, semId);
       if (!m) return;
       dl.disabled = true; const o = dl.textContent; dl.textContent = "Building…";
-      try { await window.DKCalendar.generatePDF(m); }
+      try { await window.DKCalendar.generatePDF(m, { lang: state.calState.lang || "en" }); }
       catch (err) { showToast("PDF failed: " + (err.message || err), "error"); }
       finally { dl.disabled = false; dl.textContent = o; }
     };
+    const langTgl = document.getElementById("calLangToggle");
+    if (langTgl) langTgl.onclick = () => {
+      state.calState.lang = (state.calState.lang === "es") ? "en" : "es";
+      saveCalState();
+      renderCalendarsTab();
+    };
+    // Family calendar preview is rendered in English above; swap to Spanish
+    // (machine-translated pointers + localized labels) when that's selected.
+    applyCalPreviewLang(classId, semId);
 
     if (canEdit && classId && semId) renderCalEditor(classId, semId);
   }
@@ -1574,6 +1599,7 @@
       .concat(newRows);
     const prev = document.getElementById("calPreview");
     if (prev && window.DKCalendar) prev.innerHTML = window.DKCalendar.renderPreviewHTML(buildCalendarModel(classId, semId));
+    applyCalPreviewLang(classId, semId);
     calEditorDirty = false;
     if (!opts || !opts.quiet) setCalSaveStatus("saved");
   }
