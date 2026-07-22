@@ -506,7 +506,25 @@
     btn.classList.add("copied");
     setTimeout(() => { btn.textContent = o; btn.classList.remove("copied"); }, 1300);
   }
-  function showLoader(on) { $("#loader").classList.toggle("visible", !!on); }
+  let _loaderWatchdog = null;
+  function showLoader(on) {
+    const el = document.getElementById("loader");
+    if (el) el.classList.toggle("visible", !!on);
+    // Safety net: many flows do showLoader(true) … await … showLoader(false)
+    // without a try/finally, so if an awaited call throws in between, the
+    // false never runs and the overlay traps the whole screen behind the
+    // spinner forever. Force-clear after 12s so the UI can never get stuck.
+    clearTimeout(_loaderWatchdog);
+    if (on) {
+      _loaderWatchdog = setTimeout(() => {
+        const l = document.getElementById("loader");
+        if (l && l.classList.contains("visible")) {
+          l.classList.remove("visible");
+          try { showToast("That took longer than expected — please try again.", "error"); } catch (_) {}
+        }
+      }, 12000);
+    }
+  }
 
   async function copyText(text) {
     try { await navigator.clipboard.writeText(text); return true; }
@@ -718,9 +736,38 @@
     });
   }
 
+  let _realtimePending = false;
+  let _realtimeModalWatch = null;
+  // A data-entry modal is open (branding / pointers / semester / student / …).
+  // The mobile tools drawer uses .mobile-tools-overlay, so it's excluded here
+  // on purpose — it holds no unsaved input.
+  function anyEditModalOpen() {
+    return !!document.querySelector(".modal-overlay.open");
+  }
   function scheduleRealtimeReload() {
     clearTimeout(realtimeReloadTimer);
     realtimeReloadTimer = setTimeout(async () => {
+      // Never tear down a modal the user is mid-edit in. If one is open, mark
+      // the reload pending and flush it the moment every modal is closed — so
+      // background changes still land (the UI stays live) but never mid-edit,
+      // which is what was closing Sharon's Parent Pointers modal and wiping
+      // her unsaved typing.
+      if (anyEditModalOpen()) {
+        _realtimePending = true;
+        if (!_realtimeModalWatch) {
+          _realtimeModalWatch = setInterval(async () => {
+            if (anyEditModalOpen()) return;
+            clearInterval(_realtimeModalWatch);
+            _realtimeModalWatch = null;
+            if (_realtimePending) {
+              _realtimePending = false;
+              try { await reloadAll(); renderAll(); }
+              catch (e) { console.warn("[realtime] deferred flush failed:", e); }
+            }
+          }, 400);
+        }
+        return;
+      }
       await reloadAll();
       renderAll();
     }, 300);
