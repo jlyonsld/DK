@@ -1605,7 +1605,7 @@
     if (prefillBtn) prefillBtn.onclick = () => prefillCalendarFromClass(classId);
     document.getElementById("calAddExc").onclick = () => addScheduleException(classId, semId);
     const excCopyBtn = document.getElementById("calExcCopyBtn");
-    if (excCopyBtn) excCopyBtn.onclick = () => copyExceptionsFromCalendar(semId);
+    if (excCopyBtn) excCopyBtn.onclick = () => copyExceptionsFromCalendar(semId, classId);
     document.getElementById("calOpenPointers").onclick = () => openPointersModal(classId);
     panel.querySelectorAll(".cal-exc-del").forEach((b) => {
       b.onclick = () => deleteScheduleException(b.dataset.exc);
@@ -1746,14 +1746,17 @@
     await reloadAll(); renderAll();
   }
 
-  // Pull every holiday/makeup date from one chosen calendar into the calendar
-  // currently being edited. Preserves each row's date, kind, label and scope
-  // (all-classes stays all-classes; class-specific keeps its class — class IDs
-  // are stable across calendars). Non-destructive: exact date+kind+scope rows
-  // already on this calendar are skipped, so it's safe to run twice.
-  async function copyExceptionsFromCalendar(targetSemId) {
+  // Pull the holiday/makeup DATES from one chosen calendar onto the class
+  // currently being edited. Every exception in this system is class-scoped, and
+  // the editor only shows the selected class's dates — so we re-home the copied
+  // dates onto THIS class (not the source's class), otherwise they'd land under
+  // a different class and stay invisible here. Dates are de-duplicated by
+  // date+kind (a source calendar can carry the same date for several classes),
+  // and any already on this class are skipped, so it's safe to run twice.
+  async function copyExceptionsFromCalendar(targetSemId, targetClassId) {
     if (!hasPerm("edit_classes")) { showToast("You can't edit calendars", "error"); return; }
     if (!targetSemId) { showToast("Select a calendar to copy into first", "error"); return; }
+    if (!targetClassId) { showToast("Select a class to copy the dates onto first", "error"); return; }
     const sel = document.getElementById("calExcCopyFrom");
     const srcSemId = sel && sel.value;
     if (!srcSemId) { showToast("Pick a calendar to copy from", "error"); return; }
@@ -1763,17 +1766,26 @@
     const srcExcs = state.scheduleExceptions.filter((x) => x.semester_id === srcSemId);
     if (!srcExcs.length) { showToast(`“${srcName}” has no holidays or makeups to copy`, "error"); return; }
 
-    // Skip exact duplicates already on the target calendar (date + kind + scope).
-    const key = (x) => `${String(x.date).slice(0, 10)}|${x.kind}|${x.class_id || ""}`;
+    // Collapse the source's dates by date+kind (drop its class scoping).
+    const dedup = new Map();
+    srcExcs.forEach((x) => {
+      const d = String(x.date).slice(0, 10);
+      const k = `${d}|${x.kind}`;
+      if (!dedup.has(k)) dedup.set(k, { date: d, kind: x.kind, label: x.label || null });
+    });
+    // Skip dates already on THIS class (date + kind).
     const existing = new Set(
-      state.scheduleExceptions.filter((x) => x.semester_id === targetSemId).map(key)
+      state.scheduleExceptions
+        .filter((x) => x.semester_id === targetSemId && x.class_id === targetClassId)
+        .map((x) => `${String(x.date).slice(0, 10)}|${x.kind}`)
     );
-    const rows = srcExcs
-      .filter((x) => !existing.has(key(x)))
-      .map((x) => ({ semester_id: targetSemId, class_id: x.class_id, date: x.date, kind: x.kind, label: x.label }));
+    const rows = [];
+    dedup.forEach((v, k) => {
+      if (!existing.has(k)) rows.push({ semester_id: targetSemId, class_id: targetClassId, date: v.date, kind: v.kind, label: v.label });
+    });
 
     if (!rows.length) {
-      showToast(`All ${srcExcs.length} date${srcExcs.length === 1 ? "" : "s"} from “${srcName}” are already here — nothing to copy`, "success");
+      showToast(`Those dates from “${srcName}” are already on this class — nothing to copy`, "success");
       return;
     }
 
@@ -1782,8 +1794,8 @@
       const r = await sb.from("schedule_exceptions").insert(rows);
       if (r.error) throw r.error;
       await reloadAll(); renderAll();
-      const skipped = srcExcs.length - rows.length;
-      showToast(`Copied ${rows.length} date${rows.length === 1 ? "" : "s"} from “${srcName}”${skipped ? ` · skipped ${skipped} already here` : ""}`, "success");
+      const skipped = dedup.size - rows.length;
+      showToast(`Copied ${rows.length} date${rows.length === 1 ? "" : "s"} from “${srcName}” onto this class${skipped ? ` · skipped ${skipped} already here` : ""}`, "success");
     } catch (e) {
       showToast("Copy failed: " + (e.message || e), "error");
     } finally {
