@@ -15196,7 +15196,9 @@ Drama Kids`;
     bind("cancelSemesterBtn", closeSemesterModal);
     bind("saveSemesterBtn", saveSemester);
     bind("deleteSemesterBtn", deleteSemester);
-    $("#semesterModalOverlay").onclick = (e) => { if (e.target.id === "semesterModalOverlay") closeSemesterModal(); };
+    // Editing modal: only Save / Cancel / ✕ close it. A click outside does
+    // nothing, so a stray click (or a text-selection drag that releases on the
+    // backdrop) can never discard in-progress work.
     bind("pointersModalClose", closePointersModal);
     bind("cancelPointersBtn", closePointersModal);
     bind("savePointersBtn", savePointers);
@@ -15209,11 +15211,11 @@ Drama Kids`;
     });
     const ppScope = $("#pointersScopeSel");
     if (ppScope) ppScope.onchange = (e) => { commitPointersDraftFromDOM(); state._pointersScope = e.target.value; loadPointersDraft(); renderPointersModal(); };
-    $("#pointersModalOverlay").onclick = (e) => { if (e.target.id === "pointersModalOverlay") closePointersModal(); };
+    // Pointers editor: outside-click does NOT close — Save / Cancel / ✕ only.
     bind("brandingModalClose", closeBrandingModal);
     bind("cancelBrandingBtn", closeBrandingModal);
     bind("saveBrandingBtn", saveBranding);
-    $("#brandingModalOverlay").onclick = (e) => { if (e.target.id === "brandingModalOverlay") closeBrandingModal(); };
+    // Branding editor: outside-click does NOT close — Save / Cancel / ✕ only.
 
     // Month-view rows-per-cell depends on the viewport breakpoint, so re-render
     // the schedule when the window crosses it (debounced) to keep the
