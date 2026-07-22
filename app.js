@@ -1537,6 +1537,17 @@
         <button class="btn ghost small cal-exc-del" data-exc="${escapeHtml(x.id)}" title="Remove">✕</button>
       </div>`).join("") : `<div class="muted" style="padding:6px 0;font-size:13px">No holidays or makeups yet.</div>`;
 
+    // Other calendars that actually have holidays/makeups, for the "Copy from"
+    // dropdown — pulls one calendar's exception dates into this one.
+    const copySources = state.semesters
+      .filter((s) => s.id !== semId && state.scheduleExceptions.some((x) => x.semester_id === s.id))
+      .slice()
+      .sort((a, b) => ((a.name || "") < (b.name || "") ? 1 : -1));
+    const copyOptsHTML = copySources.map((s) => {
+      const n = state.scheduleExceptions.filter((x) => x.semester_id === s.id).length;
+      return `<option value="${escapeHtml(s.id)}">${escapeHtml(s.name)} (${n})</option>`;
+    }).join("");
+
     panel.innerHTML = `
       <div class="cal-ed-section">
         <div class="cal-ed-title">Meeting pattern</div>
@@ -1572,6 +1583,15 @@
           </select>
           <button class="btn small" id="calAddExc">Add</button>
         </div>
+        ${copySources.length ? `
+        <div class="cal-exc-copy" style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <span class="muted" style="font-size:13px">Copy from</span>
+          <select id="calExcCopyFrom" class="cal-select" title="Pull the holiday &amp; makeup dates from another calendar into this one">
+            <option value="">Choose a calendar…</option>
+            ${copyOptsHTML}
+          </select>
+          <button class="btn ghost small" id="calExcCopyBtn" title="Copy that calendar's holiday &amp; makeup dates into this one (skips duplicates)">⧉ Copy dates</button>
+        </div>` : ""}
       </div>
 
       <div class="cal-ed-section">
@@ -1584,6 +1604,8 @@
     const prefillBtn = document.getElementById("calPrefill");
     if (prefillBtn) prefillBtn.onclick = () => prefillCalendarFromClass(classId);
     document.getElementById("calAddExc").onclick = () => addScheduleException(classId, semId);
+    const excCopyBtn = document.getElementById("calExcCopyBtn");
+    if (excCopyBtn) excCopyBtn.onclick = () => copyExceptionsFromCalendar(semId);
     document.getElementById("calOpenPointers").onclick = () => openPointersModal(classId);
     panel.querySelectorAll(".cal-exc-del").forEach((b) => {
       b.onclick = () => deleteScheduleException(b.dataset.exc);
@@ -1722,6 +1744,51 @@
     const resp = await sb.from("schedule_exceptions").delete().eq("id", id);
     if (resp.error) { showToast(resp.error.message, "error"); return; }
     await reloadAll(); renderAll();
+  }
+
+  // Pull every holiday/makeup date from one chosen calendar into the calendar
+  // currently being edited. Preserves each row's date, kind, label and scope
+  // (all-classes stays all-classes; class-specific keeps its class — class IDs
+  // are stable across calendars). Non-destructive: exact date+kind+scope rows
+  // already on this calendar are skipped, so it's safe to run twice.
+  async function copyExceptionsFromCalendar(targetSemId) {
+    if (!hasPerm("edit_classes")) { showToast("You can't edit calendars", "error"); return; }
+    if (!targetSemId) { showToast("Select a calendar to copy into first", "error"); return; }
+    const sel = document.getElementById("calExcCopyFrom");
+    const srcSemId = sel && sel.value;
+    if (!srcSemId) { showToast("Pick a calendar to copy from", "error"); return; }
+    if (srcSemId === targetSemId) { showToast("That's the calendar you're editing — pick a different one", "error"); return; }
+    const srcSem = state.semesters.find((s) => s.id === srcSemId);
+    const srcName = (srcSem && srcSem.name) || "that calendar";
+    const srcExcs = state.scheduleExceptions.filter((x) => x.semester_id === srcSemId);
+    if (!srcExcs.length) { showToast(`“${srcName}” has no holidays or makeups to copy`, "error"); return; }
+
+    // Skip exact duplicates already on the target calendar (date + kind + scope).
+    const key = (x) => `${String(x.date).slice(0, 10)}|${x.kind}|${x.class_id || ""}`;
+    const existing = new Set(
+      state.scheduleExceptions.filter((x) => x.semester_id === targetSemId).map(key)
+    );
+    const rows = srcExcs
+      .filter((x) => !existing.has(key(x)))
+      .map((x) => ({ semester_id: targetSemId, class_id: x.class_id, date: x.date, kind: x.kind, label: x.label }));
+
+    if (!rows.length) {
+      showToast(`All ${srcExcs.length} date${srcExcs.length === 1 ? "" : "s"} from “${srcName}” are already here — nothing to copy`, "success");
+      return;
+    }
+
+    showLoader(true);
+    try {
+      const r = await sb.from("schedule_exceptions").insert(rows);
+      if (r.error) throw r.error;
+      await reloadAll(); renderAll();
+      const skipped = srcExcs.length - rows.length;
+      showToast(`Copied ${rows.length} date${rows.length === 1 ? "" : "s"} from “${srcName}”${skipped ? ` · skipped ${skipped} already here` : ""}`, "success");
+    } catch (e) {
+      showToast("Copy failed: " + (e.message || e), "error");
+    } finally {
+      showLoader(false);
+    }
   }
 
   async function toggleSemesterPublish(semId) {
